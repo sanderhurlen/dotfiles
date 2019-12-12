@@ -1,7 +1,8 @@
-if test ! $(which spoof)
-then
-  if test $(which npm)
+# check if node is installed
+if ! test $(which node)
   then
-    sudo npm install spoof -g
-  fi
+    echo "[NODE] Installing node from brew"
+    brew install node
+    echo "[NODE] Preparing to install .npm-global folder in ~"
+    zsh npm_global.sh
 fi
