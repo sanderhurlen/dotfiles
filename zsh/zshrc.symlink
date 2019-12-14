@@ -1,6 +1,9 @@
 # shortcut to this dotfiles path is $ZSH
 export ZSH=$HOME/.dotfiles
 
+#remove the irritating % at start of a new terminal session
+unsetopt PROMPT_SP;
+
 #use starship (from brew) as default prompt
 eval "$(starship init zsh)"
 
