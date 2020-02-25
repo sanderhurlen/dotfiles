@@ -1,5 +1,5 @@
 alias reload!='. ~/.zshrc'
-alias bootstrap='cd ~/.dotfiles; script/bootstrap'
+alias reinstall="cd ~/.dotfiles; script/bootstrap"
 
 alias cls='clear' # Good 'ol Clear Screen command
 
@@ -19,3 +19,7 @@ alias python="python3";
 # Web server alias
 export LOCAL_IP=`ipconfig getifaddr en0`;
 alias serve="browser-sync start -s -f . --no-notify --host $LOCAL_IP --port 8889";
+
+# aliases to most visited dir
+alias projects="cd ${HOME}/GitHub; ls"
+alias playground="cd ${HOME}/Playground; ls"

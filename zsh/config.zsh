@@ -5,9 +5,16 @@ fpath=($ZSH/functions $fpath)
 
 autoload -U $ZSH/functions/*(:t)
 
+# modify history
 HISTFILE=~/.zsh_history
 HISTSIZE=100
 SAVEHIST=100
+
+#remove the irritating % at start of a new terminal session
+unsetopt PROMPT_SP;
+
+# enables you to type the directory name you want to switch to
+setopt AUTO_CD
 
 # setopt NO_BG_NICE # don't nice background tasks
 # setopt NO_HUP

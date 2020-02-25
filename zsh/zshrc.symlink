@@ -1,18 +1,8 @@
 # shortcut to this dotfiles path is $ZSH
 export ZSH=$HOME/.dotfiles
 
-#remove the irritating % at start of a new terminal session
-unsetopt PROMPT_SP;
-
 #use starship (from brew) as default prompt
 eval "$(starship init zsh)"
-
-# your project folder that we can `c [tab]` to
-export PROJECTS=~/Github
-
-# aliases to most visited dir
-alias projects="cd ${HOME}/GitHub; ls"
-alias playground="cd ${HOME}/Playground; ls"
 
 # Stash your environment variables in ~/.localrc. This means they'll stay out
 # of your main dotfiles repository (which may be public, like this one), but
