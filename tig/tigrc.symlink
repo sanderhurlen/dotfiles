@@ -1,1 +1,4 @@
 bind main ! !?git revert %(commit)
+
+bind status a !?git commit --amend
+bind status w !?git push origin
