@@ -38,3 +38,6 @@
 	process = git-lfs filter-process
 	required = true
 	clean = git-lfs clean -- %f
+[user]
+	name = Sander Hurlen
+	email = sander.hurlen@icloud.com
