@@ -65,4 +65,17 @@ cask 'font-source-code-pro'
 cask 'font-source-sans-pro'
 cask 'font-nunito'
 
+# common
+mas 'Keynote', id: 409183694
+mas 'Numbers', id: 409203825
+mas 'Pages', id: 409201541
 
+# private 
+mas 'Spark', id: 1176895641
+mas 'Things', id: 904280696
+mas 'Affinity Photo', id: 824183456
+mas 'Affinity Designer', id: 824171161
+mas 'Grocery', id: 1195676848
+
+# work specific
+mas 'Outlook', id: 985367838
