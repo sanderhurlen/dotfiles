@@ -1,6 +1,6 @@
 # ~~holman~~ *hurlen* does dotfiles
 
-Your dotfiles are how you personalize your system. These are mine.
+"Your dotfiles are how you personalize your system. These are mine.
 
 I was a little tired of having long alias files and everything strewn about
 (which is extremely common on other dotfiles projects, too). That led to this
@@ -10,8 +10,7 @@ structured the project accordingly.
 
 If you're interested in the philosophy behind why projects like these are
 awesome, you might want to [read my post on the
-subject](http://zachholman.com/2010/08/dotfiles-are-meant-to-be-forked/).
-- holman
+subject](http://zachholman.com/2010/08/dotfiles-are-meant-to-be-forked/)." - holman
 
 After using holman's dotfile setup, I have retinkered some of the things I think should be done better. This is how I approach my dotfiles now.
 
