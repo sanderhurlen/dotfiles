@@ -6,5 +6,36 @@ set -e
 
 cd "$(dirname $0)"/..
 
+# Run Homebrew installation through the Brewfile
+echo "> brew bundle"
+
+PS3='Which environment do you want to install packages for? '
+options=("Private" "Work" "Private + Work")
+select opt in "${options[@]}"
+do
+    case $opt in
+        "Private")
+            echo "> Installing for only $opt use"
+            brew bundle
+            brew bundle --file=./Brewfile.private
+            break
+            ;;
+        "Work")
+            echo "> Installing for only $opt use"
+            brew bundle
+            brew bundle --file=./Brewfile.work
+            break
+            ;;
+        "Private + Work")
+            echo "> Installing for $opt use"
+            brew bundle
+            brew bundle --file=./Brewfile.private
+            brew bundle --file=./Brewfile.work
+            break
+            ;;
+        *) echo "invalid option. try again";;
+    esac
+done
+
 # find the installers and run them iteratively
 find . -name install.sh | while read installer ; do sh -c "${installer}" ; done
