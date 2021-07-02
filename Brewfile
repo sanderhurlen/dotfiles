@@ -33,6 +33,7 @@ brew 'deno'
 brew 'maven'
 brew 'gradle'
 brew 'docker'
+brew 'kotlin'
 
 # applications
 cask 'visual-studio-code'
