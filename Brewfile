@@ -64,6 +64,7 @@ cask 'font-roboto'
 cask 'font-source-code-pro'
 cask 'font-source-sans-pro'
 cask 'font-nunito'
+cask 'font-fira-code'
 
 # common
 mas 'Keynote', id: 409183694
