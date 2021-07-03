@@ -154,3 +154,12 @@ fi
 
 echo ''
 echo '  All installed!'
+
+echo ''
+echo ''
+echo '  Enjoy your newly bootstrapped device!'
+echo '  some steps to get you started, is:'
+echo ''
+echo '  1. set up github ssh keys with gh'
+echo '  2. set up github commit verified device'
+echo '  3. set up alfred, vscode and karabiner prefs'
