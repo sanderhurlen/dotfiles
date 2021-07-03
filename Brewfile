@@ -49,7 +49,6 @@ cask 'google-chrome'
 
 cask 'karabiner-elements'
 cask 'alfred'
-cask 'qlmarkdown'
 cask 'quicklook-json'
 
 # mac app store applications
