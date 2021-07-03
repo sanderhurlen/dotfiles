@@ -1,0 +1,1 @@
+export KUBECONFIG="/Users/$(whoami)/kubeconfigs/config"
