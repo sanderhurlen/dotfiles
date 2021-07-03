@@ -34,6 +34,7 @@ brew 'maven'
 brew 'gradle'
 brew 'docker'
 brew 'kotlin'
+brew 'gpg'
 
 # applications
 cask 'visual-studio-code'
