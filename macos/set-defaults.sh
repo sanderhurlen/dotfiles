@@ -100,20 +100,6 @@ defaults write com.apple.Safari InstallExtensionUpdatesAutomatically -bool true
 #    SPOTLIGHT
 ########################
 
-# Hide Spotlight tray-icon (and subsequent helper)
-#sudo chmod 600 /System/Library/CoreServices/Search.bundle/Contents/MacOS/Search
-# Disable Spotlight indexing for any volume that gets mounted and has not yet
-# been indexed before.
-# Use `sudo mdutil -i off "/Volumes/foo"` to stop indexing any volume.
-sudo defaults write /.Spotlight-V100/VolumeConfiguration Exclusions -array "/Volumes"
-# Change indexing order and disable some search results
-# Yosemite-specific search results (remove them if you are using macOS 10.9 or older):
-# 	MENU_DEFINITION
-# 	MENU_CONVERSION
-# 	MENU_EXPRESSION
-# 	MENU_SPOTLIGHT_SUGGESTIONS (send search queries to Apple)
-# 	MENU_WEBSEARCH             (send search queries to Apple)
-# 	MENU_OTHER
 defaults write com.apple.spotlight orderedItems -array \
 	'{"enabled" = 1;"name" = "APPLICATIONS";}' \
 	'{"enabled" = 1;"name" = "SYSTEM_PREFS";}' \
@@ -189,4 +175,4 @@ for app in "Calendar" \
 	"Terminal"; 
 	do killall "${app}" &> /dev/null
 done
-echo "Done. Note that some of these changes require a logout/restart to take effect."
+echo "Setting mac os defaults done. Note that some of these changes require a logout/restart to take effect."
