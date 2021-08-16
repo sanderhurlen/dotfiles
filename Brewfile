@@ -66,6 +66,7 @@ cask 'font-fira-code-nerd-font'
 mas 'Keynote', id: 409183694
 mas 'Numbers', id: 409203825
 mas 'Pages', id: 409201541
+mas 'Magnet', id: 441258766
 
 # private 
 # mas 'Spark', id: 1176895641
