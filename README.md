@@ -15,6 +15,7 @@ subject](http://zachholman.com/2010/08/dotfiles-are-meant-to-be-forked/)." - hol
 After using holman's dotfile setup, I have retinkered some of the things I think should be done better. This is how I approach my dotfiles now.
 
 ## Brewfile FTW
+
 `brew bundle` is fantastic. I use it to install everything I need on my machine. For instance all my brews, casks, mas (mac app store) and fonts are installed via the `brew bundle` command after homebrew is installed. Then I can utilize holmans topical approach to customize the different packages!
 
 ## topical

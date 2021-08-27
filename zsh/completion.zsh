@@ -5,4 +5,4 @@ zstyle ':completion:*' matcher-list 'm:{a-z}={A-Z}'
 zstyle ':completion:*' insert-tab pending
 
 # your project folder that we can `c [tab]` to
-export PROJECTS=~/Github
+export PROJECTS=~/Projects
