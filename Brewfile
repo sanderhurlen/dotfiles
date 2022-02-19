@@ -13,7 +13,6 @@ brew 'vim'
 brew 'curl'
 brew 'nmap'
 brew 'gh'
-brew 'tig'
 brew 'jq'
 brew 'tree'
 brew 'wifi-password'
@@ -22,18 +21,17 @@ brew 'autojump'
 
 # to configure the prompt
 brew 'starship'
-brew 'zsh-autosuggestions'
 brew 'zsh-syntax-highlighting'
 brew 'zsh-completions'
 
 # programming languages or utilities
 brew 'git'
-brew 'node'
-brew 'deno'
+brew 'nvm'
+# brew 'deno'
 brew 'maven'
-brew 'gradle'
-brew 'docker'
-brew 'kotlin'
+# brew 'gradle'
+# brew 'docker'
+# brew 'kotlin'
 brew 'gpg'
 
 # applications
@@ -49,7 +47,6 @@ cask 'iterm2'
 
 cask 'karabiner-elements'
 cask 'alfred'
-cask 'quicklook-json'
 
 # fonts
 cask 'font-lato'
@@ -64,8 +61,8 @@ cask 'font-fira-code-nerd-font'
 # mac app store applications
 # common
 mas 'Keynote', id: 409183694
-mas 'Numbers', id: 409203825
-mas 'Pages', id: 409201541
+# mas 'Numbers', id: 409203825
+# mas 'Pages', id: 409201541
 mas 'Magnet', id: 441258766
 
 # private 
