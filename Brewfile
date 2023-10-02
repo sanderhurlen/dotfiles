@@ -36,8 +36,6 @@ brew 'gpg'
 
 # applications
 cask 'visual-studio-code'
-cask 'typora'
-cask 'iterm2'
 # cask 'slack'
 # cask 'zoom'
 # cask 'spotify'
@@ -46,7 +44,6 @@ cask 'iterm2'
 # cask 'google-chrome'
 
 cask 'karabiner-elements'
-cask 'alfred'
 
 # fonts
 cask 'font-lato'
@@ -66,11 +63,7 @@ mas 'Keynote', id: 409183694
 mas 'Magnet', id: 441258766
 
 # private 
-# mas 'Spark', id: 1176895641
-# mas 'Things', id: 904280696
-# mas 'Affinity Photo', id: 824183456
-# mas 'Affinity Designer', id: 824171161
-# mas 'Grocery', id: 1195676848
+mas 'Things', id: 904280696
 
 # work specific
 # mas 'Outlook', id: 985367838

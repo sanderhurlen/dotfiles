@@ -1,0 +1,5 @@
+#!/bin/zsh
+# Murder a port
+murk() {
+    sudo -S kill -9 `sudo lsof -t -i:$1`
+}
