@@ -1,7 +1,6 @@
 cask_args appdir: '/Applications'
 
 # configure taps
-tap 'homebrew/cask'
 tap 'homebrew/cask-fonts'
 
 # configure something..?
@@ -40,7 +39,6 @@ cask 'raycast'
 cask 'karabiner-elements'
 
 # fonts
-cask 'menlo'
 cask 'font-source-code-pro'
 cask 'font-source-sans-pro'
 cask 'font-fira-code'
