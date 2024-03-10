@@ -13,11 +13,8 @@ brew 'vim'
 brew 'curl'
 brew 'nmap'
 brew 'gh'
-brew 'jq'
 brew 'tree'
-brew 'wifi-password'
 brew 'tldr'
-brew 'autojump'
 
 # to configure the prompt
 brew 'starship'
@@ -27,43 +24,33 @@ brew 'zsh-completions'
 # programming languages or utilities
 brew 'git'
 brew 'nvm'
-# brew 'deno'
-brew 'maven'
-# brew 'gradle'
-# brew 'docker'
-# brew 'kotlin'
-brew 'gpg'
+
+# docker utils
+brew 'docker'
+brew 'colima' # docker, kubectl, etc daemon starter
+
 
 # applications
 cask 'visual-studio-code'
-# cask 'slack'
-# cask 'zoom'
-# cask 'spotify'
-# cask 'microsoft-teams'
-# cask 'discord'
-# cask 'google-chrome'
+cask 'spotify'
+cask 'discord'
+cask 'google-chrome'
+cask 'slack'
 
 cask 'karabiner-elements'
 
 # fonts
-cask 'font-lato'
-cask 'font-open-sans'
-cask 'font-roboto'
+cask 'menlo'
 cask 'font-source-code-pro'
 cask 'font-source-sans-pro'
-cask 'font-nunito'
 cask 'font-fira-code'
 cask 'font-fira-code-nerd-font'
 
 # mac app store applications
-# common
 mas 'Keynote', id: 409183694
-# mas 'Numbers', id: 409203825
-# mas 'Pages', id: 409201541
+mas 'Numbers', id: 409203825
+mas 'Pages', id: 409201541
 mas 'Magnet', id: 441258766
 
 # private 
 mas 'Things', id: 904280696
-
-# work specific
-# mas 'Outlook', id: 985367838
