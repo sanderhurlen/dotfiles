@@ -36,7 +36,7 @@ cask 'spotify'
 cask 'discord'
 cask 'google-chrome'
 cask 'slack'
-
+cask 'raycast'
 cask 'karabiner-elements'
 
 # fonts
