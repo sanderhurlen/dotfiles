@@ -40,22 +40,16 @@ done
 
 export ZSH=$HOME/.dotfiles
 
-# Set macOS defaults
-$ZSH/macos/set-defaults.sh
-
 # Install homebrew
 $ZSH/homebrew/install.sh 2>&1
 
-if test ! $(which brew)
-then
-	# Upgrade homebrew
-	echo "› brew update"
-	brew update
+# Upgrade homebrew
+echo "› brew update"
+brew update
 
 # Install software
 echo "› $ZSH/script/install"
 $ZSH/script/install
 
-else
-	echo "Missing brew. Script failed"
-fi
+# Set macOS defaults
+$ZSH/macos/set-defaults.sh
