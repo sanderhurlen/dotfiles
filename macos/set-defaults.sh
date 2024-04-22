@@ -83,6 +83,7 @@ defaults write com.apple.dock minimize-to-application -bool true
 defaults write com.apple.dock show-recents -bool false
 
 
+
 ########################
 #    SPOTLIGHT
 ########################

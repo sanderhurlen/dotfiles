@@ -46,10 +46,16 @@ $ZSH/macos/set-defaults.sh
 # Install homebrew
 $ZSH/homebrew/install.sh 2>&1
 
-# Upgrade homebrew
-echo "› brew update"
-brew update
+if test ! $(which brew)
+then
+	# Upgrade homebrew
+	echo "› brew update"
+	brew update
 
 # Install software
 echo "› $ZSH/script/install"
 $ZSH/script/install
+
+else
+	echo "Missing brew. Script failed"
+fi
