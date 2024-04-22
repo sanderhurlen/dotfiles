@@ -48,9 +48,6 @@ zle -N down-line-or-beginning-search
 bindkey "^[[A" up-line-or-beginning-search # Up
 bindkey "^[[B" down-line-or-beginning-search # Down
 
-if [[ -v starship ]]
-then
-  eval "$(starship init zsh)"
-fi
+eval "$(starship init zsh)"
 
 export JAVA_HOME=`/usr/libexec/java_home -v 17`
