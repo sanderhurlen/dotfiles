@@ -2,7 +2,6 @@ tap "homebrew/bundle"
 tap "homebrew/cask-fonts"
 brew "colima"
 brew "curl"
-brew "docker"
 brew "gh"
 brew "git"
 brew "mas"
@@ -14,6 +13,7 @@ brew "tree"
 brew "vim"
 brew "zsh-completions"
 brew "zsh-syntax-highlighting"
+cask "docker", args: { appdir: "/Applications" }
 cask "discord", args: { appdir: "/Applications" }
 cask "font-fira-code", args: { appdir: "/Applications" }
 cask "font-fira-code-nerd-font", args: { appdir: "/Applications" }

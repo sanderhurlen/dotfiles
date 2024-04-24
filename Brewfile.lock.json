@@ -648,6 +648,15 @@
           },
           "full_name": "visual-studio-code"
         }
+      },
+      "docker": {
+        "version": "4.29.0,145265",
+        "options": {
+          "args": {
+            "appdir": "/Applications"
+          },
+          "full_name": "docker"
+        }
       }
     },
     "mas": {
