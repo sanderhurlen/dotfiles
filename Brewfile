@@ -22,13 +22,6 @@ cask "karabiner-elements", args: { appdir: "/Applications" }
 cask "raycast", args: { appdir: "/Applications" }
 cask "slack", args: { appdir: "/Applications" }
 cask "visual-studio-code", args: { appdir: "/Applications" }
-mas "Book Tracker", id: 1496543317
-mas "Flow", id: 1423210932
-mas "Journey", id: 1489704689
-mas "Keynote", id: 409183694
-mas "Mahjong Solitaire Epic", id: 687208243
-mas "Numbers", id: 409203825
-mas "Pages", id: 409201541
 vscode "alefragnani.project-manager"
 vscode "dbaeumer.vscode-eslint"
 vscode "eamodio.gitlens"
