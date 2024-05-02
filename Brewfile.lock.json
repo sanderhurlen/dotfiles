@@ -723,11 +723,11 @@
   "system": {
     "macos": {
       "sonoma": {
-        "HOMEBREW_VERSION": "4.2.19",
-        "HOMEBREW_PREFIX": "/usr/local",
+        "HOMEBREW_VERSION": "4.2.20",
+        "HOMEBREW_PREFIX": "/opt/homebrew",
         "Homebrew/homebrew-core": "api",
-        "CLT": "15.3.0.0.1.1708646388",
-        "Xcode": "15.1",
+        "CLT": "14.3.1.0.1.1683849156",
+        "Xcode": "14.3",
         "macOS": "14.4.1"
       },
       "ventura": {
