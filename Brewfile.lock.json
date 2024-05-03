@@ -5,7 +5,7 @@
         "revision": "fbccc15d60ff1160eacf00128b3d9226f7c78945"
       },
       "homebrew/cask-fonts": {
-        "revision": "6d3fdecc4fd53e3267b450b77707a91a0d19a4c5"
+        "revision": "caaebf6ca91ea5b0f9ebbc3e1294a486d40a3734"
       }
     },
     "brew": {
@@ -641,7 +641,7 @@
         }
       },
       "visual-studio-code": {
-        "version": "1.88.1",
+        "version": "1.89.0",
         "options": {
           "args": {
             "appdir": "/Applications"
