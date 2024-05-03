@@ -11,7 +11,6 @@ brew "starship"
 brew "tldr"
 brew "tree"
 brew "vim"
-brew "nix"
 brew "zsh-completions"
 brew "zsh-syntax-highlighting"
 cask "docker", args: { appdir: "/Applications" }
