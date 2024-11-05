@@ -40,4 +40,11 @@
 	clean = git-lfs clean -- %f
 [user]
 	name = Sander Hurlen
-	email = sander.hurlen@icloud.com
+	email = sander.olsen@aboveit.no
+[url "ssh://git@bitbucket.org/"]
+	insteadOf = https://bitbucket.org/
+[includeIf "gitdir:~/mymo"]
+  path = .gitconfig-local
+[includeIf "gitdir:~/bookingsystem"]
+  path = .gitconfig-local
+	
