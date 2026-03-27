@@ -14,5 +14,5 @@ alias l.='ls -d .*' # display all contents starting with .
 alias ll='ls -l'
 
 # aliases to most visited dir
-alias projects="cd ${HOME}/GitHub; ls"
+alias work="cd ${HOME}/visense; ls"
 alias playground="cd ${HOME}/Playground; ls"
