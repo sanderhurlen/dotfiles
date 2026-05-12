@@ -49,3 +49,11 @@ bindkey "^[[A" up-line-or-beginning-search # Up
 bindkey "^[[B" down-line-or-beginning-search # Down
 
 eval "$(starship init zsh)"
+
+# pnpm
+export PNPM_HOME="/Users/hurl1/Library/pnpm"
+case ":$PATH:" in
+  *":$PNPM_HOME:"*) ;;
+  *) export PATH="$PNPM_HOME:$PATH" ;;
+esac
+# pnpm end

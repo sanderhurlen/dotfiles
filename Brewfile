@@ -1,6 +1,7 @@
 brew "curl"
 brew "gh"
 brew "git"
+brew "mise"
 brew "nmap"
 brew "nvm"
 brew "pnpm"
