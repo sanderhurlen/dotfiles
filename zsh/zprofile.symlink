@@ -1,0 +1,5 @@
+# mise activation for login shells (e.g. VS Code integrated terminal on macOS)
+if command -v mise >/dev/null 2>&1
+then
+  eval "$(mise activate zsh)"
+fi
