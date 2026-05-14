@@ -146,6 +146,12 @@ defaults write com.apple.SoftwareUpdate AutomaticDownload -int 1
 defaults write com.apple.commerce AutoUpdate -bool true
 
 ########################
+#    SCREENSHOTS
+########################
+
+defaults write com.apple.screencapture location -string "${HOME}/Downloads"
+
+########################
 #    THE END
 ########################
 
