@@ -1,1 +1,4 @@
 git/gitconfig.local.symlink
+__pycache__/
+claude/skills/mail/config.json
+claude/skills/mail/.token.json

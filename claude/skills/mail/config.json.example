@@ -1,0 +1,7 @@
+{
+  "tenantId": "<fyll inn>",
+  "clientId": "<fyll inn>",
+  "mailbox": "<fyll inn>",
+  "vault": "<fyll inn>",
+  "secretName": "<fyll inn>"
+}

@@ -1,0 +1,8 @@
+{
+  "skill_name": "ideate",
+  "evals": [
+    {"id": 1, "prompt": "Jeg vil idémyldre ny funksjonalitet for Innsikt (vis-innsikt) – eiendomsoppslag for forsikring. Hva kan vi bygge neste?", "expected_output": "Grounded in the repo, framing + HMW, 15-30 grouped ideas incl. wild ones, shortlist with impact/effort, concepts with cheapest test, next steps. Norwegian.", "files": []},
+    {"id": 2, "prompt": "our code review process is slow, PRs sit for 2-3 days before anyone looks at them. brainstorm ways to fix it", "expected_output": "Root-cause framing, varied ideas (process, tooling, automation, culture), shortlist mixing quick wins and bets.", "files": []},
+    {"id": 3, "prompt": "Hvordan kan vi gjøre onboarding av nye skadesaneringsfirma i Logit enklere? Gi meg noen ideer", "expected_output": "Ideas on onboarding, concrete, prioritized, Norwegian.", "files": []}
+  ]
+}
