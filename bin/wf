@@ -583,11 +583,37 @@ def repo_name():
     return os.path.basename(os.path.dirname(common) if common.endswith("/.git") else top)
 
 
+def approve_imports():
+    # skip the "allow external CLAUDE.md imports?" dialog; worktrees share the main repo's entry
+    r = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                       capture_output=True, text=True)
+    if r.returncode:
+        return
+    root = os.path.dirname(r.stdout.strip())
+    path = os.path.expanduser("~/.claude.json")
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return
+    proj = cfg.setdefault("projects", {}).setdefault(root, {})
+    if proj.get("hasClaudeMdExternalIncludesApproved") and proj.get("hasTrustDialogAccepted"):
+        return
+    proj.update(hasTrustDialogAccepted=True, hasClaudeMdExternalIncludesApproved=True,
+                hasClaudeMdExternalIncludesWarningShown=True)
+    tmp = f"{path}.wf-{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(cfg, f, indent=2)
+    os.replace(tmp, path)
+
+
 def launch(cmd, dry):
+    cmd = cmd[:1] + ["--dangerously-skip-permissions"] + cmd[1:]
     print(dim("$ " + " ".join(shlex.quote(x) for x in cmd)))
     if dry:
         return
-    if cmd[1] == "--bg":
+    approve_imports()
+    if "--bg" in cmd:
         subprocess.run(cmd, check=False)
     else:
         os.execvp(cmd[0], cmd)
@@ -607,7 +633,7 @@ def cmd_go(a):
     prompt = f"/wayfinder Work through the map {ref(m)}. Ticket: {ref(t)} — \"{t.title}\"."
     cmd = ["claude"]
     if a.bg or (afk and not a.interactive):
-        cmd += ["--bg", "-n", f"wf-{m.id}-{t.id}", "--permission-mode", "acceptEdits"]
+        cmd += ["--bg", "-n", f"wf-{m.id}-{t.id}"]
     launch(cmd + [prompt], a.dry_run)
 
 
@@ -649,7 +675,7 @@ def run_one(t, a, repo, who):
         T().claim(t, who)
     cmd = ["claude"]
     if not interactive:
-        cmd += ["--bg", "--permission-mode", "acceptEdits"]
+        cmd += ["--bg"]
     cmd += ["-w", f"t{t.id}", "-n", f"{repo}-{t.id}", implement_prompt(t)]
     launch(cmd, a.dry_run)
 
