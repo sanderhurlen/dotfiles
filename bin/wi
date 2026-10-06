@@ -1,0 +1,591 @@
+#!/usr/bin/env python3
+#
+# wi — query Azure DevOps work items from the shell, the same way every time.
+#
+# Shares tracker, auth, rendering and `show` with wf (bin/wf), so output looks
+# the same. ADO only: org/project from this repo's origin, else `az devops
+# configure` defaults.
+#
+# Type:
+#
+#   wi                       my open items
+#   wi ls [filters] [text]   query: -s state -t type -a who -g tag -u under -I iteration
+#   wi sprint [-a who]       current iteration, grouped by state
+#   wi tree 8698             item and its children, recursively
+#   wi show 8700             one work item: body, links, comments (= wf show)
+#   wi q "<WIQL where>"      raw WIQL condition, same listing
+#   wi ask "<fritekst>"      Claude writes the WIQL (printed as a `wi q` line), runs
+#                            it, and answers when it's a question
+#   wi open 8700             open in browser
+#   wi help                  explained (Norwegian)
+#
+# Deterministic: same filters, same WIQL, same order (state, then id).
+# WF_ORG / WF_PROJECT override the project, WI_TEAM the team (sprint/@me).
+# --wiql prints the query instead of running it.
+
+import argparse
+import datetime
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+_here = os.path.dirname(os.path.realpath(__file__))
+_loader = importlib.machinery.SourceFileLoader("wf", os.path.join(_here, "wf"))
+_spec = importlib.util.spec_from_loader("wf", _loader)
+wf = importlib.util.module_from_spec(_spec)
+_loader.exec_module(wf)
+
+from_wf = ("bold", "dim", "cyan", "green", "yellow", "red", "state_c", "DONE", "CHILD", "PARENT", "TTY")
+globals().update({k: getattr(wf, k) for k in from_wf})
+
+ORDER = {"New": 0, "To Do": 0, "Proposed": 0, "Approved": 1, "Committed": 2, "Active": 3,
+         "In Progress": 3, "Doing": 3, "Resolved": 4, "Done": 5, "Closed": 5, "Removed": 6}
+LIMIT = 200
+
+
+def die(msg):
+    print(f"wi: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+_ado = None
+
+
+def A():
+    global _ado
+    if _ado is None:
+        _ado = wf.Ado(wf.sh("git", "remote", "get-url", "origin"))
+        wf._tracker = _ado  # wf.get/many/show read through the same tracker and cache
+    return _ado
+
+
+def team():
+    if os.environ.get("WI_TEAM"):
+        return os.environ["WI_TEAM"]
+    p = A().api(f"projects/{urllib.parse.quote(A().project)}")
+    return p.get("defaultTeam", {}).get("name") or f"{A().project} Team"
+
+
+# ── query ───────────────────────────────────────────────────────────────────
+
+
+def q(s):
+    return "'" + s.replace("'", "''") + "'"
+
+
+def who(s):
+    return "@Me" if s in ("me", "@me") else q(s)
+
+
+def where(a):
+    """Filters → WIQL conditions. Every list command goes through here."""
+    c = ["[System.TeamProject] = @project"]
+    if a.state:
+        c.append("[System.State] IN (" + ", ".join(q(s) for s in a.state) + ")")
+    elif not a.all:
+        c.append("[System.State] NOT IN (" + ", ".join(q(s) for s in sorted(DONE)) + ")")
+    if a.type:
+        c.append("[System.WorkItemType] IN (" + ", ".join(q(t) for t in a.type) + ")")
+    if a.assignee == "none":
+        c.append("[System.AssignedTo] = ''")
+    elif a.assignee:
+        c.append(f"[System.AssignedTo] = {who(a.assignee)}")
+    for t in a.tag or []:
+        c.append(f"[System.Tags] CONTAINS {q(t)}")
+    if a.under:
+        c.append(f"[System.AreaPath] UNDER {q(a.under)}")
+    if a.iteration:
+        c.append("[System.IterationPath] = " + ("@CurrentIteration" if a.iteration == "current"
+                                                 else f"UNDER {q(a.iteration)}"))
+    if a.changed:
+        c.append(f"[System.ChangedDate] >= @Today - {a.changed}")
+    if a.text:
+        t = q(" ".join(a.text))
+        c.append(f"([System.Title] CONTAINS {t} OR [System.Description] CONTAINS WORDS {t})")
+    return c
+
+
+def wiql(conds, order=None):
+    return ("SELECT [System.Id] FROM WorkItems WHERE " + " AND ".join(conds)
+            + " ORDER BY " + (order or "[System.Id]"))
+
+
+LONG_TEXT = {"System.Description", "System.History", "Microsoft.VSTS.Common.AcceptanceCriteria",
+             "Microsoft.VSTS.TCM.ReproSteps", "Microsoft.VSTS.TCM.SystemInfo"}
+EMPTY = re.compile(r"(?i)\[([\w.]+)\]\s*(?:(is\s*not\s*empty|isnotempty|<>\s*'')|(is\s*empty|isempty|=\s*''))")
+
+
+def normalize(cond):
+    """Empty checks in the form ADO accepts for that field: IS [NOT] EMPTY on long text,
+    = '' / <> '' elsewhere. Tags can't be tested for empty in WIQL at all, so that test
+    becomes a no-op here and a filter afterwards. → (cond, untagged: None|True|False)"""
+    untagged = None
+
+    def fix(m):
+        nonlocal untagged
+        field, empty = m.group(1), bool(m.group(3))
+        if field.lower() == "system.tags":
+            untagged = empty
+            return "[System.Id] > 0"
+        if field in LONG_TEXT:
+            return f"[{field}] IS {'' if empty else 'NOT '}EMPTY"
+        return f"[{field}] {'=' if empty else '<>'} ''"
+
+    return EMPTY.sub(fix, cond), untagged
+
+
+def execute(query, limit):
+    """WIQL → ids. Raises RuntimeError with ADO's message, so callers can retry or die."""
+    proj = urllib.parse.quote(A().project)
+    if "@currentiteration" in query.lower():
+        proj += "/" + urllib.parse.quote(team())
+    ids = [w["id"] for w in rest(f"wit/wiql?$top={limit}", {"query": query}, project=proj)["workItems"]]
+    if len(ids) >= limit:
+        print(dim(f"(first {limit} — narrow it, or --limit)"), file=sys.stderr)
+    return ids
+
+
+def items_of(ids, untagged=None, order=None):
+    items = wf.many(ids)
+    if untagged is not None:
+        items = [t for t in items if (not t.tags) == untagged]
+    if not order:
+        items.sort(key=lambda t: (ORDER.get(t.state, 3), t.id))
+    return items
+
+
+def run(query, a, untagged=None):
+    if a.wiql:
+        print(query)
+        sys.exit(0)
+    try:
+        ids = execute(query, a.limit)
+    except RuntimeError as e:
+        die(f"ADO avviste spørringen: {e}\n{dim(query)}")
+    return items_of(ids, untagged, getattr(a, "order", None))
+
+
+# ── ask ─────────────────────────────────────────────────────────────────────
+# Fritekst → Claude → WIQL → ADO. Claude sees the project's real types, states,
+# areas, iterations, people and tags (cached a day), so it names things that
+# exist. Empty checks are normalised (see normalize). ADO validates the query;
+# an error goes back to Claude, up to TRIES times. The query
+# is printed as a `wi q` line, so a good one can be rerun without Claude.
+
+CACHE = os.path.expanduser("~/.cache/wi")
+MODEL = os.environ.get("WI_MODEL", "haiku")
+TRIES = 3
+
+
+def rest(path, body=None, project=None, version="7.1"):
+    """Like Ado.api, but raises instead of exiting, so a bad WIQL can be retried."""
+    url = f"{A().org}/{project + '/' if project else ''}_apis/{path}"
+    url += ("&" if "?" in path else "?") + f"api-version={version}"
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method="POST" if data else "GET",
+                                 headers={"Authorization": f"Bearer {A().token()}",
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read()).get("message")
+        except ValueError:
+            msg = None
+        raise RuntimeError(msg or f"HTTP {e.code}")
+
+
+def context(fresh=False):
+    """What exists in the project — the vocabulary Claude may use."""
+    path = os.path.join(CACHE, re.sub(r"\W+", "_", A().where) + ".json")
+    try:
+        if not fresh and time.time() - os.path.getmtime(path) < 86400:
+            with open(path) as f:
+                return json.load(f)
+    except OSError:
+        pass
+    p, tm = urllib.parse.quote(A().project), team()
+
+    def paths(node, prefix=""):
+        here = prefix + node["name"]
+        return [here] + [x for c in node.get("children", []) for x in paths(c, here + "\\")]
+
+    people = {}
+    for t in rest(f"projects/{p}/teams")["value"]:
+        for m in rest(f"projects/{p}/teams/{urllib.parse.quote(t['name'])}/members")["value"]:
+            people[m["identity"]["uniqueName"]] = m["identity"]["displayName"]
+    its = rest("work/teamsettings/iterations", project=f"{p}/{urllib.parse.quote(tm)}")["value"]
+    ctx = {
+        "team": tm,
+        "types": {t["name"]: [s["name"] for s in t.get("states", [])]
+                  for t in rest("wit/workitemtypes", project=p)["value"] if not t.get("isDisabled")},
+        "areas": paths(rest("wit/classificationnodes/areas?$depth=3", project=p)),
+        "iterations": {i["path"]: f"{(i['attributes'].get('startDate') or '')[:10]}.."
+                                  f"{(i['attributes'].get('finishDate') or '')[:10]}" for i in its[-30:]},
+        "people": dict(sorted(people.items())),
+        "tags": sorted(t["name"] for t in rest("wit/tags", project=p, version="7.1-preview.1")["value"]),
+    }
+    os.makedirs(CACHE, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(ctx, f)
+    return ctx
+
+
+def claude(system, prompt, schema=None, model=MODEL):
+    cmd = ["claude", "-p", "--model", model, "--tools", "", "--no-session-persistence",
+           "--setting-sources", "", "--output-format", "json", "--system-prompt", system]
+    if schema:
+        cmd += ["--json-schema", json.dumps(schema)]
+    if TTY:
+        print(dim("… claude"), end="\r", file=sys.stderr, flush=True)
+    r = subprocess.run(cmd, input=prompt, capture_output=True, text=True)
+    if TTY:
+        print("         ", end="\r", file=sys.stderr, flush=True)
+    try:
+        out = json.loads(r.stdout)
+    except ValueError:
+        die(f"claude: {(r.stderr or r.stdout).strip()[:400]}")
+    if out.get("is_error"):
+        die(f"claude: {out.get('result')}")
+    return out.get("structured_output") if schema else (out.get("result") or "").strip()
+
+
+QUERY = {
+    "type": "object",
+    "properties": {
+        "where": {"type": "string", "description": "WIQL conditions only, the part after WHERE"},
+        "order": {"type": "string", "description": "ORDER BY clause without the keywords, or empty"},
+        "answer": {"type": "boolean", "description": "true if the user asks something the list alone doesn't answer"},
+    },
+    "required": ["where", "order", "answer"],
+}
+
+ASK_SYSTEM = """\
+You turn a request about Azure DevOps work items into WIQL for project {project}.
+
+where: only the conditions after WHERE. [System.TeamProject] = @project is added for you.
+  Fields: [System.Id] [System.Title] [System.State] [System.WorkItemType] [System.AssignedTo]
+  [System.CreatedBy] [System.ChangedBy] [System.CreatedDate] [System.ChangedDate] [System.Tags]
+  [System.AreaPath] [System.IterationPath] [System.Description] [System.Parent]
+  [Microsoft.VSTS.Common.Priority] [Microsoft.VSTS.Common.ClosedDate]
+  [Microsoft.VSTS.Common.StateChangeDate] [Microsoft.VSTS.Common.AcceptanceCriteria]
+  Macros: @Me, @Today, @Today - N, @StartOfWeek, @StartOfMonth, @CurrentIteration (team {team}).
+  Text: [System.Title] CONTAINS 'x' OR [System.Description] CONTAINS WORDS 'x'.
+  Tags: [System.Tags] CONTAINS 'tag' (only tags from the list). Areas/iterations: UNDER 'path'.
+  People: [System.AssignedTo] = 'email', picked from the list; @Me for the user; '' for unassigned.
+  Empty: [System.Description] / [Microsoft.VSTS.Common.AcceptanceCriteria] IS EMPTY / IS NOT EMPTY;
+  every other field = '' / <> ''. "No tags": [System.Tags] = ''.
+  Someone not in the list: [System.AssignedTo] CONTAINS 'their name'. Never return an empty where.
+  Unless the request is about finished work or history, exclude done states:
+  [System.State] NOT IN ('Done', 'Closed', 'Removed', 'Resolved').
+  Use only types, states, areas, iterations, people and tags that exist below.
+order: e.g. [System.ChangedDate] DESC, or "" for by id.
+answer: true for questions (how many, who, which is oldest, is X done, summarise);
+  false when they just want the items listed.
+
+Today: {today}. The user: {me}. Their words may be Norwegian.
+Types and states: {types}
+Areas: {areas}
+Iterations (path: dates — use the path only; the current one is @CurrentIteration): {iterations}
+People (email: name — always use the email): {people}
+Tags: {tags}
+"""
+
+ANSWER_SYSTEM = """\
+Answer the user's question about Azure DevOps work items, using only the result of the query
+below. The user already sees the items listed, so don't repeat them — give the answer
+itself (a number, a name, a judgement), in one to three lines. Same language as the
+question, no preamble; cite ids only where they add something. If the result
+can't answer it, say so and what query would. Plain text, no markdown headers."""
+
+
+def dq(s):
+    """Shell-quote, preferring double quotes — WIQL is full of single ones."""
+    return f'"{s}"' if not re.search(r'["$`!]', s) else shlex.quote(s)
+
+
+def cmd_ask(a):
+    question = " ".join(a.question)
+    ctx = context(a.refresh)
+    system = ASK_SYSTEM.format(project=A().project, today=datetime.date.today().isoformat(),
+                               me=A().me(), **{k: v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+                                               for k, v in ctx.items()})
+    prompt, proj = question, A().project
+    errors = []
+    for attempt in range(1, TRIES + 1):
+        qy = claude(system, prompt, QUERY, a.model)
+        where_ = qy["where"].strip()
+        where_ = re.sub(r"(?is)^.*?\bWHERE\b|\bORDER\s+BY\b.*$", "", where_).strip() if \
+            re.search(r"(?i)^\s*SELECT\b", where_) else where_
+        if not where_:
+            die("Claude fant ingen spørring — omformuler, eller prøv -m sonnet")
+        said = where_  # wi q normalises too, so the rerun line keeps e.g. the tag test
+        where_, untagged = normalize(where_)
+        order = qy.get("order", "").strip() or None
+        query = wiql(["[System.TeamProject] = @project", f"({where_})"], order)
+        rerun = "wi q -A " + dq(said) + (" -O " + dq(order) if order else "")
+        print(dim("$ " + rerun), file=sys.stderr)
+        if a.wiql:
+            return print(query)
+        try:
+            ids = execute(query, a.limit)
+            break
+        except RuntimeError as e:
+            errors.append((said, str(e).strip()))
+            if attempt == TRIES:
+                die(f"ADO avviste spørringen {TRIES} ganger: {e}\nprøv -m sonnet, eller skriv den selv med `wi q`")
+            print(dim(f"ADO: {str(e).strip()} — prøver igjen ({attempt}/{TRIES - 1})"), file=sys.stderr)
+            prompt = question + "\n\nADO rejected these where clauses, don't repeat them:\n" + "\n".join(
+                f"- {w}\n  error: {err}" for w, err in errors) + "\nWrite one that ADO accepts."
+    items = items_of(ids, untagged, order)
+    listing(items, a.group)
+    if not (qy.get("answer") or a.answer) or a.list:
+        return
+    rows = "\n".join(f"{t.id} | {t.type} | {t.state} | {t.assignee or '-'} | {', '.join(t.tags) or '-'} | {t.title}"
+                     for t in items)
+    more = f"\n(truncated at {a.limit})" if len(ids) >= a.limit else ""
+    print("\n" + claude(ANSWER_SYSTEM, f"Question: {question}\n\nWIQL: {query}\n\n"
+                                       f"{len(items)} item(s): id | type | state | assignee | tags | title\n"
+                                       f"{rows}{more}", model=a.model))
+
+
+# ── rendering ───────────────────────────────────────────────────────────────
+
+
+def short(t):
+    return {"Product Backlog Item": "PBI", "User Story": "Story"}.get(t, t)
+
+
+def line(t, indent="  "):
+    who = f" @{t.assignee.split('@')[0]}" if t.assignee else ""
+    tags = f" [{', '.join(t.tags)}]" if t.tags else ""
+    return (f"{indent}{cyan(f'{t.id:>5}')} {dim(f'{short(t.type):<7}')} {state_c(f'{t.state:<11}')} "
+            f"{t.title}{dim(who)}{dim(tags)}")
+
+
+def listing(items, group=False):
+    if not items:
+        return print(dim("ingen treff"))
+    if not group:
+        for t in items:
+            print(line(t))
+        return print(dim(f"{len(items)} item(s)"))
+    groups = {}
+    for t in items:
+        groups.setdefault(t.state, []).append(t)
+    for s, ts in groups.items():
+        print(state_c(bold(f"{s} ({len(ts)})")))
+        for t in ts:
+            print(line(t))
+
+
+# ── commands ────────────────────────────────────────────────────────────────
+
+
+def cmd_ls(a):
+    listing(run(wiql(where(a)), a), a.group)
+
+
+def cmd_mine(a):
+    a.assignee = a.assignee or "@me"
+    cmd_ls(a)
+
+
+def cmd_sprint(a):
+    a.iteration = "current"
+    a.group = True
+    cmd_ls(a)
+
+
+def cmd_q(a):
+    a.text = None
+    cond, untagged = normalize(" ".join(a.cond))
+    listing(run(wiql(where(a) + [f"({cond})"], a.order), a, untagged), a.group)
+
+
+def cmd_tree(a):
+    root = wf.get(a.id)
+    parents = wf.many(root.links(PARENT))
+    for p in parents:
+        print(dim(f"↑ {p.id} {p.title}"))
+
+    def walk(t, depth, seen):
+        if t.done and not a.all and depth:
+            return
+        print(line(t, "  " * (depth + 1)))
+        if t.id in seen or (a.depth is not None and depth >= a.depth):
+            return
+        kids = wf.many(t.links(CHILD))
+        wf.fetch([k for c in kids for k in c.links(CHILD)])
+        for c in sorted(kids, key=lambda k: (ORDER.get(k.state, 3), k.id)):
+            walk(c, depth + 1, seen | {t.id})
+
+    walk(root, 0, set())
+
+
+def cmd_show(a):
+    A()
+    wf.cmd_show(a)
+
+
+def cmd_open(a):
+    subprocess.run(["open", wf.get(a.id).url])
+
+
+GUIDE = """\
+{b}wi — work items i Azure DevOps fra terminalen{r}
+
+{b}PROSJEKT{r}  {where}  {d}(team: {team}){r}
+  Fra `git remote get-url origin` (dev.azure.com), ellers `az devops configure -l`.
+  WF_ORG / WF_PROJECT overstyrer prosjekt, WI_TEAM team (brukes av sprint/@CurrentIteration).
+
+{b}KOMMANDOER{r}
+
+  wi [mine] [filtre]      mine åpne items (= wi ls -a @me)
+  wi ls [filtre] [tekst]  søk. Tekst matcher tittel eller ord i beskrivelsen
+  wi sprint [filtre]      nåværende iterasjon for teamet, gruppert på state
+  wi tree <id> [-d N]     item + barn rekursivt (Done skjult, -A viser)
+  wi show <id> [-C]       full visning: body, kriterier, lenker, kommentarer (som wf show)
+  wi q "<WIQL>" [-O ord]  rå WIQL-betingelse + filtrene, f.eks. wi q "[System.CreatedBy] = @Me"
+  wi ask "<fritekst>"     Claude lager WIQL, viser den som en `wi q`-linje, kjører den, og
+                          svarer hvis det er et spørsmål. --wiql bare query · -l bare liste
+                          · -a svar alltid · -m modell · -r hent prosjektdata på nytt
+  wi open <id>            åpne i nettleser
+  wi help [kommando]      denne teksten, eller flaggene til én kommando
+
+{b}FILTRE{r}  {d}(ls, mine, sprint, q){r}
+
+  -s, --state S     state, kan gjentas         -s Doing -s New
+  -t, --type T      work item type, gjentas    -t Bug -t "Product Backlog Item"
+  -a, --assignee X  @me | none | e-post        -a none
+  -g, --tag T       tag, gjentas (alle må med) -g ready-for-agent
+  -u, --under P     area path UNDER            -u "Visense\\\\Logit"
+  -I, --iteration   current | path UNDER       -I current
+  -c, --changed N   endret siste N dager       -c 7
+  -A, --all         ta med Done/Closed/Removed/Resolved
+  -G, --group       grupper på state
+  -L, --limit N     maks antall (default {limit})
+  --wiql            skriv ut WIQL-en i stedet for å kjøre den
+
+{b}VERDT Å VITE{r}
+
+  · Bare lesing — wi endrer aldri noe. Endre med `az boards work-item update` eller wf.
+  · Sortering: state (ny → aktiv → ferdig), så id. Samme filtre gir alltid samme liste.
+  · Uten -s skjules ferdige states; med -s får du nøyaktig de du ber om.
+  · ask: Claude får prosjektets faktiske typer, states, områder, iterasjoner, folk og tags
+    (cache ~/.cache/wi, 1 døgn, -r frisker opp). ADO validerer; feil sendes tilbake, maks 3 forsøk.
+  · Tomt/ikke tomt (IsEmpty, = '' …) skrives om til formen ADO godtar per felt — også i q.
+    «Uten tags» går ikke i WIQL, så det filtreres etter spørringen.
+    Modell: WI_MODEL (default haiku, -m sonnet ved behov). Kopier `wi q`-linjen for å kjøre uten Claude.
+  · Auth: `az login` (eller azt main).
+"""
+
+
+def cmd_help(a, subs):
+    if a.topic:
+        if a.topic not in subs:
+            die(f"ukjent kommando: {a.topic}")
+        return subs[a.topic].print_help()
+    on = TTY
+    txt = GUIDE.format(b="\033[1m" if on else "", r="\033[0m" if on else "",
+                       d="\033[2m" if on else "", where=A().where, team=team(), limit=LIMIT)
+    if on and txt.count("\n") > os.get_terminal_size().lines:
+        subprocess.run(["less", "-RFX"], input=txt, text=True)
+    else:
+        print(txt)
+
+
+# ── cli ─────────────────────────────────────────────────────────────────────
+
+
+def filters(s, text=True):
+    s.add_argument("-s", "--state", action="append")
+    s.add_argument("-t", "--type", action="append")
+    s.add_argument("-a", "--assignee", help="@me | none | email")
+    s.add_argument("-g", "--tag", action="append")
+    s.add_argument("-u", "--under", help="area path")
+    s.add_argument("-I", "--iteration", help="current | iteration path")
+    s.add_argument("-c", "--changed", type=int, metavar="DAYS")
+    s.add_argument("-A", "--all", action="store_true", help="include done states")
+    s.add_argument("-G", "--group", action="store_true", help="group by state")
+    s.add_argument("-L", "--limit", type=int, default=LIMIT)
+    s.add_argument("--wiql", action="store_true", help="print the WIQL, don't run it")
+    if text:
+        s.add_argument("text", nargs="*")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="wi", description="query Azure DevOps work items")
+    sub = p.add_subparsers(dest="cmd")
+
+    s = sub.add_parser("mine", help="my open items")
+    filters(s)
+    s.set_defaults(fn=cmd_mine)
+
+    s = sub.add_parser("ls", help="query work items")
+    filters(s)
+    s.set_defaults(fn=cmd_ls)
+
+    s = sub.add_parser("sprint", help="current iteration, grouped by state")
+    filters(s)
+    s.set_defaults(fn=cmd_sprint)
+
+    s = sub.add_parser("q", help="raw WIQL condition")
+    filters(s, text=False)
+    s.add_argument("-O", "--order", help="ORDER BY clause, keeps WIQL order")
+    s.add_argument("cond", nargs="+")
+    s.set_defaults(fn=cmd_q)
+
+    s = sub.add_parser("ask", help="fritekst → Claude → WIQL → svar")
+    s.add_argument("question", nargs="+")
+    s.add_argument("-m", "--model", default=MODEL)
+    s.add_argument("-a", "--answer", action="store_true", help="always answer, not just list")
+    s.add_argument("-l", "--list", action="store_true", help="never answer, just list")
+    s.add_argument("-r", "--refresh", action="store_true", help="refetch project vocabulary")
+    s.add_argument("-G", "--group", action="store_true", help="group by state")
+    s.add_argument("-L", "--limit", type=int, default=LIMIT)
+    s.add_argument("--wiql", action="store_true", help="print the WIQL, don't run it")
+    s.set_defaults(fn=cmd_ask)
+
+    s = sub.add_parser("tree", help="item and its children")
+    s.add_argument("id", type=int)
+    s.add_argument("-d", "--depth", type=int)
+    s.add_argument("-A", "--all", action="store_true", help="include done children")
+    s.set_defaults(fn=cmd_tree)
+
+    s = sub.add_parser("show", help="one work item in full")
+    s.add_argument("id", type=int)
+    s.add_argument("-C", "--no-comments", action="store_true")
+    s.set_defaults(fn=cmd_show)
+
+    s = sub.add_parser("open", help="open in browser")
+    s.add_argument("id", type=int)
+    s.set_defaults(fn=cmd_open)
+
+    s = sub.add_parser("help", help="forklaring av kommandoer og filtre")
+    s.add_argument("topic", nargs="?")
+    s.set_defaults(fn=lambda a: cmd_help(a, sub.choices))
+
+    argv = sys.argv[1:]
+    if not argv or argv[0] not in sub.choices and argv[0] not in ("-h", "--help"):
+        argv = ["mine"] + argv
+    a = p.parse_args(argv)
+    A()
+    try:
+        a.fn(a)
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()

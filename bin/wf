@@ -13,6 +13,7 @@
 # Type:
 #
 #   wf                     open maps
+#   wf repos               open maps grouped by the repos their tickets touch
 #   wf map 8698            map overview: frontier, claimed, blocked, specs
 #   wf spec 8591           spec tickets: launchable, running, blocked
 #   wf show 8700           one work item: body, links, comments
@@ -105,10 +106,11 @@ def gh_repo_from(remote):
 
 class Item:
     def __init__(self, id, title, state, done, tags, assignee, description, url,
-                 rels, type="", criteria="", project=None):
+                 rels, type="", criteria="", project=None, repos=()):
         self.id, self.title, self.state, self.done = id, title, state, done
         self.tags, self.assignee, self.description, self.url = tags, assignee, description, url
         self.rels, self.type, self.criteria, self.project = rels, type, criteria, project
+        self.repos = set(repos)
 
     def links(self, rel):
         return sorted(t for r, t in self.rels if r == rel)
@@ -197,6 +199,9 @@ class Ado:
             criteria=f.get("Microsoft.VSTS.Common.AcceptanceCriteria") or "",
             url=f"{self.org}/{proj}/_workitems/edit/{raw['id']}",
             type=f.get("System.WorkItemType", ""), project=proj,
+            # commit/PR links: vstfs:///Git/Commit/<project>%2f<repo>%2f<sha>
+            repos=[urllib.parse.unquote(r["url"]).split("/Git/", 1)[1].split("/")[2]
+                   for r in raw.get("relations") or [] if r["url"].startswith("vstfs:///Git/")],
             rels=[(r["rel"], int(r["url"].rsplit("/", 1)[1]))
                   for r in raw.get("relations") or [] if "/workItems/" in r["url"]])
 
@@ -211,6 +216,10 @@ class Ado:
              "AND [System.Tags] CONTAINS 'wayfinder:map'"
              + ("" if all else " AND [System.State] <> 'Done'") + " ORDER BY [System.Id]")
         return [w["id"] for w in self.api("wit/wiql", {"query": q}, project=self.project)["workItems"]]
+
+    def repo_names(self):
+        """{repo id: name} for every git repo in the org."""
+        return {r["id"]: r["name"] for r in self.api("git/repositories")["value"]}
 
     def comments(self, item):
         res = self.api(f"wit/workItems/{item.id}/comments?order=asc", project=item.project)
@@ -289,6 +298,9 @@ class GitHub:
         out = sh("gh", "issue", "list", "-R", self.repo, "--label", "wayfinder:map", "--limit", "200",
                  "--state", "all" if all else "open", "--json", "number")
         return sorted(i["number"] for i in json.loads(out or "[]"))
+
+    def repo_names(self):
+        return {}
 
     def comments(self, item):
         q = """query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){
@@ -424,19 +436,61 @@ def print_group(name, items, color, extra=lambda t: ""):
 # ── commands ────────────────────────────────────────────────────────────────
 
 
+def map_line(m, indent=""):
+    kids = map_tickets(m)
+    done = sum(k.done for k in kids)
+    take, claimed, _ = classify(kids, need_ready=False)
+    stats = f"{done}/{len(kids)} done"
+    if take:
+        stats += f", {green(str(len(take)) + ' takeable')}"
+    if claimed:
+        stats += f", {yellow(str(len(claimed)) + ' claimed')}"
+    return f"{indent}{cyan(f"{m.id:>5}")} {state_c(f"{m.state:<5}")} {m.title}  {dim(stats)}"
+
+
+def no_maps(maps):
+    if not maps:
+        die(f"no maps in {T().name} · {T().where}"
+            " — wrong repo? set WF_PROJECT (or WF_REPO), or cd to a repo in the right project")
+
+
 def cmd_maps(a):
     maps = many(T().maps(a.all))
+    no_maps(maps)
     fetch([c for m in maps for c in m.links(CHILD)])
     for m in maps:
-        kids = map_tickets(m)
-        done = sum(k.done for k in kids)
-        take, claimed, _ = classify(kids, need_ready=False)
-        stats = f"{done}/{len(kids)} done"
-        if take:
-            stats += f", {green(str(len(take)) + ' takeable')}"
-        if claimed:
-            stats += f", {yellow(str(len(claimed)) + ' claimed')}"
-        print(f"{cyan(f"{m.id:>5}")} {state_c(f"{m.state:<5}")} {m.title}  {dim(stats)}")
+        print(map_line(m))
+
+
+def map_repos(m, names):
+    """Repos a map touches: commits/PRs linked from its tickets and its specs' tickets
+    (certain), else repo names mentioned in the map or its tickets (guessed)."""
+    items = [m] + map_tickets(m)
+    for s in map_specs(m):
+        items += [s] + many(s.links(CHILD))
+    linked = {names.get(r, r) for t in items for r in t.repos}
+    if linked:
+        return linked, False
+    blob = " ".join(text(t.title + " " + t.description) for t in items)
+    said = {n for n in names.values() if re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", blob)}
+    return said, True
+
+
+def cmd_repos(a):
+    maps = many(T().maps(a.all))
+    no_maps(maps)
+    fetch([c for m in maps for c in m.links(CHILD) + m.links(RELATED)])
+    fetch([c for m in maps for s in map_specs(m) for c in s.links(CHILD)])
+    names = T().repo_names()
+    groups = {}
+    for m in maps:
+        repos, guessed = map_repos(m, names)
+        for r in repos or ["(no repo yet)"]:
+            groups.setdefault(r, []).append((m, guessed))
+    for r in sorted(groups, key=lambda r: (r.startswith("("), r.lower())):
+        print(bold(r))
+        for m, guessed in groups[r]:
+            print(map_line(m, "  ") + (dim("  (mentioned)") if guessed else ""))
 
 
 def cmd_map(a):
@@ -668,6 +722,7 @@ GUIDE = """\
 {b}KOMMANDOER{r}
 
   wf [maps] [-a]          åpne kart (-a: også Done) med done/ledig/tatt
+  wf repos [-a]           åpne kart gruppert på repo (fra commit/PR-lenker, ellers nevnt i tekst)
   wf map <id>             mål, ledige/tatte/blokkerte tickets, tåke, specs
   wf spec <id>            klare / kjører / blokkert / done
   wf show <id> [-C]       full ticket: body, kriterier, lenker, kommentarer (-C: uten)
@@ -724,6 +779,10 @@ def main():
     s = sub.add_parser("maps", help="list wayfinder maps")
     s.add_argument("-a", "--all", action="store_true", help="include Done maps")
     s.set_defaults(fn=cmd_maps)
+
+    s = sub.add_parser("repos", help="open maps grouped by the repos they touch")
+    s.add_argument("-a", "--all", action="store_true", help="include Done maps")
+    s.set_defaults(fn=cmd_repos)
 
     for name, fn, h in (("map", cmd_map, "map overview"), ("spec", cmd_spec, "spec ticket status"),
                         ("next", cmd_next, "next takeable ticket id"), ("open", cmd_open, "open in browser")):
