@@ -1,0 +1,523 @@
+#!/usr/bin/env python3
+#
+# wp — Azure DevOps pipeline runs from the shell, and approve them with one key.
+#
+# Shares tracker and auth with wf (bin/wf). Org/project from this repo's origin,
+# else `az devops configure` defaults. Inside an ADO repo: that repo's runs only
+# (-A for the whole project).
+#
+# Type:
+#
+#   wp                       live list (TUI); space approves the selected run
+#   wp ls [filters]          same list, printed once
+#   wp approve 23536         approve every pending approval on run 23536
+#   wp open 23536            open run in browser
+#   wp help                  explained (Norwegian)
+#
+# Filters: -A all repos · -p pipeline · -b branch · -m mine · -w waiting · -n N
+# TUI: ↑↓/jk move · space approve · enter open · w waiting · a all repos · r refresh · q quit
+
+import argparse
+import concurrent.futures
+import curses
+import datetime
+import importlib.machinery
+import importlib.util
+import json
+import locale
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+_here = os.path.dirname(os.path.realpath(__file__))
+_loader = importlib.machinery.SourceFileLoader("wf", os.path.join(_here, "wf"))
+_spec = importlib.util.spec_from_loader("wf", _loader)
+wf = importlib.util.module_from_spec(_spec)
+_loader.exec_module(wf)
+
+from_wf = ("bold", "dim", "cyan", "green", "yellow", "red", "TTY")
+globals().update({k: getattr(wf, k) for k in from_wf})
+
+COUNT = 30
+REFRESH = 15  # seconds between TUI refreshes
+
+
+def die(msg):
+    print(f"wp: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+_ado = None
+
+
+def A():
+    global _ado
+    if _ado is None:
+        _ado = wf.Ado(wf.sh("git", "remote", "get-url", "origin"))
+    return _ado
+
+
+def rest(path, body=None, method=None):
+    """Project-scoped ADO call. Raises RuntimeError with ADO's message instead of exiting,
+    so the TUI can show it and carry on."""
+    url = f"{A().org}/{urllib.parse.quote(A().project)}/_apis/{path}"
+    url += ("&" if "?" in path else "?") + "api-version=7.1"
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method or ("POST" if data else "GET"),
+                                 headers={"Authorization": f"Bearer {A().token()}",
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read()).get("message")
+        except ValueError:
+            msg = None
+        raise RuntimeError(msg or f"HTTP {e.code}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(str(e.reason))
+
+
+# ── data ────────────────────────────────────────────────────────────────────
+
+
+class Run:
+    def __init__(self, raw):
+        self.id = raw["id"]
+        self.number = raw.get("buildNumber", "")
+        self.pipeline = raw["definition"]["name"]
+        self.status = raw.get("status")  # notStarted | inProgress | completed | cancelling
+        self.result = raw.get("result")  # succeeded | failed | canceled | partiallySucceeded
+        self.branch = (raw.get("sourceBranch") or "").replace("refs/heads/", "").replace("refs/pull/", "PR ")
+        self.branch = self.branch.removesuffix("/merge")
+        self.who = (raw.get("requestedFor") or {}).get("uniqueName", "").split("@")[0]
+        self.repo = (raw.get("repository") or {}).get("name", "")
+        self.queued = ts(raw.get("queueTime"))
+        self.started, self.finished = ts(raw.get("startTime")), ts(raw.get("finishTime"))
+        self.url = f"{A().org}/{urllib.parse.quote(A().project)}/_build/results?buildId={self.id}"
+        self.approvals = []  # pending approval ids
+        self.stages = []     # [(name, state)] from the timeline
+        self.waiting = []    # names of stages waiting for approval
+
+    @property
+    def state(self):
+        if self.approvals:
+            return "waiting"
+        if self.status == "completed":
+            return self.result or "completed"
+        return self.status
+
+
+def ts(s):
+    if not s:
+        return None
+    head, _, frac = s.rstrip("Z").partition(".")
+    return datetime.datetime.fromisoformat(f"{head}.{(frac + '000000')[:6]}+00:00")
+
+
+_repo_id = {}
+
+
+def repo_id(name):
+    if name not in _repo_id:
+        _repo_id[name] = rest(f"git/repositories/{urllib.parse.quote(name)}")["id"]
+    return _repo_id[name]
+
+
+def current_repo():
+    remote = wf.sh("git", "remote", "get-url", "origin")
+    return remote.rsplit("/_git/", 1)[1] if "/_git/" in remote else None
+
+
+def pending():
+    """{build id: [approval ids]} for every pending approval in the project."""
+    out = {}
+    for ap in rest("pipelines/approvals?state=pending")["value"]:
+        owner = (ap.get("pipeline") or {}).get("owner") or {}
+        if owner.get("id"):
+            out.setdefault(owner["id"], []).append(ap["id"])
+    return out
+
+
+_timelines = {}  # finished runs' timelines never change
+
+
+def timeline(run):
+    if run.id in _timelines:
+        return _timelines[run.id]
+    try:
+        recs = (rest(f"build/builds/{run.id}/timeline") or {}).get("records") or []
+    except RuntimeError:
+        recs = []
+    if run.status == "completed":
+        _timelines[run.id] = recs
+    return recs
+
+
+STAGE = {"succeeded": "ok", "succeededWithIssues": "warn", "failed": "fail", "canceled": "skip",
+         "skipped": "skip", "abandoned": "skip"}
+
+
+def stages(run):
+    recs = timeline(run)
+    by_id = {r["id"]: r for r in recs}
+    run.stages = [(r["name"], STAGE.get(r.get("result"), "fail") if r.get("state") == "completed"
+                   else "run" if r.get("state") == "inProgress" else "wait")
+                  for r in sorted((r for r in recs if r["type"] == "Stage"), key=lambda r: r.get("order") or 0)]
+    for aid in run.approvals:
+        cp = by_id.get(by_id.get(aid, {}).get("parentId"), {})
+        st = by_id.get(cp.get("parentId"))
+        if st:
+            run.waiting.append(st["name"])
+            run.stages = [(n, "approve" if n == st["name"] else s) for n, s in run.stages]
+
+
+def runs(a):
+    """Runs matching the filters, newest first, with approvals and stages filled in."""
+    q = {"queryOrder": "queueTimeDescending", "$top": a.count * (4 if a.pipeline else 1)}
+    if a.repo:
+        q.update(repositoryId=repo_id(a.repo), repositoryType="TfsGit")
+    if a.branch:
+        q["branchName"] = a.branch if a.branch.startswith("refs/") else f"refs/heads/{a.branch}"
+    if a.mine:
+        q["requestedFor"] = A().me()
+    waits = pending()
+    if a.waiting:
+        if not waits:
+            return []
+        q["buildIds"] = ",".join(str(i) for i in sorted(waits, reverse=True)[:200])
+    rs = [Run(r) for r in rest("build/builds?" + urllib.parse.urlencode(q))["value"]]
+    if a.pipeline:
+        rs = [r for r in rs if a.pipeline.lower() in r.pipeline.lower()]
+    rs = rs[:a.count]
+    for r in rs:
+        r.approvals = waits.get(r.id, [])
+    with concurrent.futures.ThreadPoolExecutor(8) as ex:
+        list(ex.map(stages, rs))
+    return rs
+
+
+def approve(run, comment=""):
+    if not run.approvals:
+        raise RuntimeError(f"{run.pipeline} {run.number} venter ikke på godkjenning")
+    res = rest("pipelines/approvals", [{"approvalId": i, "status": "approved", "comment": comment}
+                                       for i in run.approvals], method="PATCH")
+    bad = [x for x in res.get("value", []) if x.get("status") != "approved"]
+    if bad:
+        raise RuntimeError(f"{len(bad)} approval(s) ikke godkjent: {bad[0].get('status')}")
+    return run.waiting or ["?"]
+
+
+# ── rendering ───────────────────────────────────────────────────────────────
+
+ICON = {"succeeded": "✓", "failed": "✗", "canceled": "⊘", "partiallySucceeded": "!", "inProgress": "●",
+        "notStarted": "○", "cancelling": "⊘", "waiting": "⏸", "completed": "·"}
+CHIP = {"ok": "✓", "warn": "!", "fail": "✗", "skip": "-", "run": "●", "wait": "○", "approve": "⏸"}
+TONE = {"succeeded": "green", "ok": "green", "failed": "red", "fail": "red", "partiallySucceeded": "yellow",
+        "warn": "yellow", "inProgress": "cyan", "run": "cyan", "waiting": "yellow", "approve": "yellow"}
+
+
+def ago(t):
+    if not t:
+        return ""
+    s = int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds())
+    return f"{s // 60}m" if s < 3600 else f"{s // 3600}t" if s < 86400 else f"{s // 86400}d"
+
+
+def took(r):
+    if not r.started:
+        return ""
+    s = int(((r.finished or datetime.datetime.now(datetime.timezone.utc)) - r.started).total_seconds())
+    return f"{s // 60}:{s % 60:02d}" if s < 3600 else f"{s // 3600}t{s % 3600 // 60:02d}" if s < 86400 \
+        else f"{s // 86400}d"
+
+
+def short(name):
+    for p in ("Deploy to ", "Deploy ", "Build and "):
+        if name.startswith(p) and len(name) > len(p):
+            return name[len(p):]
+    return name
+
+
+def columns(rs):
+    """Fixed-width parts of a row: (icon tone, [(text, tone)]). Shared by ls and the TUI."""
+    wp_ = max([len(r.pipeline) for r in rs] + [8])
+    wb = min(max([len(r.branch) for r in rs] + [6]), 28)
+    rows = []
+    for r in rs:
+        parts = [(ICON.get(r.state, "?") + " ", TONE.get(r.state)), (f"{r.pipeline:<{wp_}}  ", "bold"),
+                 (f"{r.number:<12}", "dim"), (f"{r.branch[:wb]:<{wb}}  ", None)]
+        for n, s in r.stages if [n for n, _ in r.stages] != ["__default"] else []:
+            parts.append((CHIP[s] + short(n) + " ", TONE.get(s, "dim")))
+        parts.append((f" @{r.who} {ago(r.queued)} {took(r)}".rstrip(), "dim"))
+        rows.append(parts)
+    return rows
+
+
+def listing(rs):
+    if not rs:
+        return print(dim("ingen runs"))
+    paint = {"green": green, "red": red, "yellow": yellow, "cyan": cyan, "dim": dim, "bold": bold}
+    for parts in columns(rs):
+        print("".join(paint[t](s) if t else s for s, t in parts))
+    n = sum(1 for r in rs if r.approvals)
+    print(dim(f"{len(rs)} run(s)" + (f", {n} venter på godkjenning" if n else "")))
+
+
+# ── tui ─────────────────────────────────────────────────────────────────────
+
+
+def tui(scr, a):
+    curses.curs_set(0)
+    curses.use_default_colors()
+    pal = {}
+    for i, (name, col) in enumerate([("green", curses.COLOR_GREEN), ("red", curses.COLOR_RED),
+                                     ("yellow", curses.COLOR_YELLOW), ("cyan", curses.COLOR_CYAN)], 1):
+        curses.init_pair(i, col, -1)
+        pal[name] = curses.color_pair(i)
+    pal.update(dim=curses.A_DIM, bold=curses.A_BOLD)
+    sel, top, rs, msg, err, loaded = 0, 0, [], "", False, 0
+    scr.timeout(1000)
+
+    def load():
+        nonlocal rs, msg, err, loaded
+        scr.addstr(0, max(0, curses.COLS - 12), " henter … ", pal["dim"])
+        scr.refresh()
+        try:
+            rs = runs(a)
+        except RuntimeError as e:
+            msg, err = str(e), True
+        loaded = time.time()
+
+    load()
+    while True:
+        h, w = scr.getmaxyx()
+        scr.erase()
+        scope = a.repo or A().project
+        head = f" wp · {scope}" + (" · venter" if a.waiting else "") + (f" · {a.pipeline}" if a.pipeline else "") \
+               + (f" · {a.branch}" if a.branch else "") + (" · mine" if a.mine else "")
+        scr.addnstr(0, 0, head, w - 1, curses.A_BOLD)
+        body = h - 3
+        sel = max(0, min(sel, len(rs) - 1))
+        top = min(max(top, sel - body + 1), sel)
+        for y, (r, parts) in enumerate(list(zip(rs, columns(rs)))[top:top + body]):
+            x, row = 0, y + 1
+            hl = curses.A_REVERSE if top + y == sel else 0
+            for s, t in parts:
+                if x >= w - 1:
+                    break
+                scr.addnstr(row, x, s, w - 1 - x, pal.get(t, 0) | hl)
+                x += len(s)
+            if hl and x < w - 1:
+                scr.addnstr(row, x, " " * (w - 1 - x), w - 1 - x, hl)
+        if not rs:
+            scr.addnstr(2, 2, "ingen runs", w - 3, pal["dim"])
+        keys = "↑↓ flytt · space godkjenn · enter åpne · w venter · a alle repoer · r oppdater · q avslutt"
+        scr.addnstr(h - 1, 0, msg or keys, w - 1, (pal["red"] if err else pal["green"]) if msg else pal["dim"])
+        scr.refresh()
+
+        k = scr.getch()
+        if k != -1:
+            msg, err = "", False
+        if k in (ord("q"), 27):
+            return
+        elif k in (curses.KEY_DOWN, ord("j")):
+            sel += 1
+        elif k in (curses.KEY_UP, ord("k")):
+            sel -= 1
+        elif k in (curses.KEY_NPAGE, 4):
+            sel += body // 2
+        elif k in (curses.KEY_PPAGE, 21):
+            sel -= body // 2
+        elif k in (ord("g"), curses.KEY_HOME):
+            sel = 0
+        elif k in (ord("G"), curses.KEY_END):
+            sel = len(rs) - 1
+        elif k in (10, 13, curses.KEY_ENTER, ord("o")) and rs:
+            subprocess.run(["open", rs[sel].url])
+        elif k == ord(" ") and rs:
+            r = rs[sel]
+            try:
+                done = approve(r)
+                msg = f"✓ godkjent {r.pipeline} {r.number}: {', '.join(done)}"
+                load()
+            except RuntimeError as e:
+                msg, err = str(e), True
+        elif k == ord("w"):
+            a.waiting = not a.waiting
+            sel = top = 0
+            load()
+        elif k == ord("a") and a.home:
+            a.repo = None if a.repo else a.home
+            sel = top = 0
+            load()
+        elif k == ord("r") or time.time() - loaded > REFRESH:
+            load()
+
+
+# ── commands ────────────────────────────────────────────────────────────────
+
+
+def find(id):
+    try:
+        r = Run(rest(f"build/builds/{id}"))
+    except RuntimeError as e:
+        die(str(e))
+    r.approvals = pending().get(r.id, [])
+    stages(r)
+    return r
+
+
+def cmd_ls(a):
+    try:
+        listing(runs(a))
+    except RuntimeError as e:
+        die(str(e))
+
+
+def cmd_live(a):
+    if not (TTY and sys.stdin.isatty()):
+        return cmd_ls(a)
+    locale.setlocale(locale.LC_ALL, "")
+    os.environ.setdefault("ESCDELAY", "25")
+    try:
+        curses.wrapper(tui, a)
+    except KeyboardInterrupt:
+        pass
+
+
+def cmd_approve(a):
+    r = find(a.id)
+    try:
+        done = approve(r, a.comment or "")
+    except RuntimeError as e:
+        die(str(e))
+    print(green(f"✓ godkjent {r.pipeline} {r.number}: {', '.join(done)}"))
+
+
+def cmd_open(a):
+    subprocess.run(["open", find(a.id).url])
+
+
+GUIDE = """\
+{b}wp — pipeline runs i Azure DevOps fra terminalen{r}
+
+{b}PROSJEKT{r}  {where}{repo}
+  Fra `git remote get-url origin` (dev.azure.com), ellers `az devops configure -l`.
+  I et ADO-repo vises bare det repoets runs; -A (eller `a` i lista) for hele prosjektet.
+
+{b}KOMMANDOER{r}
+
+  wp [filtre]             levende liste, oppdateres hvert {refresh}. sekund
+  wp ls [filtre]          samme liste, skrevet ut én gang (også når stdout ikke er en terminal)
+  wp approve <run> [-c k] godkjenn alle ventende approvals på run-en (build id)
+  wp open <run>           åpne i nettleser
+  wp help [kommando]      denne teksten, eller flaggene til én kommando
+
+{b}TASTER{r}  {d}(levende liste){r}
+
+  ↑↓ / j k        flytt            pgup/pgdn, ^u/^d   halv side
+  space           godkjenn valgt run — alle stages som venter på den
+  enter / o       åpne i nettleser
+  w               bare runs som venter på godkjenning (av/på)
+  a               dette repoet / hele prosjektet
+  r               oppdater nå      q / esc   avslutt
+
+{b}FILTRE{r}
+
+  -A, --all             hele prosjektet, ikke bare dette repoet
+  -p, --pipeline NAVN   pipeline-navn inneholder NAVN
+  -b, --branch B        branch (main, feature/x, refs/pull/123/merge)
+  -m, --mine            bare runs du har startet
+  -w, --waiting         bare runs som venter på godkjenning
+  -n, --count N         antall runs (default {count})
+
+{b}LINJEN{r}
+
+  ⏸ coreservices-deploy  20260930.1  main  ✓test ✓staging ⏸prod ○demo  @tarjei 3d 12:04
+  status · pipeline · run · branch · stages · startet av · siden · varighet
+  ✓ ok  ✗ feilet  ! delvis  ● kjører  ○ venter  ⏸ venter på godkjenning  - hoppet over/avbrutt
+
+{b}VERDT Å VITE{r}
+
+  · Space godkjenner uten å spørre igjen — det er hele poenget. Du kan bare godkjenne det
+    ADO lar deg; ellers vises feilen nederst.
+  · Gamle runs med ventende approvals (som aldri ble godkjent) blir liggende — `w` viser dem.
+  · Auth: `az login` (eller azt main).
+"""
+
+
+def cmd_help(a, subs):
+    if a.topic:
+        if a.topic not in subs:
+            die(f"ukjent kommando: {a.topic}")
+        return subs[a.topic].print_help()
+    on = TTY
+    repo = current_repo()
+    txt = GUIDE.format(b="\033[1m" if on else "", r="\033[0m" if on else "", d="\033[2m" if on else "",
+                       where=A().where, repo=f" {dim(f'(repo: {repo})')}" if repo else "",
+                       refresh=REFRESH, count=COUNT)
+    if on and txt.count("\n") > os.get_terminal_size().lines:
+        subprocess.run(["less", "-RFX"], input=txt, text=True)
+    else:
+        print(txt)
+
+
+# ── cli ─────────────────────────────────────────────────────────────────────
+
+
+def filters(s):
+    s.add_argument("-A", "--all", action="store_true", help="whole project, not just this repo")
+    s.add_argument("-p", "--pipeline", help="pipeline name contains")
+    s.add_argument("-b", "--branch")
+    s.add_argument("-m", "--mine", action="store_true")
+    s.add_argument("-w", "--waiting", action="store_true", help="only runs waiting for approval")
+    s.add_argument("-n", "--count", type=int, default=COUNT)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="wp", description="Azure DevOps pipeline runs")
+    sub = p.add_subparsers(dest="cmd")
+
+    s = sub.add_parser("live", help="live list, space approves")
+    filters(s)
+    s.set_defaults(fn=cmd_live)
+
+    s = sub.add_parser("ls", help="list runs once")
+    filters(s)
+    s.set_defaults(fn=cmd_ls)
+
+    s = sub.add_parser("approve", help="approve pending approvals on a run")
+    s.add_argument("id", type=int)
+    s.add_argument("-c", "--comment")
+    s.set_defaults(fn=cmd_approve)
+
+    s = sub.add_parser("open", help="open run in browser")
+    s.add_argument("id", type=int)
+    s.set_defaults(fn=cmd_open)
+
+    s = sub.add_parser("help", help="forklaring av kommandoer og taster")
+    s.add_argument("topic", nargs="?")
+    s.set_defaults(fn=lambda a: cmd_help(a, sub.choices))
+
+    argv = sys.argv[1:]
+    if not argv or argv[0] not in sub.choices and argv[0] not in ("-h", "--help"):
+        argv = ["live"] + argv
+    a = p.parse_args(argv)
+    A()
+    if hasattr(a, "all"):
+        a.home = None if os.environ.get("WF_PROJECT") else current_repo()
+        a.repo = None if a.all else a.home
+    try:
+        a.fn(a)
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
