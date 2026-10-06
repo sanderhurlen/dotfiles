@@ -1,0 +1,684 @@
+#!/usr/bin/env python3
+#
+# wr — Azure DevOps pull requests from the shell: see them, open new ones from
+# pushed branches, complete or abandon with one key.
+#
+# Shares tracker and auth with wf (bin/wf), time helpers with wp (bin/wp).
+# Org/project from this repo's origin, else `az devops configure` defaults.
+# Inside an ADO repo: that repo's PRs only (-A for the whole project).
+#
+# Type:
+#
+#   wr                       live list (TUI); tab switches to pushed branches without a PR
+#   wr ls [filters]          active PRs, printed once
+#   wr branches [filters]    pushed branches ahead of the default branch with no PR
+#   wr new [branch] [-d]     open PR from branch (default: current), title from its first commit
+#   wr complete 6943         complete now if policies pass, else set auto-complete
+#   wr abandon 6943          abandon
+#   wr open 6943             open in browser
+#   wr help                  explained (Norwegian)
+#
+# Filters: -A all repos · -m mine · -n N · --days N (branches)
+# TUI: ↑↓/jk move · enter open · c complete · x abandon · n new PR · tab PRs/branches · a all · m mine · q quit
+
+import argparse
+import concurrent.futures
+import curses
+import datetime
+import importlib.machinery
+import importlib.util
+import json
+import locale
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+def _load(name):
+    loader = importlib.machinery.SourceFileLoader(name, os.path.join(os.path.dirname(os.path.realpath(__file__)), name))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(name, loader))
+    loader.exec_module(mod)
+    return mod
+
+
+wp = _load("wp")
+wf = wp.wf
+from_wf = ("bold", "dim", "cyan", "green", "yellow", "red", "TTY")
+globals().update({k: getattr(wf, k) for k in from_wf})
+A, ts, ago, current_repo = wp.A, wp.ts, wp.ago, wp.current_repo
+
+COUNT = 50
+REFRESH = 20  # seconds between TUI refreshes
+RECENT = 30   # days a branch counts as live in the branches view
+MERGE = ("squash", "noFastForward", "rebase", "rebaseMerge")  # preference order
+ALLOW = {"squash": "allowSquash", "noFastForward": "allowNoFastForward", "rebase": "allowRebase",
+         "rebaseMerge": "allowRebaseMerge"}
+
+
+def die(msg):
+    print(f"wr: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def rest(path, body=None, method=None, scope="project", version="7.1"):
+    """ADO call. Raises RuntimeError with ADO's message instead of exiting, so the TUI
+    can show it and carry on."""
+    base = A().org if scope == "org" else f"{A().org}/{urllib.parse.quote(A().project)}"
+    url = f"{base}/_apis/{path}" + ("&" if "?" in path else "?") + f"api-version={version}"
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method or ("POST" if data else "GET"),
+                                 headers={"Authorization": f"Bearer {A().token()}",
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode("utf-8-sig") or "null")
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read().decode("utf-8-sig")).get("message")
+        except ValueError:
+            msg = None
+        raise RuntimeError(msg or f"HTTP {e.code}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(str(e.reason))
+
+
+_me = None
+
+
+def me():
+    """(id, uniqueName) of whoever the token belongs to."""
+    global _me
+    if _me is None:
+        u = rest("connectionData", scope="org", version="7.1-preview")["authenticatedUser"]
+        _me = (u["id"], (u.get("properties", {}).get("Account", {}).get("$value") or A().me()).lower())
+    return _me
+
+
+_repos = None
+
+
+def repos():
+    """{name: raw repo} for the project's enabled repos."""
+    global _repos
+    if _repos is None:
+        _repos = {r["name"]: r for r in rest("git/repositories")["value"] if not r.get("isDisabled")}
+    return _repos
+
+
+def repo(name):
+    r = repos().get(name)
+    if not r:
+        raise RuntimeError(f"fant ikke repo {name} i {A().project}")
+    return r
+
+
+def head(ref):
+    return (ref or "").removeprefix("refs/heads/")
+
+
+# ── data ────────────────────────────────────────────────────────────────────
+
+
+class PR:
+    def __init__(self, raw):
+        self.raw = raw
+        self.id = raw["pullRequestId"]
+        self.title = raw.get("title", "")
+        self.repo = raw["repository"]["name"]
+        self.project_id = raw["repository"]["project"]["id"]
+        self.source, self.target = head(raw.get("sourceRefName")), head(raw.get("targetRefName"))
+        self.draft = raw.get("isDraft", False)
+        self.auto = bool(raw.get("autoCompleteSetBy"))
+        self.conflicts = raw.get("mergeStatus") in ("conflicts", "failure", "rejectedByPolicy")
+        self.who = (raw.get("createdBy") or {}).get("uniqueName", "").split("@")[0]
+        self.created = ts(raw.get("creationDate"))
+        self.reviewers = [(r.get("displayName", "?"), r.get("vote", 0), r.get("isRequired", False))
+                          for r in raw.get("reviewers") or []]
+        self.url = f"{A().org}/{urllib.parse.quote(A().project)}/_git/{urllib.parse.quote(self.repo)}" \
+                   f"/pullrequest/{self.id}"
+        self.policies = []  # [(name, status, blocking)]
+        self.allowed = None  # merge strategies the merge-strategy policy allows, None = any
+
+    @property
+    def ready(self):
+        """True when nothing blocking stands between this PR and completing it."""
+        return not self.draft and not self.conflicts and all(
+            s in ("approved", "notApplicable") for _, s, b in self.policies if b)
+
+    @property
+    def state(self):
+        return "draft" if self.draft else "conflicts" if self.conflicts else "auto" if self.auto \
+            else "ready" if self.ready else "active"
+
+
+POLICY = {"Build": None, "Minimum number of reviewers": "review", "Required reviewers": "påkrevd",
+          "Comment requirements": "kommentarer", "Work item linking": "wi", "Status": None}
+
+
+def policies(pr):
+    art = f"vstfs:///CodeReview/CodeReviewId/{pr.project_id}/{pr.id}"
+    try:
+        evs = rest("policy/evaluations?artifactId=" + urllib.parse.quote(art, safe=""),
+                   version="7.1-preview.1")["value"]
+    except RuntimeError:
+        evs = []
+    for e in evs:
+        cfg = e["configuration"]
+        kind, st = cfg["type"]["displayName"], cfg.get("settings") or {}
+        if kind == "Require a merge strategy":
+            pr.allowed = [m for m in MERGE if st.get(ALLOW[m])]
+            continue
+        if not cfg.get("isEnabled", True):
+            continue
+        name = POLICY.get(kind, kind.lower()) or st.get("displayName") or st.get("statusName") or kind.lower()
+        pr.policies.append((name, e["status"], cfg.get("isBlocking", False)))
+
+
+def prs(a):
+    q = {"searchCriteria.status": "active", "$top": a.count}
+    if a.repo:
+        q["searchCriteria.repositoryId"] = repo(a.repo)["id"]
+    if a.mine:
+        q["searchCriteria.creatorId"] = me()[0]
+    out = [PR(r) for r in rest("git/pullrequests?" + urllib.parse.urlencode(q))["value"]]
+    with concurrent.futures.ThreadPoolExecutor(8) as ex:
+        list(ex.map(policies, out))
+    return out
+
+
+def find(id):
+    return PR(rest(f"git/pullrequests/{id}"))
+
+
+class Branch:
+    def __init__(self, repo, raw, base):
+        c = raw["commit"]
+        self.repo, self.name, self.base = repo, raw["name"], base
+        self.ahead, self.behind = raw["aheadCount"], raw["behindCount"]
+        self.when = ts(c["committer"]["date"])
+        self.who = (c.get("author") or {}).get("email", "").split("@")[0]
+        self.subject = (c.get("comment") or "").splitlines()[0] if c.get("comment") else ""
+        self.url = f"{A().org}/{urllib.parse.quote(A().project)}/_git/{urllib.parse.quote(repo)}" \
+                   f"?version=GB{urllib.parse.quote(self.name)}"
+
+
+def branches(a):
+    """Pushed branches ahead of their repo's default branch, without an active PR, newest first."""
+    open_ = {(p["repository"]["name"], head(p["sourceRefName"]))
+             for p in rest("git/pullrequests?searchCriteria.status=active&$top=500")["value"]}
+    names = [a.repo] if a.repo else sorted(repos())
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=a.days)
+    mine = me()[1].split("@")[0] if a.mine else None
+
+    def one(name):
+        r = repo(name)
+        base = head(r.get("defaultBranch"))
+        if not base:
+            return []
+        try:
+            stats = rest(f"git/repositories/{r['id']}/stats/branches?baseVersionDescriptor.version="
+                         f"{urllib.parse.quote(base)}&baseVersionDescriptor.versionType=branch")["value"]
+        except RuntimeError:
+            return []
+        bs = [Branch(name, s, base) for s in stats if s["aheadCount"] and not s.get("isBaseVersion")]
+        return [b for b in bs if (name, b.name) not in open_ and b.when > cutoff
+                and (not mine or b.who == mine)]
+
+    with concurrent.futures.ThreadPoolExecutor(8) as ex:
+        out = [b for bs in ex.map(one, names) for b in bs]
+    return sorted(out, key=lambda b: b.when, reverse=True)[:a.count]
+
+
+# ── actions ─────────────────────────────────────────────────────────────────
+
+
+def draft_pr(repo_name, branch, target=None):
+    """(body, commits) for a PR from branch: title from its first commit, work items from
+    the branch name and AB#refs."""
+    r = repo(repo_name)
+    target = target or head(r.get("defaultBranch"))
+    q = urllib.parse.urlencode({"searchCriteria.itemVersion.version": target,
+                                "searchCriteria.itemVersion.versionType": "branch",
+                                "searchCriteria.compareVersion.version": branch,
+                                "searchCriteria.compareVersion.versionType": "branch",
+                                "searchCriteria.$top": 100})
+    commits = [c["comment"].splitlines()[0] for c in rest(f"git/repositories/{r['id']}/commits?{q}")["value"]]
+    if not commits:
+        raise RuntimeError(f"{branch} har ingen commits som ikke er i {target}")
+    title = commits[-1]
+    desc = "\n".join(f"- {c}" for c in reversed(commits)) if len(commits) > 1 else ""
+    ids = re.findall(r"AB#(\d+)", " ".join(commits)) + re.findall(r"(?:^|[/_-])(\d{3,6})(?=[-_/]|$)", branch)
+    body = {"sourceRefName": f"refs/heads/{branch}", "targetRefName": f"refs/heads/{target}",
+            "title": title[:400], "description": desc[:4000],
+            "workItemRefs": [{"id": i} for i in dict.fromkeys(ids)]}
+    return body, commits
+
+
+def create(repo_name, body, draft=False):
+    rid = repo(repo_name)["id"]
+    body = dict(body, isDraft=draft)
+    try:
+        raw = rest(f"git/repositories/{rid}/pullrequests", body)
+    except RuntimeError:
+        if not body["workItemRefs"]:
+            raise
+        raw = rest(f"git/repositories/{rid}/pullrequests", dict(body, workItemRefs=[]))  # unknown work item id
+    return PR(raw)
+
+
+def complete(pr):
+    """Complete now when nothing blocks, else turn on auto-complete. Returns what happened."""
+    if not pr.policies and pr.allowed is None:
+        policies(pr)
+    strategy = next((m for m in MERGE if pr.allowed is None or m in pr.allowed), "squash")
+    opts = {"mergeStrategy": strategy, "deleteSourceBranch": True, "transitionWorkItems": True}
+    path = f"git/repositories/{pr.raw['repository']['id']}/pullrequests/{pr.id}"
+    if pr.draft:
+        raise RuntimeError(f"!{pr.id} er draft — publiser den først")
+    if pr.ready:
+        rest(path, {"status": "completed", "completionOptions": opts,
+                    "lastMergeSourceCommit": pr.raw["lastMergeSourceCommit"]}, method="PATCH")
+        return f"✓ fullført !{pr.id} ({strategy})"
+    rest(path, {"autoCompleteSetBy": {"id": me()[0]}, "completionOptions": opts}, method="PATCH")
+    waiting = [n for n, s, b in pr.policies if b and s not in ("approved", "notApplicable")]
+    return f"⚡ auto-complete på !{pr.id} ({strategy})" + (f", venter på {', '.join(waiting)}" if waiting else "")
+
+
+def abandon(pr):
+    rest(f"git/repositories/{pr.raw['repository']['id']}/pullrequests/{pr.id}", {"status": "abandoned"},
+         method="PATCH")
+    return f"⊘ forlatt !{pr.id}"
+
+
+# ── rendering ───────────────────────────────────────────────────────────────
+
+ICON = {"draft": "◌", "conflicts": "✗", "auto": "⚡", "ready": "✓", "active": "●"}
+TONE = {"approved": "green", "rejected": "red", "broken": "red", "running": "cyan", "queued": "dim",
+        "ready": "green", "conflicts": "red", "auto": "cyan", "draft": "dim", "active": "yellow"}
+CHIP = {"approved": "✓", "rejected": "✗", "broken": "✗", "running": "●", "queued": "○", "notApplicable": "-"}
+VOTE = {10: ("✓", "green"), 5: ("✓", "green"), -5: ("⏸", "yellow"), -10: ("✗", "red"), 0: ("○", "dim")}
+
+
+def pr_columns(rs, all_repos):
+    wr_ = max([len(r.repo) for r in rs] + [4]) if all_repos else 0
+    wt = 60
+    rows = []
+    for r in rs:
+        parts = [(ICON[r.state] + " ", TONE[r.state]), (f"!{r.id:<5} ", "dim")]
+        if all_repos:
+            parts.append((f"{r.repo:<{wr_}}  ", "bold"))
+        t = r.title if len(r.title) <= wt else r.title[:wt - 1] + "…"
+        parts += [(f"{t:<{wt}}  ", None if all_repos else "bold"), (f"{r.source[:30]} → {r.target}  ", "dim")]
+        if r.conflicts:
+            parts.append(("✗konflikt ", "red"))
+        for name, st, blocking in r.policies:
+            parts.append((CHIP.get(st, "?") + name + " ", TONE.get(st, "dim") if blocking or st != "rejected" else "dim"))
+        for name, vote, req in r.reviewers:
+            if vote or req:
+                icon, tone = VOTE.get(vote, ("?", "dim"))
+                parts.append((icon + name.split()[0].lower() + ("*" if req else "") + " ", tone))
+        parts.append((f" @{r.who} {ago(r.created)}", "dim"))
+        rows.append(parts)
+    return rows
+
+
+def branch_columns(bs, all_repos):
+    wr_ = max([len(b.repo) for b in bs] + [4]) if all_repos else 0
+    wb = min(max([len(b.name) for b in bs] + [6]), 40)
+    rows = []
+    for b in bs:
+        parts = [("+ ", "cyan")]
+        if all_repos:
+            parts.append((f"{b.repo:<{wr_}}  ", "bold"))
+        parts += [(f"{b.name[:wb]:<{wb}}  ", None if all_repos else "bold"),
+                  (f"↑{b.ahead:<3}", "green"), (f"↓{b.behind:<4} ", "dim" if b.behind < 20 else "yellow"),
+                  (f"{b.subject[:60]}", None), (f"  @{b.who} {ago(b.when)}", "dim")]
+        rows.append(parts)
+    return rows
+
+
+PAINT = {"green": green, "red": red, "yellow": yellow, "cyan": cyan, "dim": dim, "bold": bold}
+
+
+def printed(rows, empty, foot):
+    if not rows:
+        return print(dim(empty))
+    for parts in rows:
+        print("".join(PAINT[t](s) if t else s for s, t in parts))
+    print(dim(foot))
+
+
+# ── tui ─────────────────────────────────────────────────────────────────────
+
+
+def tui(scr, a):
+    curses.curs_set(0)
+    curses.use_default_colors()
+    pal = {}
+    for i, (name, col) in enumerate([("green", curses.COLOR_GREEN), ("red", curses.COLOR_RED),
+                                     ("yellow", curses.COLOR_YELLOW), ("cyan", curses.COLOR_CYAN)], 1):
+        curses.init_pair(i, col, -1)
+        pal[name] = curses.color_pair(i)
+    pal.update(dim=curses.A_DIM, bold=curses.A_BOLD)
+    view = "branches" if a.branches else "prs"
+    sel, top, items, msg, err, loaded = 0, 0, [], "", False, 0
+    ask = None  # (question, action) awaiting y
+    scr.timeout(1000)
+
+    def load():
+        nonlocal items, msg, err, loaded
+        scr.addstr(0, max(0, curses.COLS - 12), " henter … ", pal["dim"])
+        scr.refresh()
+        try:
+            items = prs(a) if view == "prs" else branches(a)
+        except RuntimeError as e:
+            msg, err = str(e), True
+        loaded = time.time()
+
+    def run(fn):
+        nonlocal msg, err
+        try:
+            msg = fn()
+            load()
+        except RuntimeError as e:
+            msg, err = str(e), True
+
+    load()
+    while True:
+        h, w = scr.getmaxyx()
+        scr.erase()
+        tabs = " PRer " if view == "prs" else " brancher uten PR "
+        title = f" wr · {a.repo or A().project} ·{tabs}" + ("· mine" if a.mine else "")
+        scr.addnstr(0, 0, title, w - 1, curses.A_BOLD)
+        body = h - 3
+        sel = max(0, min(sel, len(items) - 1))
+        top = min(max(top, sel - body + 1), sel)
+        rows = pr_columns(items, not a.repo) if view == "prs" else branch_columns(items, not a.repo)
+        for y, parts in enumerate(rows[top:top + body]):
+            x, row = 0, y + 1
+            hl = curses.A_REVERSE if top + y == sel else 0
+            for s, t in parts:
+                if x >= w - 1:
+                    break
+                scr.addnstr(row, x, s, w - 1 - x, pal.get(t, 0) | hl)
+                x += len(s)
+            if hl and x < w - 1:
+                scr.addnstr(row, x, " " * (w - 1 - x), w - 1 - x, hl)
+        if not items:
+            scr.addnstr(2, 2, "ingen PRer" if view == "prs" else "ingen brancher uten PR", w - 3, pal["dim"])
+        keys = ("↑↓ flytt · enter åpne · c fullfør · x forlat · tab brancher · a alle · m mine · r oppdater · q avslutt"
+                if view == "prs" else
+                "↑↓ flytt · n/enter ny PR · d ny draft · o åpne · tab PRer · a alle · m mine · r oppdater · q avslutt")
+        if ask:
+            scr.addnstr(h - 1, 0, ask[0] + "  y/n", w - 1, pal["yellow"] | curses.A_BOLD)
+        else:
+            scr.addnstr(h - 1, 0, msg or keys, w - 1, (pal["red"] if err else pal["green"]) if msg else pal["dim"])
+        scr.refresh()
+
+        k = scr.getch()
+        if k != -1:
+            msg, err = "", False
+        if ask:
+            if k == -1:
+                continue
+            q, fn = ask
+            ask = None
+            if k in (ord("y"), ord("Y"), ord("j")):
+                run(fn)
+            continue
+        cur = items[sel] if items else None
+        if k in (ord("q"), 27):
+            return
+        elif k in (curses.KEY_DOWN, ord("j")):
+            sel += 1
+        elif k in (curses.KEY_UP, ord("k")):
+            sel -= 1
+        elif k in (curses.KEY_NPAGE, 4):
+            sel += body // 2
+        elif k in (curses.KEY_PPAGE, 21):
+            sel -= body // 2
+        elif k in (ord("g"), curses.KEY_HOME):
+            sel = 0
+        elif k in (ord("G"), curses.KEY_END):
+            sel = len(items) - 1
+        elif k == 9:  # tab
+            view = "branches" if view == "prs" else "prs"
+            sel = top = 0
+            items = []
+            load()
+        elif k == ord("a") and a.home:
+            a.repo = None if a.repo else a.home
+            sel = top = 0
+            load()
+        elif k == ord("m"):
+            a.mine = not a.mine
+            sel = top = 0
+            load()
+        elif k == ord("r") or time.time() - loaded > REFRESH:
+            load()
+        elif not cur:
+            continue
+        elif view == "prs" and k in (10, 13, curses.KEY_ENTER, ord("o")):
+            subprocess.run(["open", cur.url])
+        elif view == "prs" and k == ord("c"):
+            verb = "fullfør" if cur.ready else "auto-complete"
+            ask = (f"{verb} !{cur.id} {cur.title[:50]} → {cur.target}?", lambda p=cur: complete(p))
+        elif view == "prs" and k == ord("x"):
+            ask = (f"forlat !{cur.id} {cur.title[:50]}?", lambda p=cur: abandon(p))
+        elif view == "branches" and k == ord("o"):
+            subprocess.run(["open", cur.url])
+        elif view == "branches" and k in (10, 13, curses.KEY_ENTER, ord("n"), ord("d")):
+            try:
+                body_, commits = draft_pr(cur.repo, cur.name, cur.base)
+            except RuntimeError as e:
+                msg, err = str(e), True
+                continue
+            draft = k == ord("d")
+            wis = "".join(f" #{w['id']}" for w in body_["workItemRefs"])
+            ask = (f"ny {'draft-' if draft else ''}PR «{body_['title'][:60]}» {cur.name} → {cur.base}"
+                   f" ({len(commits)} commit{'s' if len(commits) > 1 else ''}){wis}?",
+                   lambda b=cur, bd=body_, d=draft: f"✓ opprettet !{create(b.repo, bd, d).id}")
+
+
+# ── commands ────────────────────────────────────────────────────────────────
+
+
+def guard(fn, *args):
+    try:
+        return fn(*args)
+    except RuntimeError as e:
+        die(str(e))
+
+
+def cmd_ls(a):
+    rs = guard(prs, a)
+    n = sum(1 for r in rs if r.ready)
+    printed(pr_columns(rs, not a.repo), "ingen PRer", f"{len(rs)} PR(er)" + (f", {n} klar(e)" if n else ""))
+
+
+def cmd_branches(a):
+    bs = guard(branches, a)
+    printed(branch_columns(bs, not a.repo), "ingen brancher uten PR", f"{len(bs)} branch(er) uten PR")
+
+
+def cmd_live(a):
+    if not (TTY and sys.stdin.isatty()):
+        return cmd_branches(a) if a.branches else cmd_ls(a)
+    locale.setlocale(locale.LC_ALL, "")
+    os.environ.setdefault("ESCDELAY", "25")
+    try:
+        curses.wrapper(tui, a)
+    except KeyboardInterrupt:
+        pass
+
+
+def cmd_new(a):
+    name = a.repo_ or current_repo()
+    if not name:
+        die("ikke i et ADO-repo — bruk -r REPO")
+    branch = a.branch or (wf.sh("git", "branch", "--show-current") if not a.repo_ else "")
+    if not branch:
+        die("hvilken branch?")
+    if not a.repo_ and wf.sh("git", "rev-list", "--count", f"origin/{branch}..{branch}") not in ("", "0"):
+        print(yellow(f"obs: {branch} har lokale commits som ikke er pushet"), file=sys.stderr)
+    body, commits = guard(draft_pr, name, branch, a.target)
+    if a.title:
+        body["title"] = a.title
+    if a.dry_run:
+        return print(json.dumps(body, indent=2, ensure_ascii=False))
+    pr = guard(create, name, body, a.draft)
+    print(green(f"✓ opprettet !{pr.id} {pr.title}"), dim(pr.url))
+    if a.open:
+        subprocess.run(["open", pr.url])
+
+
+def cmd_complete(a):
+    print(green(guard(complete, guard(find, a.id))))
+
+
+def cmd_abandon(a):
+    print(green(guard(abandon, guard(find, a.id))))
+
+
+def cmd_open(a):
+    subprocess.run(["open", guard(find, a.id).url])
+
+
+GUIDE = """\
+{b}wr — pull requests i Azure DevOps fra terminalen{r}
+
+{b}PROSJEKT{r}  {where}{repo}
+  Fra `git remote get-url origin` (dev.azure.com), ellers `az devops configure -l`.
+  I et ADO-repo vises bare det repoets PRer; -A (eller `a` i lista) for hele prosjektet.
+
+{b}KOMMANDOER{r}
+
+  wr [filtre]               levende liste over aktive PRer, oppdateres hvert {refresh}. sekund
+  wr -b [filtre]            starter i branch-visningen
+  wr ls [filtre]            aktive PRer, skrevet ut én gang
+  wr branches [filtre]      pushede brancher foran default-branchen som ikke har PR
+  wr new [branch] [flagg]   opprett PR (default: nåværende branch) → default-branchen
+                              -d draft · -t tittel · --target B · -r repo · -o åpne · --dry-run
+  wr complete <id>          fullfør nå hvis ingenting blokkerer, ellers slå på auto-complete
+  wr abandon <id>           forlat PR-en
+  wr open <id>              åpne i nettleser
+  wr help [kommando]        denne teksten, eller flaggene til én kommando
+
+{b}TASTER{r}  {d}(levende liste){r}
+
+  ↑↓ / j k        flytt            pgup/pgdn, ^u/^d   halv side
+  tab             PRer / brancher uten PR
+  a               dette repoet / hele prosjektet
+  m               bare mine (av/på)
+  r               oppdater nå      q / esc   avslutt
+
+  {d}PRer{r}       enter/o åpne · c fullfør (eller auto-complete) · x forlat
+  {d}brancher{r}   enter/n ny PR · d ny draft-PR · o åpne branchen
+
+  c, x, n og d spør y/n i bunnlinjen først.
+
+{b}LINJEN{r}
+
+  ✓ !6943  feat: public content storage …  feat/8981-… → main  ✓Build & infra ✓sander  @sander 2t
+  status · id · tittel · branch → mål · policies · reviewers (* = påkrevd) · laget av · siden
+  ✓ klar til å fullføre  ● aktiv, noe blokkerer  ⚡ auto-complete på  ◌ draft  ✗ konflikter
+
+  + feat/9001-x  ↑3 ↓12  siste commit  @sander 1d
+  ↑ commits foran default-branchen · ↓ bak
+
+{b}VERDT Å VITE{r}
+
+  · Ny PR: tittel = første commit på branchen; beskrivelse = commit-lista (ved flere enn én).
+    Work items kobles fra tall i branch-navnet (feat/8981-…) og AB#1234 i commits.
+  · Fullfør: merge-strategi fra repoets merge-policy (squash hvis lov), sletter branchen,
+    flytter koblede work items. Blokkerer en policy, settes auto-complete i stedet.
+  · Branch-visningen viser bare brancher med commits siste {recent} dager (--days N).
+  · Auth: `az login` (eller azt main).
+"""
+
+
+def cmd_help(a, subs):
+    if a.topic:
+        if a.topic not in subs:
+            die(f"ukjent kommando: {a.topic}")
+        return subs[a.topic].print_help()
+    on = TTY
+    repo_ = current_repo()
+    txt = GUIDE.format(b="\033[1m" if on else "", r="\033[0m" if on else "", d="\033[2m" if on else "",
+                       where=A().where, repo=f" {dim(f'(repo: {repo_})')}" if repo_ else "",
+                       refresh=REFRESH, recent=RECENT)
+    if on and txt.count("\n") > os.get_terminal_size().lines:
+        subprocess.run(["less", "-RFX"], input=txt, text=True)
+    else:
+        print(txt)
+
+
+# ── cli ─────────────────────────────────────────────────────────────────────
+
+
+def filters(s):
+    s.add_argument("-A", "--all", action="store_true", help="whole project, not just this repo")
+    s.add_argument("-m", "--mine", action="store_true")
+    s.add_argument("-n", "--count", type=int, default=COUNT)
+    s.add_argument("--days", type=int, default=RECENT, help="branches with commits in the last N days")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="wr", description="Azure DevOps pull requests")
+    sub = p.add_subparsers(dest="cmd")
+
+    s = sub.add_parser("live", help="live list")
+    filters(s)
+    s.add_argument("-b", "--branches", action="store_true", help="start in the branches view")
+    s.set_defaults(fn=cmd_live)
+
+    s = sub.add_parser("ls", help="list active PRs once")
+    filters(s)
+    s.set_defaults(fn=cmd_ls)
+
+    s = sub.add_parser("branches", help="pushed branches without a PR")
+    filters(s)
+    s.set_defaults(fn=cmd_branches)
+
+    s = sub.add_parser("new", help="open a PR from a branch")
+    s.add_argument("branch", nargs="?")
+    s.add_argument("-r", "--repo", dest="repo_")
+    s.add_argument("-t", "--title")
+    s.add_argument("--target")
+    s.add_argument("-d", "--draft", action="store_true")
+    s.add_argument("-o", "--open", action="store_true")
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(fn=cmd_new)
+
+    for name, fn, h in (("complete", cmd_complete, "complete (or auto-complete) a PR"),
+                        ("abandon", cmd_abandon, "abandon a PR"), ("open", cmd_open, "open PR in browser")):
+        s = sub.add_parser(name, help=h)
+        s.add_argument("id", type=int)
+        s.set_defaults(fn=fn)
+
+    s = sub.add_parser("help", help="forklaring av kommandoer og taster")
+    s.add_argument("topic", nargs="?")
+    s.set_defaults(fn=lambda a: cmd_help(a, sub.choices))
+
+    argv = sys.argv[1:]
+    if not argv or argv[0] not in sub.choices and argv[0] not in ("-h", "--help"):
+        argv = ["live"] + argv
+    a = p.parse_args(argv)
+    A()
+    if hasattr(a, "all"):
+        a.home = None if os.environ.get("WF_PROJECT") else current_repo()
+        a.repo = None if a.all else a.home
+    a.branches = getattr(a, "branches", False) or a.cmd == "branches"
+    try:
+        a.fn(a)
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
