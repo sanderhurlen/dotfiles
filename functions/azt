@@ -1,0 +1,25 @@
+#!/bin/zsh
+#
+# Switch the az CLI between Azure tenants using isolated token caches, so a
+# B2C login never clobbers your pb-visense session.
+#
+# Type:
+#
+#   azt b2c-dev --login
+#   azt main
+#
+# Aliases are defined in the script itself; anything else is treated as a
+# tenant domain or GUID. Run `azt --help` for the full list.
+#
+# This has to be a function rather than a bin/ script: it exports
+# AZURE_CONFIG_DIR into the current shell, which a subprocess cannot do.
+
+local azt_script="$HOME/visense/my-workday/scripts/az-tenant.sh"
+
+if [[ ! -r "$azt_script" ]]; then
+  echo "azt: cannot read $azt_script" >&2
+  echo "azt: is the my-workday repo checked out, and az-tenant.sh merged to main?" >&2
+  return 1
+fi
+
+source "$azt_script" "$@"

@@ -1,0 +1,773 @@
+#!/usr/bin/env python3
+#
+# wf — drive wayfinder maps, specs and tickets from the shell, on Azure DevOps
+# or GitHub (picked from this repo's origin).
+#
+# Same pipeline as visense-docs/docs/agents/workflow.md, minus the WIQL:
+#
+#   map (wayfinder:map) ──Related──▶ spec (spec) ──Child──▶ tickets
+#   map ──Child──▶ decision tickets (wayfinder:<type>)
+#   blocking = Predecessor links (ADO) / blocked-by dependencies (GitHub)
+#   children = Parent/Child (ADO) / sub-issues (GitHub)
+#
+# Type:
+#
+#   wf                     open maps
+#   wf map 8698            map overview: frontier, claimed, blocked, specs
+#   wf spec 8591           spec tickets: launchable, running, blocked
+#   wf show 8700           one work item: body, links, comments
+#   wf next 8698           id of the next takeable ticket (map or spec)
+#   wf go 8698 [ticket]    interactive /wayfinder session on the next ticket
+#   wf run 8592 [8593 ..]  background /implement agent per ticket (worktree)
+#   wf fan 8591            wf run every launchable ticket of a spec
+#   wf open 8698           open in browser
+#   wf help                the whole workflow explained (Norwegian)
+#
+# Everything is deterministic: same tracker state, same pick, same prompt.
+# --dry-run prints the claude command instead of running it. WF_TRACKER
+# (ado|github), WF_REPO (owner/name), WF_ORG and WF_PROJECT override detection.
+
+import argparse
+import html
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+ADO_RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"
+DONE = {"Done", "Closed", "Removed", "Resolved"}
+CHILD = "System.LinkTypes.Hierarchy-Forward"
+PARENT = "System.LinkTypes.Hierarchy-Reverse"
+PRED = "System.LinkTypes.Dependency-Reverse"
+SUCC = "System.LinkTypes.Dependency-Forward"
+RELATED = "System.LinkTypes.Related"
+HITL_TYPES = {"grilling", "prototype"}
+
+TTY = sys.stdout.isatty()
+
+
+def c(code, s):
+    return f"\033[{code}m{s}\033[0m" if TTY else s
+
+
+dim = lambda s: c("2", s)
+bold = lambda s: c("1", s)
+green = lambda s: c("32", s)
+yellow = lambda s: c("33", s)
+red = lambda s: c("31", s)
+cyan = lambda s: c("36", s)
+
+
+def die(msg):
+    print(f"wf: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+# ── config ──────────────────────────────────────────────────────────────────
+
+
+def sh(*cmd, input=None):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, check=True, input=input).stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
+
+
+def detect():
+    """Pick the tracker from WF_TRACKER, else from this repo's origin, else ADO defaults."""
+    forced = os.environ.get("WF_TRACKER")
+    if forced in ("github", "gh"):
+        return GitHub(os.environ.get("WF_REPO") or gh_repo_from(sh("git", "remote", "get-url", "origin")))
+    if forced == "ado":
+        return Ado()
+    if os.environ.get("WF_REPO"):
+        return GitHub(os.environ["WF_REPO"])
+    remote = sh("git", "remote", "get-url", "origin")
+    if "github.com" in remote:
+        return GitHub(gh_repo_from(remote))
+    return Ado(remote)
+
+
+def gh_repo_from(remote):
+    m = re.search(r"github\.com[:/]([^/]+)/(.+?)(?:\.git)?/?$", remote)
+    if not m:
+        die("can't read owner/repo from origin — set WF_REPO=owner/name")
+    return f"{m.group(1)}/{m.group(2)}"
+
+
+# ── work items ──────────────────────────────────────────────────────────────
+
+
+class Item:
+    def __init__(self, id, title, state, done, tags, assignee, description, url,
+                 rels, type="", criteria="", project=None):
+        self.id, self.title, self.state, self.done = id, title, state, done
+        self.tags, self.assignee, self.description, self.url = tags, assignee, description, url
+        self.rels, self.type, self.criteria, self.project = rels, type, criteria, project
+
+    def links(self, rel):
+        return sorted(t for r, t in self.rels if r == rel)
+
+    @property
+    def kind(self):
+        for t in self.tags:
+            if t.startswith("wayfinder:") and t not in ("wayfinder:ticket", "wayfinder:map"):
+                return t.split(":", 1)[1]
+        return None
+
+    @property
+    def is_map(self):
+        return "wayfinder:map" in self.tags
+
+    @property
+    def is_spec(self):
+        return "spec" in self.tags
+
+    @property
+    def hitl(self):
+        return "hitl" in self.tags or "ready-for-human" in self.tags or self.kind in HITL_TYPES
+
+
+# Each tracker exposes the same small surface: fetch items (with child/parent/
+# predecessor links normalised to the ADO rel names above), list maps, read
+# comments, claim a ticket, and say how an agent reads an item itself.
+
+
+class Ado:
+    name = "Azure DevOps"
+    noun = "work item"
+    doing = "Doing"
+
+    def __init__(self, remote=""):
+        org, proj = os.environ.get("WF_ORG"), os.environ.get("WF_PROJECT")
+        m = re.search(r"dev\.azure\.com/([^/]+)/([^/]+)/_git/", remote) or \
+            re.search(r"@dev\.azure\.com/([^/]+)/([^/]+)/", remote)
+        if m and not (org or proj):
+            org, proj = m.group(1), urllib.parse.unquote(m.group(2))
+        if not (org and proj):
+            out = sh("az", "devops", "configure", "-l")
+            mo = re.search(r"^organization\s*=\s*(\S+)", out, re.M)
+            mp = re.search(r"^project\s*=\s*(.+)$", out, re.M)
+            org = org or (mo and mo.group(1))
+            proj = proj or (mp and mp.group(1).strip())
+        if not org or not proj:
+            die("no ADO org/project — set WF_ORG/WF_PROJECT or `az devops configure -d ...`")
+        if not org.startswith("http"):
+            org = f"https://dev.azure.com/{org}"
+        self.org, self.project = org.rstrip("/"), proj
+        self.where = f"{self.org}/{self.project}"
+        self._token = None
+
+    def token(self):
+        if self._token is None:
+            self._token = sh("az", "account", "get-access-token", "--resource", ADO_RESOURCE,
+                             "--query", "accessToken", "-o", "tsv")
+            if not self._token:
+                die("no ADO token — run `az login` (or `azt main`)")
+        return self._token
+
+    def api(self, path, body=None, project=None, method=None, ctype="application/json"):
+        base = f"{self.org}/{project}" if project else self.org
+        url = f"{base}/_apis/{path}"
+        url += ("&" if "?" in url else "?") + ("api-version=7.1-preview.4" if "comments" in path else "api-version=7.1")
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method or ("POST" if data else "GET"),
+                                     headers={"Authorization": f"Bearer {self.token()}", "Content-Type": ctype})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            die(f"{e.code} {url}\n{e.read().decode()[:400]}")
+
+    def item(self, raw):
+        f = raw["fields"]
+        a = f.get("System.AssignedTo")
+        proj = f.get("System.TeamProject", self.project)
+        state = f.get("System.State", "")
+        return Item(
+            id=raw["id"], title=f.get("System.Title", ""), state=state, done=state in DONE,
+            tags=[t.strip() for t in (f.get("System.Tags") or "").split(";") if t.strip()],
+            assignee=a.get("uniqueName") if isinstance(a, dict) else None,
+            description=f.get("System.Description") or "",
+            criteria=f.get("Microsoft.VSTS.Common.AcceptanceCriteria") or "",
+            url=f"{self.org}/{proj}/_workitems/edit/{raw['id']}",
+            type=f.get("System.WorkItemType", ""), project=proj,
+            rels=[(r["rel"], int(r["url"].rsplit("/", 1)[1]))
+                  for r in raw.get("relations") or [] if "/workItems/" in r["url"]])
+
+    def fetch(self, ids):
+        for n in range(0, len(ids), 200):
+            res = self.api("wit/workitemsbatch", {"ids": ids[n:n + 200], "$expand": "relations",
+                                                  "errorPolicy": "omit"})
+            yield from (self.item(raw) for raw in res["value"] if raw)
+
+    def maps(self, all):
+        q = ("SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project "
+             "AND [System.Tags] CONTAINS 'wayfinder:map'"
+             + ("" if all else " AND [System.State] <> 'Done'") + " ORDER BY [System.Id]")
+        return [w["id"] for w in self.api("wit/wiql", {"query": q}, project=self.project)["workItems"]]
+
+    def comments(self, item):
+        res = self.api(f"wit/workItems/{item.id}/comments?order=asc", project=item.project)
+        return [(c.get("createdBy", {}).get("displayName", "?"), c.get("createdDate", ""), c.get("text"))
+                for c in res.get("comments", [])]
+
+    def me(self):
+        return os.environ.get("WF_ME") or sh("az", "account", "show", "--query", "user.name", "-o", "tsv")
+
+    def claim(self, item, who):
+        ops = [{"op": "add", "path": "/fields/System.AssignedTo", "value": who}]
+        if item.state not in ("Doing", "Active", "In Progress"):
+            ops.append({"op": "add", "path": "/fields/System.State", "value": "Doing"})
+        self.api(f"wit/workitems/{item.id}", ops, method="PATCH", ctype="application/json-patch+json")
+
+    def read_hint(self, id):
+        return f"`az boards work-item show --id {id}`"
+
+
+class GitHub:
+    name = "GitHub"
+    noun = "issue"
+    doing = None
+
+    FIELDS = """number title state body url
+      labels(first: 30) { nodes { name } }
+      assignees(first: 5) { nodes { login } }
+      parent { number repository { nameWithOwner } }
+      subIssues(first: 100) { nodes { number repository { nameWithOwner } } }
+      blockedBy(first: 50) { nodes { number repository { nameWithOwner } } }
+      blocking(first: 50) { nodes { number repository { nameWithOwner } } }"""
+
+    def __init__(self, repo):
+        self.repo = repo
+        self.owner, self.name_ = repo.split("/", 1)
+        self.where = f"github.com/{repo}"
+        if not sh("gh", "auth", "token"):
+            die("not logged in to GitHub — run `gh auth login`")
+
+    def graphql(self, query, **vars):
+        args = ["gh", "api", "graphql", "-f", f"query={query}"]
+        for k, v in vars.items():
+            args += ["-F", f"{k}={v}"]
+        r = subprocess.run(args, capture_output=True, text=True)
+        out = json.loads(r.stdout or "{}")
+        if r.returncode and not out.get("data"):
+            die(f"GitHub: {(out.get('errors') or [{}])[0].get('message') or r.stderr.strip()}")
+        return out["data"]
+
+    def mine(self, nodes):
+        return [n["number"] for n in nodes if n["repository"]["nameWithOwner"].lower() == self.repo.lower()]
+
+    def item(self, raw):
+        rels = [(CHILD, n) for n in self.mine(raw["subIssues"]["nodes"])]
+        rels += [(PRED, n) for n in self.mine(raw["blockedBy"]["nodes"])]
+        rels += [(SUCC, n) for n in self.mine(raw["blocking"]["nodes"])]
+        if raw["parent"]:
+            rels += [(PARENT, n) for n in self.mine([raw["parent"]])]
+        # "Spec: #12" / "Spec #12" in a map body links it to its spec, like ADO's Related
+        rels += [(RELATED, int(n)) for n in re.findall(r"(?im)^\W*spec\W*#(\d+)", raw["body"] or "")]
+        a = raw["assignees"]["nodes"]
+        return Item(id=raw["number"], title=raw["title"], state=raw["state"].lower(),
+                    done=raw["state"] == "CLOSED", tags=[l["name"] for l in raw["labels"]["nodes"]],
+                    assignee=a[0]["login"] if a else None, description=raw["body"] or "",
+                    url=raw["url"], type="Issue", rels=rels)
+
+    def fetch(self, ids):
+        for n in range(0, len(ids), 50):
+            chunk = ids[n:n + 50]
+            q = "query($o:String!,$r:String!){repository(owner:$o,name:$r){" + "".join(
+                f"i{i}: issueOrPullRequest(number:{i}){{ ... on Issue {{ {self.FIELDS} }} }}" for i in chunk) + "}}"
+            repo = self.graphql(q, o=self.owner, r=self.name_)["repository"] or {}
+            yield from (self.item(v) for v in repo.values() if v and "number" in v)
+
+    def maps(self, all):
+        out = sh("gh", "issue", "list", "-R", self.repo, "--label", "wayfinder:map", "--limit", "200",
+                 "--state", "all" if all else "open", "--json", "number")
+        return sorted(i["number"] for i in json.loads(out or "[]"))
+
+    def comments(self, item):
+        q = """query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){
+               comments(first:100){nodes{author{login} createdAt body}}}}}"""
+        d = self.graphql(q, o=self.owner, r=self.name_, n=item.id)
+        return [((c["author"] or {}).get("login", "?"), c["createdAt"], c["body"])
+                for c in d["repository"]["issue"]["comments"]["nodes"]]
+
+    def me(self):
+        return os.environ.get("WF_ME") or sh("gh", "api", "user", "--jq", ".login")
+
+    def claim(self, item, who):
+        if not sh("gh", "issue", "edit", str(item.id), "-R", self.repo, "--add-assignee", who):
+            die(f"could not assign #{item.id} to {who}")
+
+    def read_hint(self, id):
+        return f"`gh issue view {id} -R {self.repo} --comments`"
+
+
+_tracker = None
+
+
+def T():
+    global _tracker
+    if _tracker is None:
+        _tracker = detect()
+    return _tracker
+
+
+_cache = {}
+
+
+def fetch(ids):
+    ids = [i for i in dict.fromkeys(ids) if i not in _cache]
+    for it in T().fetch(ids):
+        _cache[it.id] = it
+
+
+def get(id):
+    fetch([id])
+    if id not in _cache:
+        die(f"{T().noun} {id} not found in {T().where}")
+    return _cache[id]
+
+
+def many(ids):
+    fetch(ids)
+    return [_cache[i] for i in ids if i in _cache]
+
+
+# ── classification ──────────────────────────────────────────────────────────
+
+
+def blockers(item):
+    """Open predecessors of item."""
+    return [p for p in many(item.links(PRED)) if not p.done]
+
+
+def classify(tickets, need_ready):
+    """Split open tickets into (takeable, claimed, blocked). Order: by id."""
+    fetch([p for t in tickets for p in t.links(PRED)])
+    take, claimed, blocked = [], [], []
+    for t in sorted(tickets, key=lambda t: t.id):
+        if t.done:
+            continue
+        if blockers(t):
+            blocked.append(t)
+        elif t.assignee or t.state == "Doing":
+            claimed.append(t)
+        elif need_ready and "ready-for-agent" not in t.tags:
+            blocked.append(t)
+        else:
+            take.append(t)
+    return take, claimed, blocked
+
+
+def map_tickets(m):
+    return many(m.links(CHILD))
+
+
+def map_specs(m):
+    return [s for s in many(m.links(RELATED) + m.links(CHILD)) if s.is_spec]
+
+
+# ── text ────────────────────────────────────────────────────────────────────
+
+
+def text(h):
+    if not h:
+        return ""
+    h = re.sub(r"(?is)<(script|style).*?</\1>|<!--.*?-->", "", h)
+    h = re.sub(r"(?i)<br\s*/?>", "\n", h)
+    h = re.sub(r"(?i)<h[1-6][^>]*>", "\n## ", h)
+    h = re.sub(r"(?i)<li[^>]*>", "\n- ", h)
+    h = re.sub(r"(?i)</(p|div|h[1-6]|ul|ol|tr|pre)>", "\n", h)
+    h = re.sub(r"(?i)<a [^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", r"\2", h)
+    h = re.sub(r"<[^>]+>", "", h)
+    h = html.unescape(h).replace("\xa0", " ")
+    h = "\n".join(l.rstrip() for l in h.splitlines())
+    h = re.sub(r"\n\s*\n(- )", r"\n\1", h)
+    return re.sub(r"\n{3,}", "\n\n", h).strip()
+
+
+def section(body, name):
+    m = re.search(rf"(?ims)^##\s*{name}\s*$(.*?)(?=^##\s|\Z)", text(body))
+    return m.group(1).strip() if m else ""
+
+
+def state_c(s):
+    k = s.strip()
+    return green(s) if k in DONE else yellow(s) if k == "Doing" else s
+
+
+def line(t, extra=""):
+    kind = f"[{t.kind}]" if t.kind else ""
+    who = f" @{t.assignee.split('@')[0]}" if t.assignee else ""
+    return f"  {cyan(f"{t.id:>5}")} {dim(f"{kind:<11}")} {t.title}{dim(who)}{extra}"
+
+
+def block_note(t):
+    b = blockers(t)
+    return dim("  ⟵ " + ", ".join(f"{p.id}" for p in b)) if b else ""
+
+
+def print_group(name, items, color, extra=lambda t: ""):
+    if not items:
+        return
+    print(color(f"{name} ({len(items)})"))
+    for t in items:
+        print(line(t, extra(t)))
+
+
+# ── commands ────────────────────────────────────────────────────────────────
+
+
+def cmd_maps(a):
+    maps = many(T().maps(a.all))
+    fetch([c for m in maps for c in m.links(CHILD)])
+    for m in maps:
+        kids = map_tickets(m)
+        done = sum(k.done for k in kids)
+        take, claimed, _ = classify(kids, need_ready=False)
+        stats = f"{done}/{len(kids)} done"
+        if take:
+            stats += f", {green(str(len(take)) + ' takeable')}"
+        if claimed:
+            stats += f", {yellow(str(len(claimed)) + ' claimed')}"
+        print(f"{cyan(f"{m.id:>5}")} {state_c(f"{m.state:<5}")} {m.title}  {dim(stats)}")
+
+
+def cmd_map(a):
+    m = get(a.id)
+    if not m.is_map:
+        print(dim(f"({m.id} is not tagged wayfinder:map)"))
+    print(f"{bold(m.title)}  {state_c(m.state)}\n{dim(m.url)}\n")
+    dest = section(m.description, "Destination")
+    if dest:
+        print(bold("Destination") + "\n" + dest + "\n")
+    kids = map_tickets(m)
+    take, claimed, blocked = classify(kids, need_ready=False)
+    print_group("Frontier", take, green)
+    print_group("Claimed", claimed, yellow)
+    print_group("Blocked", blocked, red, block_note)
+    done = [k for k in kids if k.done]
+    print(dim(f"Done ({len(done)})"))
+    fog = section(m.description, "Not yet specified")
+    if fog:
+        print("\n" + bold("Not yet specified") + "\n" + fog)
+    for s in map_specs(m):
+        sk = many(s.links(CHILD))
+        st, sc, _ = classify(sk, need_ready=True)
+        print(f"\n{bold('Spec')} {cyan(str(s.id))} {s.title}  {state_c(s.state)}  "
+              + dim(f"{sum(k.done for k in sk)}/{len(sk)} done, {len(st)} launchable, {len(sc)} running"))
+    if not take and not claimed and not blocked:
+        print("\n" + green("No open tickets — the way is clear."))
+
+
+def cmd_spec(a):
+    s = get(a.id)
+    print(f"{bold(s.title)}  {state_c(s.state)}\n{dim(s.url)}\n")
+    kids = many(s.links(CHILD))
+    take, running, blocked = classify(kids, need_ready=True)
+    hitl = lambda t: red("  HITL") if t.hitl else ""
+    print_group("Launchable", take, green, hitl)
+    print_group("Running", running, yellow, hitl)
+    print_group("Blocked", blocked, red,
+                lambda t: block_note(t) or dim("  (not ready-for-agent)"))
+    print(dim(f"Done ({sum(k.done for k in kids)}/{len(kids)})"))
+
+
+def cmd_show(a):
+    t = get(a.id)
+    print(f"{bold(t.title)}\n{dim(t.url)}")
+    print(f"{t.type} · {state_c(t.state)} · {', '.join(t.tags) or '-'} · {t.assignee or 'unassigned'}")
+    rels = [("parent", PARENT), ("blocked by", PRED),
+            ("blocks", SUCC), ("related", RELATED), ("children", CHILD)]
+    fetch([i for _, r in rels for i in t.links(r)])
+    for name, r in rels:
+        ids = t.links(r)
+        if ids:
+            print(f"{name}:")
+            for x in many(ids):
+                print(f"  {cyan(str(x.id))} {state_c(x.state)} {x.title}")
+    for name, body in (("", t.description), ("Acceptance criteria", t.criteria)):
+        if body:
+            print(("\n" + bold(name) if name else "") + "\n" + text(body))
+    if not a.no_comments:
+        for who, when, body in T().comments(t):
+            print(f"\n{dim('── ' + who + ' · ' + when[:16])}\n{text(body)}")
+
+
+def pick(item, explicit=None):
+    """Deterministic next ticket of a map or spec: first takeable by id."""
+    if explicit:
+        return get(explicit)
+    spec = not item.is_map
+    take, _, _ = classify(many(item.links(CHILD)), need_ready=spec)
+    if item.is_map and not take:
+        for s in map_specs(item):
+            st, _, _ = classify(many(s.links(CHILD)), need_ready=True)
+            take += st
+    return take[0] if take else None
+
+
+def cmd_next(a):
+    t = pick(get(a.id))
+    if not t:
+        die(f"nothing takeable under {a.id}")
+    print(t.id if not TTY else line(t))
+
+
+def repo_name():
+    top = sh("git", "rev-parse", "--show-toplevel")
+    if not top:
+        die("not in a git repo — cd to the repo the agent should work in")
+    # inside a worktree, name after the main repo
+    common = sh("git", "rev-parse", "--path-format=absolute", "--git-common-dir")
+    return os.path.basename(os.path.dirname(common) if common.endswith("/.git") else top)
+
+
+def launch(cmd, dry):
+    print(dim("$ " + " ".join(shlex.quote(x) for x in cmd)))
+    if dry:
+        return
+    if cmd[1] == "--bg":
+        subprocess.run(cmd, check=False)
+    else:
+        os.execvp(cmd[0], cmd)
+
+
+def ref(t):
+    return f"{T().name} {T().noun} {t.id} ({t.url})"
+
+
+def cmd_go(a):
+    m = get(a.map)
+    t = pick(m, a.ticket)
+    if not t:
+        die(f"nothing takeable on {m.id} — `wf map {m.id}`")
+    print(line(t))
+    afk = t.kind == "research"
+    prompt = f"/wayfinder Work through the map {ref(m)}. Ticket: {ref(t)} — \"{t.title}\"."
+    cmd = ["claude"]
+    if a.bg or (afk and not a.interactive):
+        cmd += ["--bg", "-n", f"wf-{m.id}-{t.id}", "--permission-mode", "acceptEdits"]
+    launch(cmd + [prompt], a.dry_run)
+
+
+def implement_prompt(t):
+    parent = many(t.links(PARENT))
+    preds = many(t.links(PRED))
+    out = [f"/implement {ref(t)}: \"{t.title}\"."]
+    if parent:
+        p = parent[0]
+        kind = "map (read its Notes)" if p.is_map else "spec"
+        out.append(f"Parent {kind}: {ref(p)} — \"{p.title}\". Read it for context with "
+                   f"{T().read_hint(p.id)}.")
+    if preds:
+        out.append("Already done before this: " + "; ".join(f"{p.id} \"{p.title}\"" for p in preds) + ".")
+    out.append("Implement only this repo's side of it. Commit to the current branch, then /code-review.")
+    body = text(t.description)
+    if t.criteria:
+        body += "\n\n## Acceptance criteria\n" + text(t.criteria)
+    if body:
+        out.append("\n--- ticket ---\n" + body)
+    return "\n".join(out)
+
+
+def run_one(t, a, repo, who):
+    if t.done:
+        return print(dim(f"{t.id} already {t.state} — skip"))
+    b = blockers(t)
+    if b and not a.force:
+        return print(red(f"{t.id} blocked by {', '.join(str(p.id) for p in b)} — skip (--force)"))
+    # a map's own task tickets are execution the map already decided on
+    map_task = t.kind == "task" and any(p.is_map for p in many(t.links(PARENT)))
+    if "ready-for-agent" not in t.tags and not map_task and not a.force:
+        return print(red(f"{t.id} not ready-for-agent — skip (--force)"))
+    if t.assignee and t.assignee != who and not a.force:
+        return print(red(f"{t.id} claimed by {t.assignee} — skip (--force)"))
+    interactive = a.interactive or (t.hitl and not a.force)
+    print(line(t, red("  HITL → interactive") if t.hitl and interactive else ""))
+    if not a.dry_run and not a.no_claim and who:
+        T().claim(t, who)
+    cmd = ["claude"]
+    if not interactive:
+        cmd += ["--bg", "--permission-mode", "acceptEdits"]
+    cmd += ["-w", f"t{t.id}", "-n", f"{repo}-{t.id}", implement_prompt(t)]
+    launch(cmd, a.dry_run)
+
+
+def cmd_run(a):
+    repo, who = repo_name(), T().me()
+    items = many(a.ids)
+    fetch([p for t in items for p in t.links(PRED) + t.links(PARENT)])
+    if a.interactive and len(items) > 1:
+        die("-i takes one ticket")
+    for t in items:
+        run_one(t, a, repo, who)
+
+
+def cmd_fan(a):
+    s = get(a.spec)
+    take, _, _ = classify(many(s.links(CHILD)), need_ready=True)
+    afk = [t for t in take if not t.hitl]
+    for t in take:
+        print(line(t, red("  HITL — skipped, `wf run -i`") if t.hitl else ""))
+    if not afk:
+        die("nothing launchable unattended")
+    if not a.yes and not a.dry_run:
+        if input(f"launch {len(afk)} background agent(s) in {repo_name()}? [y/N] ").lower() != "y":
+            return
+    a.ids, a.force, a.interactive = [t.id for t in afk], False, False
+    cmd_run(a)
+
+
+def cmd_open(a):
+    subprocess.run(["open", get(a.id).url])
+
+
+GUIDE = """\
+{b}wf — wayfinder, spec og tickets fra terminalen{r}
+
+{b}TRACKER{r}  {where}
+  Velges fra `git remote get-url origin` i repoet du står i:
+  github.com → GitHub (gh) · dev.azure.com → Azure DevOps (az) · ellers ADO-defaults.
+
+{b}MODELLEN{r}                        {d}ADO                     GitHub{r}
+  Kart        wayfinder:map       tag                     label
+  Barn        tickets             Parent/Child            sub-issues
+  Blokkering  ferdig = lukket     Predecessor-lenke       blocked-by-avhengighet
+  Spec        spec                Related fra kartet      «Spec: #N» i kartets body
+
+  Kart:  stor, tåkete innsats. Barna er beslutningstickets:
+         research (AFK) · grilling/prototype (HITL) · task
+  Spec:  resultatet av et kart (/to-spec). Barna er implementasjonstickets (/to-tickets).
+         Kart som bygger selv (task-tickets direkte under kartet) funker også: wf run <id>.
+
+  Kartticket er {g}ledig{r}  når: åpen, ublokkert, ingen assignee.
+  Spec-ticket er {g}klar{r}  når: åpen, ublokkert, ingen assignee, tag ready-for-agent.
+  Valg er deterministisk: laveste id vinner.
+
+{b}FLYTEN{r}
+
+  1. Se hva som finnes          wf                       (åpne kart)
+  2. Zoom inn på et kart        wf map 8698
+  3. Ta neste beslutning        wf go 8698               → claude "/wayfinder …"
+                                wf go 8698 8706          (bestemt ticket)
+     ... gjenta til kartet er klart, så /to-spec og /to-tickets i sesjonen ...
+  4. Se spec-status             wf spec 8591
+  5. cd til kode-repoet         c invisense
+  6. Fyr av agenter             wf fan 8591              (alle klare AFK-tickets)
+                                wf run 8592 8593         (bestemte tickets)
+                                wf run -i 8595           (interaktivt, f.eks. HITL)
+  7. Følg med                   claude agents · claude attach <id> · claude rm <id>
+
+{b}KOMMANDOER{r}
+
+  wf [maps] [-a]          åpne kart (-a: også Done) med done/ledig/tatt
+  wf map <id>             mål, ledige/tatte/blokkerte tickets, tåke, specs
+  wf spec <id>            klare / kjører / blokkert / done
+  wf show <id> [-C]       full ticket: body, kriterier, lenker, kommentarer (-C: uten)
+  wf next <id>            id på neste ledige ticket (kart eller spec) — for scripting
+  wf go <kart> [ticket]   /wayfinder-sesjon. Research → bakgrunn, ellers interaktiv
+                          --bg tving bakgrunn · -i tving interaktiv
+  wf run <id…>            /implement-agent i bakgrunnen, worktree t<id>, navn <repo>-<id>
+                          -i interaktiv · -f ignorer sjekker · --no-claim
+  wf fan <spec> [-y]      run på alle klare ikke-HITL tickets i spec-en
+  wf open <id>            åpne i nettleser
+  wf help [kommando]      denne teksten, eller flaggene til én kommando
+
+  Globalt: wf -n <kommando>   dry-run — vis claude-kommandoen, endre ingenting
+
+{b}VERDT Å VITE{r}
+
+  · run/fan {y}skriver til trackeren{r}: setter deg som assignee (ADO: også state Doing)
+    før agenten starter, så den ikke startes to ganger. Ticketen lukkes ikke — gjør det
+    etter merge.
+  · run hopper over Done, blokkerte og andres tickets, og alt som mangler ready-for-agent
+    — unntatt task-tickets rett under et kart (-f overstyrer alt).
+  · HITL (hitl, ready-for-human, grilling, prototype) startes aldri i bakgrunnen.
+  · Agenten jobber i repoet du står i. Én worktree per ticket → parallelt trygt.
+  · Prompten inneholder ticket-teksten, parent (spec/kart) og forgjengere — agenten
+    trenger ikke lete.
+  · Overstyr deteksjon: WF_TRACKER=ado|github · WF_REPO=eier/navn · WF_ORG / WF_PROJECT.
+    Auth: `az login` (eller azt main) / `gh auth login`. WF_ME overstyrer assignee.
+"""
+
+
+def cmd_help(a, parser, subs):
+    if a.topic:
+        if a.topic not in subs:
+            die(f"ukjent kommando: {a.topic}")
+        return subs[a.topic].print_help()
+    on = TTY
+    txt = GUIDE.format(b="\033[1m" if on else "", r="\033[0m" if on else "",
+                       d="\033[2m" if on else "", g="\033[32m" if on else "",
+                       y="\033[33m" if on else "", where=T().name + " · " + T().where)
+    if on and txt.count("\n") > os.get_terminal_size().lines:
+        subprocess.run(["less", "-RFX"], input=txt, text=True)
+    else:
+        print(txt)
+
+
+# ── cli ─────────────────────────────────────────────────────────────────────
+
+
+def main():
+    p = argparse.ArgumentParser(prog="wf", description="wayfinder maps, specs and tickets on ADO")
+    p.add_argument("-n", "--dry-run", action="store_true", help="print the claude command, change nothing")
+    sub = p.add_subparsers(dest="cmd")
+
+    s = sub.add_parser("maps", help="list wayfinder maps")
+    s.add_argument("-a", "--all", action="store_true", help="include Done maps")
+    s.set_defaults(fn=cmd_maps)
+
+    for name, fn, h in (("map", cmd_map, "map overview"), ("spec", cmd_spec, "spec ticket status"),
+                        ("next", cmd_next, "next takeable ticket id"), ("open", cmd_open, "open in browser")):
+        s = sub.add_parser(name, help=h)
+        s.add_argument("id", type=int)
+        s.set_defaults(fn=fn)
+
+    s = sub.add_parser("show", help="one work item in full")
+    s.add_argument("id", type=int)
+    s.add_argument("-C", "--no-comments", action="store_true")
+    s.set_defaults(fn=cmd_show)
+
+    s = sub.add_parser("go", help="start a /wayfinder session on a map's next ticket")
+    s.add_argument("map", type=int)
+    s.add_argument("ticket", type=int, nargs="?")
+    s.add_argument("--bg", action="store_true", help="background session (default for research)")
+    s.add_argument("-i", "--interactive", action="store_true", help="interactive even for research")
+    s.set_defaults(fn=cmd_go)
+
+    s = sub.add_parser("run", help="background /implement agent per ticket, in a worktree of this repo")
+    s.add_argument("ids", type=int, nargs="+")
+    s.add_argument("-i", "--interactive", action="store_true", help="foreground session")
+    s.add_argument("-f", "--force", action="store_true", help="ignore blockers, readiness, claims, HITL")
+    s.add_argument("--no-claim", action="store_true", help="don't assign/set Doing")
+    s.set_defaults(fn=cmd_run)
+
+    s = sub.add_parser("fan", help="wf run every launchable AFK ticket of a spec")
+    s.add_argument("spec", type=int)
+    s.add_argument("-y", "--yes", action="store_true")
+    s.add_argument("--no-claim", action="store_true")
+    s.set_defaults(fn=cmd_fan)
+
+    s = sub.add_parser("help", help="forklaring av modellen, flyten og kommandoene")
+    s.add_argument("topic", nargs="?")
+    s.set_defaults(fn=lambda a: cmd_help(a, p, sub.choices))
+
+    a = p.parse_args()
+    if not a.cmd:
+        a = p.parse_args(["maps"] + sys.argv[1:])
+    try:
+        a.fn(a)
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()

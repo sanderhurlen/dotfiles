@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+#
+# graph-token
+#
+# Prints a Microsoft Graph access token on stdout. Nothing is cached to disk.
+#
+# Config (never committed) — ~/.config/visense-graph/config.json:
+#   { "tenantId": "...", "clientId": "...", "scope": "https://graph.microsoft.com/.default" }
+#
+# Secret lives in the login keychain, not on disk:
+#   security add-generic-password -a "$USER" -s visense-graph-secret -w '<secret>' -U
+#
+# Usage: graph-token
+#        curl -s -H "Authorization: Bearer $(graph-token)" https://graph.microsoft.com/v1.0/me
+
+set -euo pipefail
+
+CONFIG="${VISENSE_GRAPH_CONFIG:-$HOME/.config/visense-graph/config.json}"
+SERVICE="${VISENSE_GRAPH_KEYCHAIN_SERVICE:-visense-graph-secret}"
+
+die() { printf 'graph-token: %s\n' "$1" >&2; exit 1; }
+
+case "${1:-}" in
+	-h|--help) sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+	"") ;;
+	*) die "unknown argument: $1" ;;
+esac
+
+command -v jq >/dev/null 2>&1 || die "jq is required (brew install jq)"
+[ -f "$CONFIG" ] || die "no config at $CONFIG — see 'graph-token --help'"
+
+tenant=$(jq -re '.tenantId' "$CONFIG") || die "tenantId missing from $CONFIG"
+client=$(jq -re '.clientId' "$CONFIG") || die "clientId missing from $CONFIG"
+scope=$(jq -r '.scope // "https://graph.microsoft.com/.default"' "$CONFIG")
+
+secret=$(security find-generic-password -a "$USER" -s "$SERVICE" -w 2>/dev/null) \
+	|| die "no keychain item '$SERVICE' for $USER — see 'graph-token --help'"
+
+# Form-encode via stdin: keeping the secret out of argv, which is world-readable via ps.
+urlenc() { jq -sRr @uri; }
+body="client_id=$(printf %s "$client" | urlenc)"
+body="$body&scope=$(printf %s "$scope" | urlenc)"
+body="$body&grant_type=client_credentials"
+body="$body&client_secret=$(printf %s "$secret" | urlenc)"
+
+response=$(printf %s "$body" | curl -sS --fail-with-body --data @- \
+	-H 'Content-Type: application/x-www-form-urlencoded' \
+	"https://login.microsoftonline.com/$tenant/oauth2/v2.0/token") || {
+	printf 'graph-token: token request failed: %s\n' \
+		"$(printf %s "$response" | jq -r '.error_description // .' 2>/dev/null | head -2)" >&2
+	exit 1
+}
+
+printf %s "$response" | jq -re '.access_token' || die "no access_token in response"
