@@ -1,0 +1,37 @@
+{
+  "_towerChannel": "mail",
+  "conversationId": "AAQkADMock-pris-kontrakt",
+  "value": [
+    {
+      "id": "AAMkADMock-pris-kontrakt-1",
+      "conversationId": "AAQkADMock-pris-kontrakt",
+      "subject": "Spørsmål om pris for utvidet support",
+      "from": {
+        "emailAddress": {
+          "name": "Per Aas",
+          "address": "per.aas@fjellbygg.no"
+        }
+      },
+      "toRecipients": [
+        {
+          "emailAddress": {
+            "name": "Sander Hurlen",
+            "address": "sander@visense.no"
+          }
+        }
+      ],
+      "ccRecipients": [],
+      "replyTo": [],
+      "receivedDateTime": "2026-10-06T09:03:00Z",
+      "body": {
+        "contentType": "text",
+        "content": "Hei,\n\nVi vurderer å utvide supportavtalen til å gjelde døgnet rundt. Hva vil det koste per måned, og hvor lang bindingstid blir det? Kan vi i så fall starte fra 1. november?\n\nMed vennlig hilsen\nPer Aas\nDaglig leder, Fjellbygg AS"
+      },
+      "bodyPreview": "Hei, Vi vurderer å utvide supportavtalen til å gjelde døgnet rundt. Hva vil det koste per måned, og hvor lang bindingstid blir det? Kan vi i så fall starte fra 1. november? Med vennlig hilsen Per Aas Daglig leder, Fjellbygg AS",
+      "isRead": false,
+      "importance": "normal",
+      "hasAttachments": false,
+      "webLink": "https://outlook.office365.com/owa/?ItemID=mock-pris-kontrakt-1"
+    }
+  ]
+}

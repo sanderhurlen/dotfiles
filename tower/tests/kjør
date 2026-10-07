@@ -1,0 +1,17 @@
+#!/usr/bin/env -S uv run -q --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["textual>=8,<9", "pytest>=8", "pytest-asyncio>=0.24"]
+# ///
+# Kjører tower-testene: tower/tests/kjør [pytest-argumenter]. Hold textual-pinnen lik bin/tower.
+import sys
+from pathlib import Path
+
+import pytest
+
+rot = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(rot))
+sys.exit(pytest.main([
+    "-p", "no:cacheprovider", "-o", "asyncio_mode=auto", "-o", "asyncio_default_fixture_loop_scope=function",
+    "--rootdir", str(rot), *(sys.argv[1:] or [str(Path(__file__).parent)]),
+]))

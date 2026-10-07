@@ -1,0 +1,44 @@
+{
+  "_towerChannel": "mail",
+  "conversationId": "AAQkADMock-harbor-outage",
+  "value": [
+    {
+      "id": "AAMkADMock-harbor-outage-1",
+      "conversationId": "AAQkADMock-harbor-outage",
+      "subject": "URGENT: API returning 500 errors since 07:00",
+      "from": {
+        "emailAddress": {
+          "name": "James Whitfield",
+          "address": "j.whitfield@harborlogistics.com"
+        }
+      },
+      "toRecipients": [
+        {
+          "emailAddress": {
+            "name": "Visense Support",
+            "address": "support@visense.no"
+          }
+        }
+      ],
+      "ccRecipients": [
+        {
+          "emailAddress": {
+            "name": "Sander Hurlen",
+            "address": "sander@visense.no"
+          }
+        }
+      ],
+      "replyTo": [],
+      "receivedDateTime": "2026-10-07T06:41:00Z",
+      "body": {
+        "contentType": "html",
+        "content": "<html><body><p>Hi team,</p><p>Since about 07:00 CET every call to /v2/shipments returns HTTP 500. Our warehouse can&#x27;t print labels and trucks are queuing. Is this a known issue? We need an ETA asap.</p><p>James Whitfield<br>Head of Operations, Harbor Logistics</p></body></html>"
+      },
+      "bodyPreview": "Hi team, Since about 07:00 CET every call to /v2/shipments returns HTTP 500. Our warehouse can't print labels and trucks are queuing. Is this a known issue? We need an ETA asap. James Whitfield Head of Operations, Harbor Logistics",
+      "isRead": false,
+      "importance": "high",
+      "hasAttachments": false,
+      "webLink": "https://outlook.office365.com/owa/?ItemID=mock-harbor-outage-1"
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "_towerChannel": "mail",
+  "conversationId": "AAQkADMock-takk-passer",
+  "value": [
+    {
+      "id": "AAMkADMock-takk-passer-1",
+      "conversationId": "AAQkADMock-takk-passer",
+      "subject": "Re: Workshop 15. oktober",
+      "from": {
+        "emailAddress": {
+          "name": "Sander Hurlen",
+          "address": "sander@visense.no"
+        }
+      },
+      "toRecipients": [
+        {
+          "emailAddress": {
+            "name": "Kari Nordby",
+            "address": "kari.nordby@nordlys-energi.no"
+          }
+        }
+      ],
+      "ccRecipients": [],
+      "replyTo": [],
+      "receivedDateTime": "2026-10-06T07:00:00Z",
+      "body": {
+        "contentType": "text",
+        "content": "Hei Kari,\n\nForslag: workshop 15. oktober kl 09-12 hos dere. Passer det?\n\nMvh Sander"
+      },
+      "bodyPreview": "Hei Kari, Forslag: workshop 15. oktober kl 09-12 hos dere. Passer det? Mvh Sander",
+      "isRead": false,
+      "importance": "normal",
+      "hasAttachments": false,
+      "webLink": "https://outlook.office365.com/owa/?ItemID=mock-takk-passer-1"
+    },
+    {
+      "id": "AAMkADMock-takk-passer-2",
+      "conversationId": "AAQkADMock-takk-passer",
+      "subject": "RE: Re: Workshop 15. oktober",
+      "from": {
+        "emailAddress": {
+          "name": "Kari Nordby",
+          "address": "kari.nordby@nordlys-energi.no"
+        }
+      },
+      "toRecipients": [
+        {
+          "emailAddress": {
+            "name": "Sander Hurlen",
+            "address": "sander@visense.no"
+          }
+        }
+      ],
+      "ccRecipients": [],
+      "replyTo": [],
+      "receivedDateTime": "2026-10-06T11:45:00Z",
+      "body": {
+        "contentType": "text",
+        "content": "Takk, det passer fint. Vi ses!\n\nKari"
+      },
+      "bodyPreview": "Takk, det passer fint. Vi ses! Kari",
+      "isRead": false,
+      "importance": "normal",
+      "hasAttachments": false,
+      "webLink": "https://outlook.office365.com/owa/?ItemID=mock-takk-passer-2"
+    }
+  ]
+}

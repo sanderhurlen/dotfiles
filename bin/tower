@@ -1,0 +1,14 @@
+#!/usr/bin/env -S uv run -q --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["textual>=8,<9"]
+# ///
+# tower: terminal-cockpit som forbereder svar på mail og Teams. Kode i tower/, data i ~/.local/share/tower/.
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tower.app import main
+
+main()

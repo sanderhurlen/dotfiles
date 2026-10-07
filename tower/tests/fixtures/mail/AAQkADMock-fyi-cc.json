@@ -1,0 +1,44 @@
+{
+  "_towerChannel": "mail",
+  "conversationId": "AAQkADMock-fyi-cc",
+  "value": [
+    {
+      "id": "AAMkADMock-fyi-cc-1",
+      "conversationId": "AAQkADMock-fyi-cc",
+      "subject": "Re: Møtereferat oppstartsmøte",
+      "from": {
+        "emailAddress": {
+          "name": "Marte Lie",
+          "address": "marte@visense.no"
+        }
+      },
+      "toRecipients": [
+        {
+          "emailAddress": {
+            "name": "Kari Nordby",
+            "address": "kari.nordby@nordlys-energi.no"
+          }
+        }
+      ],
+      "ccRecipients": [
+        {
+          "emailAddress": {
+            "name": "Sander Hurlen",
+            "address": "sander@visense.no"
+          }
+        }
+      ],
+      "replyTo": [],
+      "receivedDateTime": "2026-10-06T14:20:00Z",
+      "body": {
+        "contentType": "text",
+        "content": "Hei Kari,\n\nVedlagt referat fra oppstartsmøtet. Sander er i kopi for orientering. Gi beskjed om noe mangler.\n\nHilsen Marte"
+      },
+      "bodyPreview": "Hei Kari, Vedlagt referat fra oppstartsmøtet. Sander er i kopi for orientering. Gi beskjed om noe mangler. Hilsen Marte",
+      "isRead": false,
+      "importance": "normal",
+      "hasAttachments": false,
+      "webLink": "https://outlook.office365.com/owa/?ItemID=mock-fyi-cc-1"
+    }
+  ]
+}

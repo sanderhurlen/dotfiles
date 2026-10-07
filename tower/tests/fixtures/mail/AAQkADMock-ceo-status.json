@@ -1,0 +1,37 @@
+{
+  "_towerChannel": "mail",
+  "conversationId": "AAQkADMock-ceo-status",
+  "value": [
+    {
+      "id": "AAMkADMock-ceo-status-1",
+      "conversationId": "AAQkADMock-ceo-status",
+      "subject": "Kort status Nordlys før styremøtet",
+      "from": {
+        "emailAddress": {
+          "name": "Ingrid Solheim",
+          "address": "ingrid@visense.no"
+        }
+      },
+      "toRecipients": [
+        {
+          "emailAddress": {
+            "name": "Sander Hurlen",
+            "address": "sander@visense.no"
+          }
+        }
+      ],
+      "ccRecipients": [],
+      "replyTo": [],
+      "receivedDateTime": "2026-10-07T05:30:00Z",
+      "body": {
+        "contentType": "text",
+        "content": "Hei Sander, kan du sende meg 3-4 kulepunkter om status på Nordlys-prosjektet innen torsdag? Skal ha det med i styrepresentasjonen fredag. Særlig risiko og om vi holder budsjett.\n\nIngrid"
+      },
+      "bodyPreview": "Hei Sander, kan du sende meg 3-4 kulepunkter om status på Nordlys-prosjektet innen torsdag? Skal ha det med i styrepresentasjonen fredag. Særlig risiko og om vi holder budsjett. Ingrid",
+      "isRead": false,
+      "importance": "normal",
+      "hasAttachments": false,
+      "webLink": "https://outlook.office365.com/owa/?ItemID=mock-ceo-status-1"
+    }
+  ]
+}
