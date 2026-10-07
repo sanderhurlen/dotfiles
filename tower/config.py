@@ -14,6 +14,7 @@ STANDARD = {
     "kanaler": ["mail", "teams"],
     "dager": 7,
     "poll_sekunder": 2,
+    "modell": "sonnet",
 }
 
 
@@ -28,6 +29,7 @@ class Config:
     kanaler: tuple[str, ...] = ("mail", "teams")
     dager: int = 7  # Tråder eldre enn dette ved første syn blir `gammel`
     poll_sekunder: float = 2
+    modell: str = "sonnet"  # for triage og utkast
 
     @property
     def db(self) -> Path:
@@ -36,6 +38,10 @@ class Config:
     @property
     def outbox(self) -> Path:
         return self.rot / "outbox"
+
+    @property
+    def agent_cwd(self) -> Path:
+        return self.rot / "agent"  # nøytral cwd for `claude -p`
 
 
 def last(rot: Path | None = None) -> Config:
@@ -51,6 +57,7 @@ def last(rot: Path | None = None) -> Config:
         kanaler=tuple(data["kanaler"]),
         dager=int(data["dager"]),
         poll_sekunder=float(data["poll_sekunder"]),
+        modell=str(data["modell"]),
     )
 
 

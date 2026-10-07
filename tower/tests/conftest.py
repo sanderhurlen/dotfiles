@@ -25,3 +25,50 @@ def rot(tmp_path: Path) -> Path:
 @pytest.fixture
 def config(rot: Path) -> Config:
     return Config(rot=rot, meg=MEG, kanaler=("mail",), dager=7, poll_sekunder=60)
+
+
+class FalskRunner:
+    """Kannet svar per kall i stedet for `claude -p`. `svar(prompt)` gir dict eller kaster AgentFeil.
+
+    Med `porter=True` blokkerer hvert kall til testen slipper det med `slipp()`.
+    """
+
+    def __init__(self, svar=None, porter: bool = False) -> None:
+        self.svar = svar or (lambda prompt: {"kategori": "svar", "haster": False, "sammendrag": "s",
+                                             "begrunnelse": "b"})
+        self.porter = porter
+        self.kall: list[str] = []
+        self.aktive = 0
+        self.maks_aktive = 0
+        self.avbrutt = 0
+        self._port = None
+
+    def slipp(self) -> None:
+        if self._port:
+            self._port.set()
+
+    async def kjør(self, instruks, schema, prompt):
+        import asyncio
+
+        from tower.agent import Resultat
+
+        self.kall.append(prompt)
+        self.aktive += 1
+        self.maks_aktive = max(self.maks_aktive, self.aktive)
+        try:
+            if self.porter:
+                self._port = self._port or asyncio.Event()
+                await self._port.wait()
+            else:
+                await asyncio.sleep(0)
+            return Resultat(self.svar(prompt), 0.01)
+        except asyncio.CancelledError:
+            self.avbrutt += 1
+            raise
+        finally:
+            self.aktive -= 1
+
+
+@pytest.fixture
+def runner() -> FalskRunner:
+    return FalskRunner()

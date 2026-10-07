@@ -11,14 +11,19 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.widgets import DataTable, Footer, Static
 
+from tower.agent import AgentFeil, Agenter, ClaudeRunner, Jobb, Runner
 from tower.config import Config
 from tower.db import BESVART, GAMMEL, Db, Rad
 from tower.kanal import Kanal, Tråd
+from tower.triage import triager
 
 KANAL_IKON = {"mail": "✉", "teams": "◆"}
 FERDIG = {BESVART, GAMMEL}
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+MAKS_AGENTER = 2
 
 
 def nå_utc() -> datetime:
@@ -47,11 +52,33 @@ def emne_kort(t: Tråd) -> str:
 
 
 def sorteringsnøkkel(t: Tråd, rad: Rad) -> tuple:
-    return (rad.status in FERDIG, -t.siste.tid.timestamp())
+    """Ferdige nederst; ellers haster, svar, utriagert, info, nyeste først innen hver."""
+    tr = rad.triage
+    rang = 2 if tr is None else 0 if tr.haster else 3 if tr.kategori == "info" else 1
+    return (rad.status in FERDIG, rang, -t.siste.tid.timestamp())
 
 
 def status_merke(rad: Rad) -> str:
-    return {"ny": "[dim]ny[/]", GAMMEL: "[dim]gammel[/]", BESVART: "[dim]besvart[/]"}.get(rad.status, rad.status)
+    return {"ny": "[dim]ny[/]", GAMMEL: "[dim]gammel[/]", BESVART: "[dim]besvart[/]",
+            "triagert": "[dim]triagert[/]"}.get(rad.status, rad.status)
+
+
+def triage_merke(rad: Rad, jobb: str | None = None) -> str:
+    """`jobb` er "kjører" eller "kø" når en triage venter på Tråden."""
+    if jobb == "kjører":
+        return "[dim]triagerer…[/]"
+    if jobb == "kø":
+        return "[dim]i kø[/]"
+    if rad.triage_feilet:
+        return "[red]✗ feilet[/]"
+    tr = rad.triage
+    if tr is None:
+        return ""
+    if tr.haster:
+        return "[b red]● haster[/]"
+    if tr.kategori == "info":
+        return "[dim]○ info[/]"
+    return "[yellow]● svar[/]"
 
 
 def tråd_markup(t: Tråd) -> str:
@@ -80,7 +107,7 @@ class Tower(App):
     """
     BINDINGS = [Binding("q", "quit", "Avslutt")]
 
-    def __init__(self, config: Config, kanaler: list[Kanal], db: Db,
+    def __init__(self, config: Config, kanaler: list[Kanal], db: Db, runner: Runner,
                  nå: Callable[[], datetime] = nå_utc, poll: bool = True) -> None:
         super().__init__()
         self.config = config
@@ -92,6 +119,11 @@ class Tower(App):
         self.rader: dict[str, Rad] = {}
         self.hentfeil: dict[str, str] = {}
         self._poller = False
+        self.runner = runner
+        self.agenter = Agenter(MAKS_AGENTER, endret=self.agenter_endret)
+        self._triage_for: dict[str, str] = {}  # Tråd-id → Melding-id for køet/kjørende triage
+        self._tikk = 0
+        self.kost = db.kost(nå())
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="hoved"):
@@ -108,11 +140,12 @@ class Tower(App):
         dt.add_column("", key="k", width=1)
         dt.add_column("Fra", key="fra", width=16)
         dt.add_column("Emne", key="emne", width=30)
-        dt.add_column("Triage", key="tr", width=8)
+        dt.add_column("Triage", key="tr", width=11)
         dt.add_column("Utkast", key="u", width=10)
         dt.add_column("", key="alder", width=3)
         dt.focus()
         self.oppdater_status()
+        self.set_interval(0.12, self.tikk)
         if self.auto_poll:
             self.utløs_poll()
             self.set_interval(self.config.poll_sekunder, self.utløs_poll)
@@ -137,12 +170,68 @@ class Tower(App):
                 for t in tråder:
                     self.tråder[t.id] = t
                     self.rader[t.id] = self.db.registrer(t, nå, self.config.dager)
+                    self.planlegg(t)
                     endret = True
             if endret:
                 self.tegn_tabell()
             self.oppdater_status()
         finally:
             self._poller = False
+
+    def planlegg(self, t: Tråd) -> None:
+        """Køer triage når Tråden har en ny Melding fra andre; avbryter når den ikke lenger trengs."""
+        rad = self.rader[t.id]
+        nøkkel = ("triage", t.id)
+        if not rad.trenger_triage:
+            if self.agenter.venter(nøkkel):
+                self.agenter.avbryt(nøkkel)
+            return
+        if self.agenter.venter(nøkkel) and self._triage_for.get(t.id) == t.siste.id:
+            return  # samme Melding, allerede på vei
+        self._triage_for[t.id] = t.siste.id
+        self.agenter.legg_i_kø(Jobb(nøkkel, f"triage {motpart(t).split()[0]}", lambda: self.kjør_triage(t)))
+
+    async def kjør_triage(self, t: Tråd) -> None:
+        try:
+            triage, usd = await triager(self.runner, t)
+        except AgentFeil as e:
+            self.db.logg_kjøring("triage", t.id, e.usd, self.nå(), feil=str(e))
+            rad = self.db.lagre_triage_feil(t.id, t.siste.id, str(e), self.nå())
+        else:
+            self.db.logg_kjøring("triage", t.id, usd, self.nå())
+            rad = self.db.lagre_triage(t.id, t.siste.id, triage, self.nå())
+        self.kost = self.db.kost(self.nå())
+        if rad:
+            self.rader[t.id] = rad
+        if self._triage_for.get(t.id) == t.siste.id:
+            del self._triage_for[t.id]
+        self.tegn_tabell()
+
+    def jobb_status(self, tråd_id: str) -> str | None:
+        nøkkel = ("triage", tråd_id)
+        if nøkkel in self.agenter.kjørende:
+            return "kjører"
+        if nøkkel in self.agenter.kø:
+            return "kø"
+        return None
+
+    def agenter_endret(self) -> None:
+        if not self.is_mounted:
+            return
+        dt = self.query_one(DataTable)
+        for tid, rad in self.rader.items():
+            if tid in dt.rows:
+                dt.update_cell(tid, "tr", triage_merke(rad, self.jobb_status(tid)))
+        self.oppdater_status()
+
+    def tikk(self) -> None:
+        self._tikk += 1
+        if self.agenter.kjørende:
+            self.oppdater_status()
+
+    async def on_unmount(self) -> None:
+        self.agenter.endret = lambda: None  # widgetene er borte
+        await self.agenter.stopp()
 
     def sortert(self) -> list[Tråd]:
         return sorted(self.tråder.values(), key=lambda t: sorteringsnøkkel(t, self.rader[t.id]))
@@ -156,13 +245,16 @@ class Tower(App):
             rad = self.rader[t.id]
             dim = "[dim]" if rad.status in FERDIG else ""
             dt.add_row(KANAL_IKON.get(t.kanal, "?"), dim + escape(motpart(t)), dim + escape(emne_kort(t)),
-                       status_merke(rad), "", alder(t.siste.tid, nå), key=t.id)
+                       triage_merke(rad, self.jobb_status(t.id)), "", alder(t.siste.tid, nå), key=t.id)
         if valgt in self.tråder:
             dt.move_cursor(row=dt.get_row_index(valgt), animate=False)
         self.vis_detalj()
 
     def valgt_id(self) -> str | None:
-        dt = self.query_one(DataTable)
+        try:
+            dt = self.query_one(DataTable)
+        except NoMatches:  # meldinger kan komme etter at skjermen er revet ned
+            return None
         if dt.row_count == 0:
             return None
         return dt.coordinate_to_cell_key(dt.cursor_coordinate).row_key.value
@@ -172,17 +264,31 @@ class Tower(App):
         t = self.tråder.get(self.valgt_id() or "")
         if not t:
             return
-        self.query_one("#hode", Static).update(
-            f"{KANAL_IKON.get(t.kanal, '?')} [b]{escape(t.emne)}[/]\n{status_merke(self.rader[t.id])}")
+        rad = self.rader[t.id]
+        linjer = [f"{KANAL_IKON.get(t.kanal, '?')} [b]{escape(t.emne)}[/]"]
+        merke = " ".join(m for m in (status_merke(rad), triage_merke(rad, self.jobb_status(t.id))) if m)
+        if rad.triage_feilet:
+            linjer += [merke, f"[red]{escape(rad.triage_feil or '')}[/]"]
+        elif rad.triage:
+            linjer += [f"{merke}  [i]{escape(rad.triage.sammendrag)}[/]", f"[dim]{escape(rad.triage.begrunnelse)}[/]"]
+        else:
+            linjer.append(merke)
+        self.query_one("#hode", Static).update("\n".join(linjer))
         self.query_one("#trad", Static).update(tråd_markup(t))
 
     def oppdater_status(self) -> None:
-        if self.hentfeil:
-            tekst = "  ".join(f"[b red]✗ {k}:[/] {escape(v)}" for k, v in self.hentfeil.items())
-        else:
-            tekst = "[dim]agenter i ro[/]"
+        deler = [f"[b red]✗ {k}:[/] {escape(v)}" for k, v in self.hentfeil.items()]
+        if self.agenter.feil:
+            deler.append(f"[b red]✗ {escape(self.agenter.feil)}[/]")
+        kjører = [j.etikett for j, _ in self.agenter.kjørende.values()]
+        if kjører:
+            kø = f"  [dim]+{len(self.agenter.kø)} i kø[/]" if self.agenter.kø else ""
+            deler.append(f"[magenta]{SPINNER[self._tikk % len(SPINNER)]}[/] {escape(' · '.join(kjører))}{kø}")
+        elif not deler:
+            deler.append("[dim]agenter i ro[/]")
         aktive = sum(1 for r in self.rader.values() if r.status not in FERDIG)
-        self.query_one("#status", Static).update(f"{tekst}   [dim]│[/]  {aktive} tråder venter")
+        self.query_one("#status", Static).update(
+            f"{'  '.join(deler)}   [dim]│[/]  {aktive} tråder venter   [dim]│[/]  ${self.kost:.3f} i dag")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -194,6 +300,6 @@ def main(argv: list[str] | None = None) -> None:
     config = cfg.last()
     db = Db(config.db)
     try:
-        Tower(config, cfg.lag_kanaler(config), db).run()
+        Tower(config, cfg.lag_kanaler(config), db, ClaudeRunner(config.modell, config.agent_cwd)).run()
     finally:
         db.lukk()
