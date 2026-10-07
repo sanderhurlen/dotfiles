@@ -1,0 +1,31 @@
+{
+  "personer": [
+    {"id": "meg", "navn": "Sander Hurlen", "adresse": "sander@visense.no", "org": "visense", "rolle": "Utvikler og teknisk prosjektleder", "relasjon": "meg", "språk": "no"},
+    {"id": "ingrid", "navn": "Ingrid Solheim", "adresse": "ingrid.solheim@visense.no", "org": "visense", "rolle": "Daglig leder", "relasjon": "ledelse", "språk": "no", "om": "Kort og direkte, vil ha status før styremøter og kundemøter."},
+    {"id": "marte", "navn": "Marte Lie", "adresse": "marte@visense.no", "org": "visense", "rolle": "Prosjektleder Nordlys", "relasjon": "kollega", "språk": "no", "om": "Skriver referater, setter Sander i kopi."},
+    {"id": "jonas", "navn": "Jonas Dahl", "adresse": "jonas.dahl@visense.no", "org": "visense", "rolle": "Designer", "relasjon": "kollega", "språk": "no"},
+    {"id": "ola", "navn": "Ola Berg", "adresse": "ola.berg@visense.no", "org": "visense", "rolle": "Juniorutvikler", "relasjon": "kollega", "språk": "no", "om": "Uformell i Teams, spør om hjelp med PR-er og tester."},
+    {"id": "tom", "navn": "Tom Hansen", "adresse": "tom.hansen@visense.no", "org": "visense", "rolle": "Driftsansvarlig", "relasjon": "kollega", "språk": "en", "om": "Skriver engelsk, eier releaser og drift."},
+    {"id": "priya", "navn": "Priya Nair", "adresse": "priya.nair@visense.no", "org": "visense", "rolle": "QA", "relasjon": "kollega", "språk": "en"},
+    {"id": "kari", "navn": "Kari Nordby", "adresse": "kari.nordby@nordlys-energi.no", "org": "nordlys", "rolle": "IT-sjef", "relasjon": "kunde", "språk": "no", "om": "Høflig, vil ha datoer og konkrete svar."},
+    {"id": "erik", "navn": "Erik Haugen", "adresse": "erik.haugen@nordlys-energi.no", "org": "nordlys", "rolle": "Økonomisjef", "relasjon": "kunde", "språk": "no"},
+    {"id": "per", "navn": "Per Aas", "adresse": "per.aas@fjellbygg.no", "org": "fjellbygg", "rolle": "Daglig leder", "relasjon": "kunde", "språk": "no", "om": "Spør om priser og avtaler."},
+    {"id": "james", "navn": "James Whitfield", "adresse": "j.whitfield@harborlogistics.com", "org": "harbor", "rolle": "Head of Operations", "relasjon": "kunde", "språk": "en", "om": "Brå ved driftsproblemer, ellers vennlig."},
+    {"id": "anna", "navn": "Anna Schmidt", "adresse": "anna.schmidt@harborlogistics.com", "org": "harbor", "rolle": "Product Owner", "relasjon": "kunde", "språk": "en"},
+    {"id": "azure", "navn": "Microsoft Azure", "adresse": "azure-noreply@microsoft.com", "org": "ekstern", "rolle": "Nyhetsbrev og varsler", "relasjon": "info", "språk": "en", "bare_mail": true},
+    {"id": "github", "navn": "GitHub", "adresse": "notifications@github.com", "org": "ekstern", "rolle": "PR- og CI-varsler", "relasjon": "info", "språk": "en", "bare_mail": true},
+    {"id": "tripletex", "navn": "Tripletex", "adresse": "no-reply@tripletex.no", "org": "ekstern", "rolle": "Faktura- og timeføringsvarsler", "relasjon": "info", "språk": "no", "bare_mail": true}
+  ],
+  "org": [
+    {"id": "visense", "navn": "Visense AS", "om": "Lite norsk konsulentselskap som bygger integrasjoner og skyløsninger. Intern = @visense.no."},
+    {"id": "nordlys", "navn": "Nordlys Energi", "om": "Kunde. Kraftselskap, får ny ERP-integrasjon fra Visense."},
+    {"id": "fjellbygg", "navn": "Fjellbygg AS", "om": "Kunde. Byggefirma med supportavtale, vurderer å utvide den."},
+    {"id": "harbor", "navn": "Harbor Logistics", "om": "Kunde i UK. Bruker Visense sitt sporings-API i produksjon."}
+  ],
+  "prosjekter": [
+    {"id": "nordlys-erp", "navn": "Nordlys ERP-integrasjon", "om": "Integrasjon mellom Nordlys sitt nye ERP og kundeportalen. Workshop 15. oktober, go-live planlagt desember."},
+    {"id": "harbor-api", "navn": "Harbor sporings-API", "om": "REST-API for sendingssporing, SLA 99,9 %. Av og til 500-feil ved deploy."},
+    {"id": "release-4.2", "navn": "Release 4.2", "om": "Intern release av plattformen med ny rapport-eksport. Tom eier go/no-go, Priya tester."},
+    {"id": "fjellbygg-support", "navn": "Fjellbygg supportavtale", "om": "Kontortid i dag, kunden vurderer døgnåpen support."}
+  ]
+}

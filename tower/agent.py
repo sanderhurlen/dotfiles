@@ -92,7 +92,9 @@ def tolk(ut: bytes, feil: bytes, kode: int | None) -> Resultat:
         raise AgentFeil(tekst[-300:] or f"claude avsluttet med {kode}") from None
     usd = float(r.get("total_cost_usd") or 0)
     if r.get("subtype") != "success" or r.get("is_error") or r.get("structured_output") is None:
-        raise AgentFeil(str(r.get("subtype") or r.get("result") or "ukjent feil")[:300], usd)
+        # API-feil (f.eks. avvist schema) kommer som subtype "success" med is_error og feilen i `result`.
+        grunn = r.get("result") if r.get("subtype") == "success" else r.get("subtype")
+        raise AgentFeil(str(grunn or r.get("result") or "ukjent feil")[:300], usd)
     return Resultat(r["structured_output"], usd)
 
 

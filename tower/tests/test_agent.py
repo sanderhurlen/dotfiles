@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from tower.agent import AgentFeil, Agenter, ClaudeRunner, Jobb, ren_env
+from tower.agent import AgentFeil, Agenter, ClaudeRunner, Jobb, ren_env, tolk
 from tower.tests.conftest import FalskRunner
 
 SCHEMA = {"type": "object"}
@@ -83,6 +83,13 @@ async def test_runner_feil_subtype_gir_agentfeil_med_kost(falsk_claude, monkeypa
     with pytest.raises(AgentFeil, match="error_max_structured_output_retries") as e:
         await runner(falsk_claude).kjør("i", SCHEMA, "p")
     assert e.value.usd == 0.002
+
+
+def test_api_feil_med_subtype_success_gir_feilteksten():
+    ut = json.dumps({"subtype": "success", "is_error": True, "total_cost_usd": 0,
+                     "result": "API Error: 400 tools.1.custom.input_schema.properties"}).encode()
+    with pytest.raises(AgentFeil, match="API Error: 400"):
+        tolk(ut, b"", 0)
 
 
 async def test_runner_ikke_json_gir_stderr(falsk_claude, monkeypatch):

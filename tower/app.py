@@ -644,8 +644,12 @@ def main(argv: list[str] | None = None) -> None:
     from tower import config as cfg
 
     argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["mock"]:
+        from tower.mock import main as mock
+
+        sys.exit(mock(argv[1:]))
     if argv:
-        sys.exit(f"bruk: tower\n(ukjent argument: {' '.join(argv)})")
+        sys.exit(f"bruk: tower [mock …]\n(ukjent argument: {' '.join(argv)})")
     config = cfg.last()
     db = Db(config.db)
     try:
