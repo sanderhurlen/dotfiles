@@ -37,6 +37,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -164,14 +165,21 @@ class Ado:
             org = f"https://dev.azure.com/{org}"
         self.org, self.project = org.rstrip("/"), proj
         self.where = f"{self.org}/{self.project}"
-        self._token = None
+        self._token, self._expires = None, 0
 
     def token(self):
-        if self._token is None:
-            self._token = sh("az", "account", "get-access-token", "--resource", ADO_RESOURCE,
-                             "--query", "accessToken", "-o", "tsv")
-            if not self._token:
+        """az's ADO token, fetched again 5 minutes before it expires (they last about an
+        hour), so long-running TUIs keep working. A failed refresh keeps the old token —
+        ADO's 401 then says what's wrong instead of the process exiting."""
+        if self._token is None or time.time() > self._expires - 300:
+            out = sh("az", "account", "get-access-token", "--resource", ADO_RESOURCE,
+                     "--query", "[accessToken, expires_on]", "-o", "tsv").split()
+            if len(out) == 2:
+                self._token, self._expires = out[0], int(out[1])
+            elif self._token is None:
                 die("no ADO token — run `az login` (or `azt main`)")
+            else:
+                self._expires = time.time() + 60  # try again in a minute
         return self._token
 
     def api(self, path, body=None, project=None, method=None, ctype="application/json"):
