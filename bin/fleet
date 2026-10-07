@@ -1097,6 +1097,15 @@ def tui(scr, a):
         pal[name] = curses.color_pair(i)
     pal.update(dim=curses.A_DIM, bold=curses.A_BOLD)
 
+    def put(y, x, txt, n, attr=0):
+        # newlines in msg/errors and writes at the screen edge make curses return ERR
+        if n <= 0:
+            return
+        try:
+            scr.addnstr(y, x, re.sub(r"[\x00-\x1f\x7f]", " ", txt), n, attr)
+        except curses.error:
+            pass
+
     snap = Snapshot()
     lock, wake = threading.Lock(), threading.Event()
     sel, top, msg, err, written, shown = 0, 0, "", False, 0.0, None
@@ -1152,9 +1161,9 @@ def tui(scr, a):
         h, w = scr.getmaxyx()
         scr.erase()
         title = f" fleet · {A().org.rsplit('/', 1)[-1]} " + ("· henter … " if loading else "")
-        scr.addnstr(0, 0, title, w - 1, curses.A_BOLD)
+        put(0, 0, title, w - 1, curses.A_BOLD)
         if s.error:
-            scr.addnstr(0, len(title), s.error, max(0, w - 1 - len(title)), pal["red"])
+            put(0, len(title), s.error, max(0, w - 1 - len(title)), pal["red"])
         at = next((y for y, (_, x) in enumerate(ls) if x is cur), 0)
         body = h - 3
         top = min(max(top, at - body + 1), at)
@@ -1166,10 +1175,10 @@ def tui(scr, a):
             for txt, t in parts:
                 if x >= w - 1:
                     break
-                scr.addnstr(row, x, txt, w - 1 - x, pal.get(t, 0) | hl)
+                put(row, x, txt, w - 1 - x, pal.get(t, 0) | hl)
                 x += len(txt)
             if hl and x < w - 1:
-                scr.addnstr(row, x, " " * (w - 1 - x), w - 1 - x, hl)
+                put(row, x, " " * (w - 1 - x), w - 1 - x, hl)
         if pop:
             title_, opts = pop
             bw = min(w - 2, max([len(title_) + 4] + [len(l) + 8 for _, l, _, _ in opts]))
@@ -1177,15 +1186,15 @@ def tui(scr, a):
             for n, line_ in enumerate([f"┌ {title_} ".ljust(bw - 1, "─") + "┐"]
                                       + [f"│  {k}  {l}".ljust(bw - 1) + "│" for k, l, _, _ in opts]
                                       + ["└" + "─" * (bw - 2) + "┘"]):
-                scr.addnstr(by + n, bx, line_, w - 1 - bx, pal["cyan"] if n in (0, len(opts) + 1) else 0)
+                put(by + n, bx, line_, w - 1 - bx, pal["cyan"] if n in (0, len(opts) + 1) else 0)
             for n, (k_, _, _, _) in enumerate(opts, 1):
-                scr.addnstr(by + n, bx + 3, k_, 1, pal["yellow"] | curses.A_BOLD)
+                put(by + n, bx + 3, k_, 1, pal["yellow"] | curses.A_BOLD)
         keys = f"↑↓ flytt · m valg · enter start agent · →/← fold ut/inn kart · o åpne · a {'mine' if a.all else 'alle'} PRer · r oppdater · q avslutt" \
                f"  ·  {short(OUT)}/screen.txt"
         if ask:
-            scr.addnstr(h - 1, 0, ask[0] + "  y/n", w - 1, pal["yellow"] | curses.A_BOLD)
+            put(h - 1, 0, ask[0] + "  y/n", w - 1, pal["yellow"] | curses.A_BOLD)
         else:
-            scr.addnstr(h - 1, 0, msg or keys, w - 1, (pal["red"] if err else pal["green"]) if msg else pal["dim"])
+            put(h - 1, 0, msg or keys, w - 1, (pal["red"] if err else pal["green"]) if msg else pal["dim"])
         scr.refresh()
 
         k = scr.getch()
