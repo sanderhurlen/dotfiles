@@ -282,6 +282,25 @@ def launch(x):
     return f"▶ {x.key} startet{f' ({m.group(1)})' if m else ''} i {short(cwd)}: {cmd[-1][:60]}"
 
 
+def stuck(before, after):
+    """Agent names that went blocked (waiting for me) between two {name: state} maps.
+    before None = first load: nothing is news yet."""
+    if before is None:
+        return []
+    return [n for n, st in after.items() if st == "blocked" and before.get(n) != "blocked"]
+
+
+def notify(snap, names):
+    """macOS notification per agent that needs me, titled with its item or PR."""
+    titles = {x.key: f"{'!' if isinstance(x, Review) else '#'}{x.id} {x.title}"
+              for x in snap.items + [t for w in snap.items for t in w.children] + snap.prs}
+    for n in names:
+        script = ("on run argv\n display notification (item 2 of argv) with title \"fleet\" "
+                  "subtitle (item 1 of argv) sound name \"Glass\"\nend run")
+        subprocess.run(["osascript", "-e", script, f"{n} venter på deg", titles.get(n, n)],
+                       capture_output=True)
+
+
 def short(path):
     return path.replace(os.path.expanduser("~"), "~", 1)
 
@@ -614,9 +633,16 @@ def tui(scr, a):
             msg, err = str(e), True
         wake.set()
 
+    seen = None  # agent states at the last snapshot, for notifications
     while True:
         with lock:
             s = snap
+        if s.at and s.agents is not seen:
+            names = stuck(seen, s.agents)
+            if names and not a.quiet:
+                notify(s, names)
+                msg = f"⏸ venter på deg: {', '.join(names)}"
+            seen = s.agents
         ls = lines(s, a.all, open_)
         rows = [x for _, x in ls if x is not None]
         keys_ = [x.key for x in rows]
@@ -836,7 +862,9 @@ GUIDE = """\
 
 {b}KOMMANDOER{r}
 
-  fleet [-a] [--no-split]   levende liste, oppdateres hvert {refresh}. sekund
+  fleet [-a] [--no-split] [-q]
+                            levende liste, oppdateres hvert {refresh}. sekund
+                            varsler (macOS) når en fleet-agent blir blocked — venter på deg (-q: av)
                             i Ghostty: `claude agents` i en pane til venstre (ikke om den fortsatt er der)
   fleet ls [-a] [-u]        lista, skrevet ut én gang (-u: kartene foldet ut)
   fleet go <id> [-n]        bakgrunnsagent på et work item (-n: vis kommandoen)
@@ -891,6 +919,7 @@ def main():
     s = sub.add_parser("live", help="live list")
     s.add_argument("-a", "--all", action="store_true", help="all others' PRs, not just where I'm reviewer")
     s.add_argument("--no-split", action="store_true", help="don't open the claude agents pane in Ghostty")
+    s.add_argument("-q", "--quiet", action="store_true", help="no notification when an agent needs me")
     s.set_defaults(fn=cmd_live)
 
     s = sub.add_parser("ls", help="print the list once (and write the state files)")
