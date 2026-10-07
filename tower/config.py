@@ -11,7 +11,7 @@ from tower.kanal import Kanal, Person
 
 STANDARD = {
     "meg": {"navn": "Sander Hurlen", "adresse": "sander@visense.no"},
-    "kanaler": ["mail"],
+    "kanaler": ["mail", "teams"],
     "dager": 7,
     "poll_sekunder": 2,
 }
@@ -25,7 +25,7 @@ def data_rot() -> Path:
 class Config:
     rot: Path
     meg: Person
-    kanaler: tuple[str, ...] = ("mail",)
+    kanaler: tuple[str, ...] = ("mail", "teams")
     dager: int = 7  # Tråder eldre enn dette ved første syn blir `gammel`
     poll_sekunder: float = 2
 
@@ -57,6 +57,7 @@ def last(rot: Path | None = None) -> Config:
 def lag_kanaler(config: Config) -> list[Kanal]:
     from tower.kanal.graph_fil import GraphFil
     from tower.kanal.mail import MailKanal
+    from tower.kanal.teams import TeamsKanal
 
     kanaler: list[Kanal] = []
     for navn in config.kanaler:
@@ -64,6 +65,8 @@ def lag_kanaler(config: Config) -> list[Kanal]:
         katalog.mkdir(parents=True, exist_ok=True)
         if navn == "mail":
             kanaler.append(MailKanal(GraphFil(katalog, config.outbox), config.meg))
+        elif navn == "teams":
+            kanaler.append(TeamsKanal(GraphFil(katalog, config.outbox), config.meg))
         else:
             raise ValueError(f"ukjent kanal i config: {navn}")
     return kanaler

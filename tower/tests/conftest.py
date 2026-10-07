@@ -18,6 +18,7 @@ NÅ = datetime(2026, 10, 7, 11, 0, tzinfo=timezone.utc)
 @pytest.fixture
 def rot(tmp_path: Path) -> Path:
     shutil.copytree(FIXTURES / "mail", tmp_path / "mail")
+    shutil.copytree(FIXTURES / "teams", tmp_path / "teams")
     return tmp_path
 
 

@@ -1,0 +1,99 @@
+{
+  "_towerChannel": "teams",
+  "chat": {
+    "id": "19:mock-referat@thread.v2",
+    "chatType": "group",
+    "topic": null,
+    "webUrl": "https://teams.microsoft.com/l/chat/19:mock-referat@thread.v2/0",
+    "viewpoint": {
+      "isHidden": false,
+      "lastMessageReadDateTime": "2026-10-06T13:10:00Z"
+    },
+    "members": [
+      {
+        "@odata.type": "#microsoft.graph.aadUserConversationMember",
+        "id": "m-sander",
+        "roles": [
+          "owner"
+        ],
+        "displayName": "Sander Hurlen",
+        "userId": "u-sander",
+        "email": "sander@visense.no"
+      },
+      {
+        "@odata.type": "#microsoft.graph.aadUserConversationMember",
+        "id": "m-marte",
+        "roles": [
+          "owner"
+        ],
+        "displayName": "Marte Lie",
+        "userId": "u-marte",
+        "email": "marte@visense.no"
+      },
+      {
+        "@odata.type": "#microsoft.graph.aadUserConversationMember",
+        "id": "m-jonas",
+        "roles": [
+          "owner"
+        ],
+        "displayName": "Jonas Dahl",
+        "userId": "u-jonas",
+        "email": "jonas.dahl@visense.no"
+      }
+    ]
+  },
+  "value": [
+    {
+      "id": "1791291720000",
+      "chatId": "19:mock-referat@thread.v2",
+      "messageType": "message",
+      "createdDateTime": "2026-10-06T13:02:00Z",
+      "lastModifiedDateTime": "2026-10-06T13:02:00Z",
+      "deletedDateTime": null,
+      "subject": null,
+      "from": {
+        "application": null,
+        "device": null,
+        "user": {
+          "id": "u-marte",
+          "displayName": "Marte Lie",
+          "userIdentityType": "aadUser"
+        }
+      },
+      "body": {
+        "contentType": "text",
+        "content": "Har noen lenka til referatet fra oppstartsmøtet?"
+      },
+      "importance": "normal",
+      "mentions": [],
+      "attachments": [],
+      "webUrl": null
+    },
+    {
+      "id": "1791292200000",
+      "chatId": "19:mock-referat@thread.v2",
+      "messageType": "message",
+      "createdDateTime": "2026-10-06T13:10:00Z",
+      "lastModifiedDateTime": "2026-10-06T13:10:00Z",
+      "deletedDateTime": null,
+      "subject": null,
+      "from": {
+        "application": null,
+        "device": null,
+        "user": {
+          "id": "u-sander",
+          "displayName": "Sander Hurlen",
+          "userIdentityType": "aadUser"
+        }
+      },
+      "body": {
+        "contentType": "text",
+        "content": "Ligger i prosjektmappa under Møter/Oppstart."
+      },
+      "importance": "normal",
+      "mentions": [],
+      "attachments": [],
+      "webUrl": null
+    }
+  ]
+}

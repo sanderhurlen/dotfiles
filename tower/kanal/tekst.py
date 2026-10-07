@@ -17,6 +17,8 @@ class _Tekst(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if tag in ("style", "script", "head"):
             self._skjul += 1
+        elif tag == "at":  # Teams-mention: <at id="0">Sander</at>
+            self.deler.append("@")
         elif tag == "br":
             self.deler.append("\n")
         elif tag in _BLOKK:

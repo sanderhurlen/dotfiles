@@ -1,0 +1,155 @@
+{
+  "_towerChannel": "teams",
+  "chat": {
+    "id": "19:mock-release42@thread.v2",
+    "chatType": "group",
+    "topic": "Release 4.2",
+    "webUrl": "https://teams.microsoft.com/l/chat/19:mock-release42@thread.v2/0",
+    "viewpoint": {
+      "isHidden": false,
+      "lastMessageReadDateTime": "2026-10-07T08:05:00Z"
+    },
+    "members": [
+      {
+        "@odata.type": "#microsoft.graph.aadUserConversationMember",
+        "id": "m-sander",
+        "roles": [
+          "owner"
+        ],
+        "displayName": "Sander Hurlen",
+        "userId": "u-sander",
+        "email": "sander@visense.no"
+      },
+      {
+        "@odata.type": "#microsoft.graph.aadUserConversationMember",
+        "id": "m-priya",
+        "roles": [
+          "owner"
+        ],
+        "displayName": "Priya Nair",
+        "userId": "u-priya",
+        "email": "priya.nair@visense.no"
+      },
+      {
+        "@odata.type": "#microsoft.graph.aadUserConversationMember",
+        "id": "m-tom",
+        "roles": [
+          "owner"
+        ],
+        "displayName": "Tom Hansen",
+        "userId": "u-tom",
+        "email": "tom.hansen@visense.no"
+      }
+    ]
+  },
+  "value": [
+    {
+      "id": "1790838000000",
+      "chatId": "19:mock-release42@thread.v2",
+      "messageType": "systemEventMessage",
+      "createdDateTime": "2026-10-01T07:00:00Z",
+      "from": null,
+      "body": {
+        "contentType": "html",
+        "content": "<systemEventMessage/>"
+      },
+      "importance": "normal",
+      "mentions": [],
+      "eventDetail": {
+        "@odata.type": "#microsoft.graph.membersAddedEventMessageDetail"
+      }
+    },
+    {
+      "id": "1791360120000",
+      "chatId": "19:mock-release42@thread.v2",
+      "messageType": "message",
+      "createdDateTime": "2026-10-07T08:02:00Z",
+      "lastModifiedDateTime": "2026-10-07T08:02:00Z",
+      "deletedDateTime": null,
+      "subject": null,
+      "from": {
+        "application": null,
+        "device": null,
+        "user": {
+          "id": "u-priya",
+          "displayName": "Priya Nair",
+          "userIdentityType": "aadUser"
+        }
+      },
+      "body": {
+        "contentType": "text",
+        "content": "Release 4.2 is ready in staging, all tests green."
+      },
+      "importance": "normal",
+      "mentions": [],
+      "attachments": [],
+      "webUrl": null
+    },
+    {
+      "id": "1791360300000",
+      "chatId": "19:mock-release42@thread.v2",
+      "messageType": "message",
+      "createdDateTime": "2026-10-07T08:05:00Z",
+      "lastModifiedDateTime": "2026-10-07T08:05:00Z",
+      "deletedDateTime": null,
+      "subject": null,
+      "from": {
+        "application": null,
+        "device": null,
+        "user": {
+          "id": "u-sander",
+          "displayName": "Sander Hurlen",
+          "userIdentityType": "aadUser"
+        }
+      },
+      "body": {
+        "contentType": "text",
+        "content": "nice, I'll take a look after lunch"
+      },
+      "importance": "normal",
+      "mentions": [],
+      "attachments": [],
+      "webUrl": null
+    },
+    {
+      "id": "1791366000000",
+      "chatId": "19:mock-release42@thread.v2",
+      "messageType": "message",
+      "createdDateTime": "2026-10-07T09:40:00Z",
+      "lastModifiedDateTime": "2026-10-07T09:40:00Z",
+      "deletedDateTime": null,
+      "subject": null,
+      "from": {
+        "application": null,
+        "device": null,
+        "user": {
+          "id": "u-tom",
+          "displayName": "Tom Hansen",
+          "userIdentityType": "aadUser"
+        }
+      },
+      "body": {
+        "contentType": "html",
+        "content": "<p><at id=\"0\">Sander</at> we need a go/no-go before 14:00 today, otherwise it slips to next week. Can you confirm the DB migration is safe to run during business hours?</p>"
+      },
+      "importance": "high",
+      "mentions": [
+        {
+          "id": 0,
+          "mentionText": "Sander",
+          "mentioned": {
+            "application": null,
+            "device": null,
+            "user": {
+              "id": "u-sander",
+              "displayName": "Sander Hurlen",
+              "userIdentityType": "aadUser"
+            }
+          }
+        }
+      ],
+      "attachments": [],
+      "webUrl": null
+    }
+  ]
+}

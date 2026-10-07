@@ -31,6 +31,7 @@ class Tråd:
     kanal: str
     emne: str
     meldinger: tuple[Melding, ...]  # stigende på tid
+    emne_utledet: bool = False  # emne laget av deltakernavn (Teams-chat uten topic)
 
     @property
     def siste(self) -> Melding:

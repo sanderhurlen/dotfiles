@@ -1,0 +1,63 @@
+{
+  "_towerChannel": "teams",
+  "chat": {
+    "id": "19:u-ola_u-sander@unq.gbl.spaces",
+    "chatType": "oneOnOne",
+    "topic": null,
+    "webUrl": "https://teams.microsoft.com/l/chat/19:u-ola_u-sander@unq.gbl.spaces/0",
+    "viewpoint": {
+      "isHidden": false,
+      "lastMessageReadDateTime": "2026-10-06T15:00:00Z"
+    },
+    "members": [
+      {
+        "@odata.type": "#microsoft.graph.aadUserConversationMember",
+        "id": "m-sander",
+        "roles": [
+          "owner"
+        ],
+        "displayName": "Sander Hurlen",
+        "userId": "u-sander",
+        "email": "sander@visense.no"
+      },
+      {
+        "@odata.type": "#microsoft.graph.aadUserConversationMember",
+        "id": "m-ola",
+        "roles": [
+          "owner"
+        ],
+        "displayName": "Ola Berg",
+        "userId": "u-ola",
+        "email": "ola.berg@visense.no"
+      }
+    ]
+  },
+  "value": [
+    {
+      "id": "1791359700000",
+      "chatId": "19:u-ola_u-sander@unq.gbl.spaces",
+      "messageType": "message",
+      "createdDateTime": "2026-10-07T07:55:00Z",
+      "lastModifiedDateTime": "2026-10-07T07:55:00Z",
+      "deletedDateTime": null,
+      "subject": null,
+      "from": {
+        "application": null,
+        "device": null,
+        "user": {
+          "id": "u-ola",
+          "displayName": "Ola Berg",
+          "userIdentityType": "aadUser"
+        }
+      },
+      "body": {
+        "contentType": "text",
+        "content": "heia! har du 5 min i dag til å se på PR-en min for rapport-eksporten? står litt fast på testene"
+      },
+      "importance": "normal",
+      "mentions": [],
+      "attachments": [],
+      "webUrl": null
+    }
+  ]
+}

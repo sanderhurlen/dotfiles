@@ -39,6 +39,13 @@ def motpart(t: Tråd) -> str:
     return m.fra.navn
 
 
+def emne_kort(t: Tråd) -> str:
+    """Emne i tabellen. Chat uten topic: start av siste Melding (deltakerne står allerede i Fra)."""
+    if t.emne_utledet:
+        return " ".join(t.siste.tekst.split())[:60]
+    return t.emne
+
+
 def sorteringsnøkkel(t: Tråd, rad: Rad) -> tuple:
     return (rad.status in FERDIG, -t.siste.tid.timestamp())
 
@@ -148,7 +155,7 @@ class Tower(App):
         for t in self.sortert():
             rad = self.rader[t.id]
             dim = "[dim]" if rad.status in FERDIG else ""
-            dt.add_row(KANAL_IKON.get(t.kanal, "?"), dim + escape(motpart(t)), dim + escape(t.emne),
+            dt.add_row(KANAL_IKON.get(t.kanal, "?"), dim + escape(motpart(t)), dim + escape(emne_kort(t)),
                        status_merke(rad), "", alder(t.siste.tid, nå), key=t.id)
         if valgt in self.tråder:
             dt.move_cursor(row=dt.get_row_index(valgt), animate=False)

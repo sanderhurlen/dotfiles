@@ -96,3 +96,23 @@ async def test_q_avslutter(config):
         await pilot.press("q")
         await pilot.pause()
     assert a.return_code == 0
+
+
+async def test_teams_i_tabellen(config):
+    from dataclasses import replace
+
+    a = app(replace(config, kanaler=("mail", "teams")))
+    async with a.run_test(size=(160, 40)) as pilot:
+        await a.poll()
+        await pilot.pause()
+        emner = rader(a)
+        assert len(emner) == 11
+        assert "Release 4.2" in emner
+        assert "Ring meg når du har et øyeblikk" in emner  # chat uten topic: start av siste Melding
+        assert "Ola Berg" not in emner
+        assert a.rader["teams:19:mock-referat@thread.v2"].status == "besvart"
+
+        dt = a.query_one(DataTable)
+        dt.move_cursor(row=dt.get_row_index("teams:19:u-ingrid_u-sander@unq.gbl.spaces"), animate=False)
+        await pilot.pause()
+        assert "Ingrid Solheim" in tekst(a, "#hode")
