@@ -1,0 +1,9 @@
+#!/bin/sh
+#
+# aza — list App Service web apps with URLs, grouped by resource group
+#
+# Thin wrapper around my-workday's list-webapps.sh, like azt. `aza --help` for usage.
+
+script="$HOME/visense/my-workday/scripts/list-webapps.sh"
+[ -x "$script" ] || { echo "aza: cannot run $script — is my-workday checked out?" >&2; exit 1; }
+exec "$script" "$@"

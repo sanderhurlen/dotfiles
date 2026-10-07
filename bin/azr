@@ -1,0 +1,9 @@
+#!/bin/sh
+#
+# azr — list Azure RBAC role assignments, grouped by role
+#
+# Thin wrapper around my-workday's list-roles.sh, like azt. `azr --help` for usage.
+
+script="$HOME/visense/my-workday/scripts/list-roles.sh"
+[ -x "$script" ] || { echo "azr: cannot run $script — is my-workday checked out?" >&2; exit 1; }
+exec "$script" "$@"
