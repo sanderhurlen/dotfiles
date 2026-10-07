@@ -37,10 +37,16 @@ class Utkast:
     sjekk: tuple[str, ...] = ()
     feil: str | None = None
     instruks: str | None = None  # regenereringsinstruks
+    redigert: str | None = None  # min redigering; `tekst` beholdes som agenten skrev den (Kurator-diff)
+
+    @property
+    def gjeldende(self) -> str:
+        """Teksten som vises og sendes."""
+        return self.tekst if self.redigert is None else self.redigert
 
     @property
     def plassholdere(self) -> list[str]:
-        return plassholdere(self.tekst)
+        return plassholdere(self.gjeldende)
 
 
 def plassholdere(tekst: str) -> list[str]:

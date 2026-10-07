@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from tower.kanal import Tråd
 from tower.triage import Triage
-from tower.utkast import ÅPNE, FEILET, GENERERER, KLART, Utkast
+from tower.utkast import ÅPNE, FEILET, FORKASTET, GENERERER, KLART, SENDT, Utkast
 
 SKJEMA = """
 CREATE TABLE IF NOT EXISTS trad (
@@ -48,12 +48,15 @@ NYE_KOLONNER = {
     "kategori": "TEXT", "haster": "INTEGER", "sammendrag": "TEXT", "begrunnelse": "TEXT",
     "triage_melding_id": "TEXT",  # Meldingen triagen (eller feilen) gjelder
     "triage_feil": "TEXT",
+    "utsatt_til": "TEXT",  # ISO UTC, bare i `utsatt`
 }
-U_KOLONNER = "trad, versjon, melding_id, status, tekst, sjekk, feil, instruks"
-KOLONNER = "id, kanal, status, siste_melding_id, kategori, haster, sammendrag, begrunnelse, triage_melding_id, triage_feil"
+NYE_U_KOLONNER = {"redigert": "TEXT"}
+U_KOLONNER = "trad, versjon, melding_id, status, tekst, sjekk, feil, instruks, redigert"
+KOLONNER = ("id, kanal, status, siste_melding_id, kategori, haster, sammendrag, begrunnelse, triage_melding_id, "
+            "triage_feil, utsatt_til")
 
-# Trådstatus. Senere slices legger til venter på meg, avvist, utsatt.
-NY, GAMMEL, BESVART, TRIAGERT = "ny", "gammel", "besvart", "triagert"
+# Trådstatus. `triagert` er «venter på meg». `avvist` og `utsatt` varer til ny Melding (utsatt også til tiden).
+NY, GAMMEL, BESVART, TRIAGERT, AVVIST, UTSATT = "ny", "gammel", "besvart", "triagert", "avvist", "utsatt"
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,7 @@ class Rad:
     triage_melding_id: str | None = None
     triage_feil: str | None = None
     utkast: Utkast | None = None  # siste versjon
+    utsatt_til: datetime | None = None
 
     @property
     def trenger_triage(self) -> bool:
@@ -86,14 +90,15 @@ class Rad:
 
 
 def _rad(r: tuple, utkast: Utkast | None = None) -> Rad:
-    id, kanal, status, siste, kategori, haster, sammendrag, begrunnelse, tmid, tfeil = r
+    id, kanal, status, siste, kategori, haster, sammendrag, begrunnelse, tmid, tfeil, utsatt_til = r
     triage = Triage(kategori, bool(haster), sammendrag, begrunnelse) if kategori else None
-    return Rad(id, kanal, status, siste, triage, tmid, tfeil, utkast)
+    til = datetime.fromisoformat(utsatt_til) if utsatt_til else None
+    return Rad(id, kanal, status, siste, triage, tmid, tfeil, utkast, til)
 
 
 def _utkast(r: tuple) -> Utkast:
-    trad, versjon, melding_id, status, tekst, sjekk, feil, instruks = r
-    return Utkast(trad, versjon, melding_id, status, tekst, tuple(json.loads(sjekk)), feil, instruks)
+    trad, versjon, melding_id, status, tekst, sjekk, feil, instruks, redigert = r
+    return Utkast(trad, versjon, melding_id, status, tekst, tuple(json.loads(sjekk)), feil, instruks, redigert)
 
 
 def ny_status(forrige: Rad | None, tråd: Tråd, nå: datetime, dager: int) -> str | None:
@@ -115,11 +120,12 @@ class Db:
     def __init__(self, sti: Path | str) -> None:
         self.con = sqlite3.connect(sti)
         self.con.executescript(SKJEMA)
-        finnes = {r[1] for r in self.con.execute("PRAGMA table_info(trad)")}
         with self.con:
-            for navn, type_ in NYE_KOLONNER.items():
-                if navn not in finnes:
-                    self.con.execute(f"ALTER TABLE trad ADD COLUMN {navn} {type_}")
+            for tabell, nye in (("trad", NYE_KOLONNER), ("utkast", NYE_U_KOLONNER)):
+                finnes = {r[1] for r in self.con.execute(f"PRAGMA table_info({tabell})")}
+                for navn, type_ in nye.items():
+                    if navn not in finnes:
+                        self.con.execute(f"ALTER TABLE {tabell} ADD COLUMN {navn} {type_}")
 
     def rad(self, tråd_id: str) -> Rad | None:
         r = self.con.execute(f"SELECT {KOLONNER} FROM trad WHERE id = ?", (tråd_id,)).fetchone()
@@ -139,7 +145,7 @@ class Db:
         with self.con:
             self.con.execute(
                 "INSERT INTO trad (id, kanal, status, siste_melding_id, endret) VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET status = excluded.status, "
+                "ON CONFLICT(id) DO UPDATE SET status = excluded.status, utsatt_til = NULL, "
                 "siste_melding_id = excluded.siste_melding_id, endret = excluded.endret",
                 (tråd.id, tråd.kanal, status, tråd.siste.id, nå.isoformat()))
             self.con.execute(
@@ -202,6 +208,63 @@ class Db:
 
     def lagre_utkast_feil(self, u: Utkast, feil: str, nå: datetime) -> Utkast | None:
         return self._avslutt_utkast(u, nå, FEILET, feil=feil)
+
+    def lagre_redigert(self, u: Utkast, tekst: str, nå: datetime) -> Utkast:
+        """Min redigering av en versjon, uansett status (ny Melding under redigering skal aldri overskrive den)."""
+        with self.con:
+            self.con.execute("UPDATE utkast SET redigert = ?, feil = NULL, endret = ? WHERE trad = ? AND versjon = ?",
+                             (tekst, nå.isoformat(), u.tråd_id, u.versjon))
+        return self._versjon(u)
+
+    def marker_sendt(self, u: Utkast, nå: datetime) -> Utkast:
+        """`u` → sendt; andre åpne versjoner av Tråden forkastes."""
+        with self.con:
+            self.con.execute("UPDATE utkast SET status = ?, feil = NULL, endret = ? WHERE trad = ? AND versjon = ?",
+                             (SENDT, nå.isoformat(), u.tråd_id, u.versjon))
+            self._forkast(u.tråd_id, nå)
+        return self._versjon(u)
+
+    def lagre_sendefeil(self, u: Utkast, feil: str, nå: datetime) -> Utkast:
+        """Sending feilet: status står (klart), feilteksten vises. Aldri auto-retry."""
+        with self.con:
+            self.con.execute("UPDATE utkast SET feil = ?, endret = ? WHERE trad = ? AND versjon = ?",
+                             (feil, nå.isoformat(), u.tråd_id, u.versjon))
+        return self._versjon(u)
+
+    def _versjon(self, u: Utkast) -> Utkast:
+        return _utkast(self.con.execute(f"SELECT {U_KOLONNER} FROM utkast WHERE trad = ? AND versjon = ?",
+                                        (u.tråd_id, u.versjon)).fetchone())
+
+    def _forkast(self, tråd_id: str, nå: datetime) -> None:
+        self.con.execute(f"UPDATE utkast SET status = ?, endret = ? WHERE trad = ? "
+                         f"AND status IN ({', '.join('?' * len(ÅPNE))})", (FORKASTET, nå.isoformat(), tråd_id, *ÅPNE))
+
+    def avvis(self, tråd_id: str, nå: datetime) -> Rad:
+        """Trenger ikke svar fra meg (også kvittering av info). Åpne Utkast forkastes. Varer til ny Melding."""
+        with self.con:
+            self.con.execute("UPDATE trad SET status = ?, utsatt_til = NULL, endret = ? WHERE id = ?",
+                             (AVVIST, nå.isoformat(), tråd_id))
+            self._forkast(tråd_id, nå)
+        return self.rad(tråd_id)
+
+    def utsett(self, tråd_id: str, til: datetime, nå: datetime) -> Rad:
+        """Skjul til `til` eller ny Melding. Utkastet står og gjenbrukes."""
+        with self.con:
+            self.con.execute("UPDATE trad SET status = ?, utsatt_til = ?, endret = ? WHERE id = ?",
+                             (UTSATT, til.astimezone(timezone.utc).isoformat(), nå.isoformat(), tråd_id))
+        return self.rad(tråd_id)
+
+    def vekk(self, nå: datetime) -> list[str]:
+        """Utsatte Tråder med tiden ute tilbake til `triagert` (gyldig triage for siste Melding) eller `ny`."""
+        ids = [r[0] for r in self.con.execute("SELECT id, utsatt_til FROM trad WHERE status = ?", (UTSATT,))
+               if datetime.fromisoformat(r[1]) <= nå]
+        with self.con:
+            for id in ids:
+                self.con.execute(
+                    "UPDATE trad SET utsatt_til = NULL, endret = ?, status = CASE WHEN kategori IS NOT NULL "
+                    "AND triage_feil IS NULL AND triage_melding_id = siste_melding_id THEN ? ELSE ? END WHERE id = ?",
+                    (nå.isoformat(), TRIAGERT, NY, id))
+        return ids
 
     def logg_kjøring(self, jobb: str, tråd_id: str, usd: float, nå: datetime, feil: str | None = None) -> None:
         with self.con:

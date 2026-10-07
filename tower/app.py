@@ -2,27 +2,35 @@
 
 from __future__ import annotations
 
+import asyncio
+import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.app import SuspendNotSupported
 from textual.css.query import NoMatches
+from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Static
 
 from tower.agent import AgentFeil, Agenter, ClaudeRunner, Jobb, Runner
 from tower.config import Config
-from tower.db import BESVART, GAMMEL, Db, Rad
+from tower.db import AVVIST, BESVART, GAMMEL, UTSATT, Db, Rad
+from tower.handlinger import UTSETT_VALG, editor_argv, første_plassholder, utsett_til
 from tower.kanal import Kanal, Tråd
 from tower.kunnskapsbase import oppslag
 from tower.triage import triager
 from tower.utkast import FEILET, FORKASTET, GENERERER, KLART, PLASSHOLDER, SENDT, UTDATERT, Utkast, skriv_utkast
 
 KANAL_IKON = {"mail": "✉", "teams": "◆"}
-FERDIG = {BESVART, GAMMEL}
+FERDIG = {BESVART, GAMMEL, AVVIST, UTSATT}  # dimmet nederst, ingen agenter
+UKEDAG = ["ma", "ti", "on", "to", "fr", "lø", "sø"]
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 MAKS_AGENTER = 2
 
@@ -64,9 +72,16 @@ def sorteringsnøkkel(t: Tråd, rad: Rad) -> tuple:
     return (rad.status in FERDIG, rang, -t.siste.tid.timestamp())
 
 
+def kort_tid(t: datetime) -> str:
+    lokal = t.astimezone()
+    return f"{UKEDAG[lokal.weekday()]} {lokal:%H:%M}"
+
+
 def status_merke(rad: Rad) -> str:
+    if rad.status == UTSATT and rad.utsatt_til:
+        return f"[dim]utsatt til {kort_tid(rad.utsatt_til)}[/]"
     return {"ny": "[dim]ny[/]", GAMMEL: "[dim]gammel[/]", BESVART: "[dim]besvart[/]",
-            "triagert": "[dim]triagert[/]"}.get(rad.status, rad.status)
+            "triagert": "[dim]triagert[/]", AVVIST: "[dim]avvist[/]"}.get(rad.status, rad.status)
 
 
 def triage_merke(rad: Rad, jobb: str | None = None) -> str:
@@ -90,6 +105,10 @@ def triage_merke(rad: Rad, jobb: str | None = None) -> str:
 def utkast_merke(rad: Rad, jobb: str | None = None) -> str:
     """Utkaststatus i tabellen. `jobb` er "kjører" eller "kø" når et utkast-kall venter."""
     u = rad.utkast
+    if rad.status == UTSATT and rad.utsatt_til:
+        return f"[dim]⏾ {kort_tid(rad.utsatt_til)}[/]"
+    if rad.status == AVVIST:
+        return "[dim]avvist[/]"
     if rad.status in FERDIG:
         return "[dim]sendt[/]" if u and u.status == SENDT else ""
     if rad.triage and rad.triage.kategori == "info" and not rad.trenger_triage:
@@ -99,7 +118,8 @@ def utkast_merke(rad: Rad, jobb: str | None = None) -> str:
     if u.status == GENERERER:
         return "[magenta]✎ skriver…[/]" if jobb == "kjører" else "[dim]i kø[/]"
     return {
-        KLART: "[green]✔ klart[/]" + (f" [dim]v{u.versjon}[/]" if u.versjon > 1 else ""),
+        KLART: ("[red]✗ sending[/]" if u.feil else "[green]✔ klart[/]")
+        + (f" [dim]v{u.versjon}[/]" if u.versjon > 1 else ""),
         FEILET: "[red]✗ feilet[/]",
         UTDATERT: "[yellow]↻ utdatert[/]",
         SENDT: "[dim]sendt[/]",
@@ -129,7 +149,9 @@ def utkast_markup(rad: Rad, jobb: str | None, spinner: str) -> str | None:
         return f"[red]✗ Utkast feilet:[/] {escape(u.feil or '')}"
     hint = "".join(f"[yellow]›[/] {escape(s)}\n" for s in u.sjekk)
     pre = "[yellow]↻ Ny melding kom etter dette utkastet[/]\n\n" if u.status == UTDATERT else ""
-    return pre + (hint + "\n" if hint else "") + utkast_tekst_markup(u.tekst)
+    if u.feil:
+        pre += f"[red]✗ Sending feilet:[/] {escape(u.feil)}\n\n"
+    return pre + (hint + "\n" if hint else "") + utkast_tekst_markup(u.gjeldende)
 
 
 def tråd_markup(t: Tråd) -> str:
@@ -146,6 +168,46 @@ def tråd_markup(t: Tråd) -> str:
     return "\n".join(ut)
 
 
+class Valg(ModalScreen[str | None]):
+    """Dialog med én tast per valg. `esc` er verdien escape gir."""
+
+    DEFAULT_CSS = """
+    Valg { align: center middle; }
+    Valg > Static { width: auto; max-width: 72; height: auto; border: round $accent; padding: 1 2;
+                    background: $surface; }
+    """
+    TITTEL = ""
+    VALG: dict[str, str] = {}
+    ESC: str | None = None
+
+    def compose(self) -> ComposeResult:
+        linjer = [self.TITTEL, ""] + [f"[b]{k}[/]  {escape(v)}" for k, v in self.VALG.items()]
+        yield Static("\n".join(linjer))
+
+    def action_velg(self, verdi: str) -> None:
+        self.dismiss(verdi)
+
+    def action_esc(self) -> None:
+        self.dismiss(self.ESC)
+
+
+class UtsettValg(Valg):
+    TITTEL = "[b]Utsett til[/]"
+    VALG = UTSETT_VALG
+    BINDINGS = [*(Binding(k, f"velg('{k}')", v) for k, v in UTSETT_VALG.items()),
+                Binding("escape", "esc", "Avbryt")]
+
+
+class NyMeldingValg(Valg):
+    """Ny Melding kom mens jeg redigerte. Redigeringen er lagret og overskrives aldri."""
+
+    TITTEL = "[b yellow]↻ Ny melding kom mens du redigerte[/]\n[dim]Redigeringen din er lagret.[/]"
+    VALG = {"s": "send likevel", "m": "se meldingen", "r": "regenerer"}
+    ESC = "m"
+    BINDINGS = [Binding("s", "velg('s')", "Send likevel"), Binding("m", "velg('m')", "Se meldingen"),
+                Binding("r", "velg('r')", "Regenerer"), Binding("escape", "esc", "Se meldingen")]
+
+
 class Tower(App):
     TITLE = "tower"
     CSS = """
@@ -158,11 +220,21 @@ class Tower(App):
     #utkast.klart { border: round $success; }
     #status { height: 1; background: $panel; padding: 0 1; }
     """
-    BINDINGS = [Binding("q", "quit", "Avslutt")]
+    BINDINGS = [
+        Binding("s", "send", "Send"),
+        Binding("e", "rediger", "Rediger"),
+        Binding("a", "avvis", "Avvis"),
+        Binding("u", "utsett", "Utsett"),
+        Binding("q", "quit", "Avslutt"),
+    ]
 
     def __init__(self, config: Config, kanaler: list[Kanal], db: Db, runner: Runner,
-                 nå: Callable[[], datetime] = nå_utc, poll: bool = True) -> None:
+                 nå: Callable[[], datetime] = nå_utc, poll: bool = True,
+                 editor: Callable[[str], str | None] | None = None) -> None:
         super().__init__()
+        self.editor = editor or self.rediger_i_editor  # tekst inn, redigert tekst ut (None = avbrutt)
+        self._hold: set[str] = set()  # Tråder med min redigering av et utdatert Utkast: ingen auto-utkast
+        self._sender: set[str] = set()
         self.config = config
         self.kanaler = kanaler
         self.db = db
@@ -227,11 +299,22 @@ class Tower(App):
                     self.rader[t.id] = self.db.registrer(t, nå, self.config.dager)
                     self.planlegg(t)
                     endret = True
+            for id in self.db.vekk(self.nå()):  # utsatt-tiden er ute
+                self.rader[id] = self.db.rad(id)
+                if id in self.tråder:
+                    self.planlegg(self.tråder[id])
+                endret = True
             if endret:
                 self.tegn_tabell()
             self.oppdater_status()
         finally:
             self._poller = False
+
+    async def poll_nå(self) -> None:
+        """Poll med en gang, etter en eventuell poll som allerede går."""
+        while self._poller:
+            await asyncio.sleep(0.01)
+        await self.poll()
 
     def kunnskap(self, t: Tråd) -> str:
         return oppslag(self.config.kunnskapsbase, t, self.config.meg)
@@ -251,7 +334,7 @@ class Tower(App):
             self.agenter.legg_i_kø(Jobb(nøkkel, f"triage {motpart(t).split()[0]}", lambda: self.kjør_triage(t)))
 
         nøkkel = ("utkast", t.id)
-        if not rad.trenger_utkast:
+        if not rad.trenger_utkast or t.id in self._hold:
             if self.agenter.venter(nøkkel):
                 self.agenter.avbryt(nøkkel)
             return
@@ -388,8 +471,157 @@ class Tower(App):
             return
         u = rad.utkast
         w.update(innhold)
-        w.border_title = "Utkast" + (f" v{u.versjon}" if u and u.status != GENERERER else "")
+        w.border_title = "Utkast" + (f" v{u.versjon}" if u and u.status != GENERERER else "") + (
+            " · redigert" if u and u.redigert is not None else "")
         w.set_class(bool(u and u.status == KLART), "klart")
+
+    # Handlinger
+
+    def valgt(self) -> tuple[Tråd, Rad] | None:
+        t = self.tråder.get(self.valgt_id() or "")
+        return (t, self.rader[t.id]) if t else None
+
+    def gå_til(self, indeks: int) -> None:
+        """Markøren til samme plass etter at raden flyttet seg (ferdige havner nederst)."""
+        dt = self.query_one(DataTable)
+        if dt.row_count:
+            dt.move_cursor(row=min(indeks, dt.row_count - 1), animate=False)
+
+    def ikke_klart(self, t: Tråd, rad: Rad) -> str | None:
+        """Hvorfor Utkastet ikke kan sendes eller redigeres, eller None."""
+        u = rad.utkast
+        if rad.status in FERDIG:
+            return "Tråden er ikke aktiv"
+        if u is None or u.status == GENERERER:
+            return "Utkastet er ikke klart ennå"
+        if u.status == FEILET:
+            return "Utkastet feilet, ingen tekst"
+        if u.status == UTDATERT and t.id not in self._hold:
+            return "Utkastet er utdatert, nytt er på vei"
+        if u.status in (SENDT, FORKASTET):
+            return "Ingen åpent utkast"
+        return None
+
+    def action_send(self) -> None:
+        if valgt := self.valgt():
+            self.prøv_send(valgt[0].id)
+
+    def prøv_send(self, tråd_id: str) -> None:
+        t, rad = self.tråder[tråd_id], self.rader[tråd_id]
+        if grunn := self.ikke_klart(t, rad):
+            self.notify(grunn, severity="warning")
+            return
+        if n := len(rad.utkast.plassholdere):
+            self.notify(f"{n} plassholder{'e' if n > 1 else ''} igjen, fyll ut med e", severity="warning")
+            return
+        if t.id not in self._sender:
+            self._sender.add(t.id)
+            self.run_worker(self.send(t, rad.utkast, self.query_one(DataTable).cursor_row), group="send",
+                            exit_on_error=False)
+
+    async def send(self, t: Tråd, u: Utkast, indeks: int) -> None:
+        """Sender via kanalen. Feil: Utkastet står som klart med feiltekst, aldri auto-retry."""
+        try:
+            kanal = next(k for k in self.kanaler if k.navn == t.kanal)
+            try:
+                await kanal.svar(t.id, u.gjeldende)
+            except Exception as e:
+                feil = str(e) or type(e).__name__
+                self.db.lagre_sendefeil(u, feil, self.nå())
+                self.rader[t.id] = self.db.rad(t.id)
+                self.notify(f"Sending feilet: {feil}", severity="error", timeout=10)
+                self.tegn_tabell()
+                return
+            self.db.marker_sendt(u, self.nå())
+            self._hold.discard(t.id)
+            self.rader[t.id] = self.db.rad(t.id)
+            await self.poll_nå()  # mitt svar ligger i Tråden nå → besvart
+            self.tegn_tabell()
+            self.gå_til(indeks)
+        finally:
+            self._sender.discard(t.id)
+
+    def action_avvis(self) -> None:
+        if not (valgt := self.valgt()) or valgt[1].status == AVVIST:
+            return
+        t, _ = valgt
+        indeks = self.query_one(DataTable).cursor_row
+        self._hold.discard(t.id)
+        self.rader[t.id] = self.db.avvis(t.id, self.nå())
+        self.planlegg(t)
+        self.tegn_tabell()
+        self.gå_til(indeks)
+
+    def action_utsett(self) -> None:
+        if not (valgt := self.valgt()) or valgt[1].status in (BESVART, GAMMEL, AVVIST):
+            return
+        t, _ = valgt
+        indeks = self.query_one(DataTable).cursor_row
+
+        def valgt_tid(valg: str | None) -> None:
+            if valg is None:
+                return
+            self._hold.discard(t.id)
+            self.rader[t.id] = self.db.utsett(t.id, utsett_til(valg, self.nå()), self.nå())
+            self.planlegg(t)
+            self.tegn_tabell()
+            self.gå_til(indeks)
+
+        self.push_screen(UtsettValg(), valgt_tid)
+
+    async def action_rediger(self) -> None:
+        if not (valgt := self.valgt()):
+            return
+        t, rad = valgt
+        if grunn := self.ikke_klart(t, rad):
+            self.notify(grunn, severity="warning")
+            return
+        u = rad.utkast
+        # Sist sette Melding: for et holdt (utdatert) Utkast har jeg alt sett meldingene fram til nå.
+        sett = rad.siste_melding_id if u.status == UTDATERT else u.melding_id
+        ny = self.editor(u.gjeldende)
+        if ny is not None and ny != u.gjeldende:
+            u = self.db.lagre_redigert(u, ny, self.nå())
+        # Ny Melding mens editoren var åpen? Hold igjen auto-utkast til jeg har valgt.
+        self._hold.add(t.id)
+        await self.poll_nå()
+        rad = self.rader[t.id] = self.db.rad(t.id)
+        if rad.status in FERDIG or rad.siste_melding_id == sett:
+            if rad.status in FERDIG or u.status != UTDATERT:
+                self._hold.discard(t.id)
+            self.tegn_tabell()
+            return
+        self.tegn_tabell()
+        self.push_screen(NyMeldingValg(), lambda valg: self.etter_ny_melding(t.id, valg))
+
+    def etter_ny_melding(self, tråd_id: str, valg: str | None) -> None:
+        if valg == "s":
+            self.prøv_send(tråd_id)
+        elif valg == "r":
+            self._hold.discard(tråd_id)
+            self.planlegg(self.tråder[tråd_id])
+            self.tegn_tabell()
+        else:  # se meldingen: slutten av Tråden nederst i visningen, redigeringen står under
+            scroll = self.query_one("#scroll", VerticalScroll)
+            scroll.scroll_to(y=max(0, self.query_one("#trad").outer_size.height - scroll.size.height // 2),
+                             animate=False)
+
+    def rediger_i_editor(self, tekst: str) -> str | None:
+        """$EDITOR via suspend, markøren på første plassholder. None hvis editoren feilet."""
+        linje, kol = første_plassholder(tekst)
+        with tempfile.TemporaryDirectory(prefix="tower-") as d:
+            sti = Path(d) / "utkast.txt"
+            sti.write_text(tekst + "\n")
+            try:
+                with self.suspend():
+                    kode = subprocess.call(editor_argv(sti, linje, kol))
+            except (OSError, SuspendNotSupported) as e:
+                self.notify(f"Kunne ikke åpne editor: {e}", severity="error")
+                return None
+            if kode != 0:
+                self.notify(f"Editoren avsluttet med {kode}, utkastet er uendret", severity="error")
+                return None
+            return sti.read_text().rstrip("\n")
 
     def oppdater_status(self) -> None:
         deler = [f"[b red]✗ {k}:[/] {escape(v)}" for k, v in self.hentfeil.items()]

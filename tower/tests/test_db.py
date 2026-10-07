@@ -5,7 +5,7 @@ from datetime import timedelta
 
 import pytest
 
-from tower.db import BESVART, GAMMEL, NY, TRIAGERT, Db, Rad, ny_status
+from tower.db import AVVIST, BESVART, GAMMEL, NY, TRIAGERT, UTSATT, Db, Rad, ny_status
 from tower.kanal import Melding, Person, Tråd
 from tower.tests.conftest import MEG, NÅ
 from tower.triage import Triage
@@ -108,3 +108,80 @@ def test_migrerer_tracer_db(tmp_path):
     con.close()
     rad = Db(sti).rad("mail:x")
     assert rad == Rad("mail:x", "mail", NY, "m0") and rad.trenger_triage
+
+
+def test_migrerer_utkast_uten_redigert(tmp_path):
+    sti = tmp_path / "tower.db"
+    con = sqlite3.connect(sti)
+    con.execute("CREATE TABLE utkast (trad TEXT NOT NULL, versjon INTEGER NOT NULL, melding_id TEXT NOT NULL, "
+                "status TEXT NOT NULL, tekst TEXT NOT NULL DEFAULT '', sjekk TEXT NOT NULL DEFAULT '[]', feil TEXT, "
+                "instruks TEXT, opprettet TEXT NOT NULL, endret TEXT NOT NULL, PRIMARY KEY (trad, versjon))")
+    con.execute("INSERT INTO utkast VALUES ('mail:x', 1, 'm0', 'klart', 'Hei', '[]', NULL, NULL, '', '')")
+    con.commit()
+    con.close()
+    u = Db(sti).utkast("mail:x")
+    assert u.redigert is None and u.gjeldende == "Hei"
+
+
+def klart(db: Db, *fra_meg: bool, tekst="Hei [[dato]]"):
+    t = tråd(*fra_meg)
+    db.registrer(t, NÅ, 7)
+    db.lagre_triage(t.id, t.siste.id, T, NÅ)
+    return db.lagre_utkast(db.nytt_utkast(t.id, t.siste.id, NÅ), tekst, (), NÅ)
+
+
+def test_redigert_beholder_agentens_tekst(tmp_path):
+    db = Db(tmp_path / "tower.db")
+    u = db.lagre_redigert(klart(db, False), "Hei 12. okt", NÅ)
+    assert (u.tekst, u.redigert, u.gjeldende, u.plassholdere) == ("Hei [[dato]]", "Hei 12. okt", "Hei 12. okt", [])
+    assert u.status == "klart"
+
+
+def test_sendt_forkaster_andre_åpne_versjoner(tmp_path):
+    db = Db(tmp_path / "tower.db")
+    v1 = klart(db, False)
+    db.registrer(tråd(False, False), NÅ, 7)  # v1 utdatert
+    db.nytt_utkast("mail:x", "m1", NÅ)
+    assert db.marker_sendt(v1, NÅ).status == "sendt"
+    assert [v.status for v in db.versjoner("mail:x")] == ["sendt", "forkastet"]
+
+
+def test_sendefeil_lar_utkastet_stå_klart(tmp_path):
+    db = Db(tmp_path / "tower.db")
+    u = db.lagre_sendefeil(klart(db, False), "nett nede", NÅ)
+    assert (u.status, u.feil) == ("klart", "nett nede")
+    assert db.marker_sendt(u, NÅ).feil is None
+
+
+def test_avvis_forkaster_til_ny_melding(tmp_path):
+    db = Db(tmp_path / "tower.db")
+    klart(db, False)
+    rad = db.avvis("mail:x", NÅ)
+    assert rad.status == AVVIST and rad.utkast.status == "forkastet" and not rad.trenger_utkast
+    rad = db.registrer(tråd(False, False), NÅ, 7)
+    assert rad.status == NY and rad.trenger_triage
+
+
+def test_utsett_vekkes_av_tid_med_utkastet_i_behold(tmp_path):
+    db = Db(tmp_path / "tower.db")
+    klart(db, False)
+    rad = db.utsett("mail:x", NÅ + timedelta(hours=1), NÅ)
+    assert rad.status == UTSATT and rad.utsatt_til == NÅ + timedelta(hours=1)
+    assert db.vekk(NÅ + timedelta(minutes=59)) == []
+    assert db.vekk(NÅ + timedelta(hours=1)) == ["mail:x"]
+    rad = db.rad("mail:x")
+    assert rad.status == TRIAGERT and rad.utsatt_til is None and rad.utkast.status == "klart"
+    assert not rad.trenger_utkast  # gjenbrukes
+
+
+def test_utsett_uten_triage_vekkes_som_ny_og_ny_melding_vekker_tidlig(tmp_path):
+    db = Db(tmp_path / "tower.db")
+    db.registrer(tråd(False), NÅ, 7)
+    db.utsett("mail:x", NÅ + timedelta(days=1), NÅ)
+    db.vekk(NÅ + timedelta(days=1))
+    assert db.rad("mail:x").status == NY
+
+    db.utsett("mail:x", NÅ + timedelta(days=1), NÅ)
+    rad = db.registrer(tråd(False, False), NÅ, 7)
+    assert rad.status == NY and rad.utsatt_til is None
+    assert db.vekk(NÅ + timedelta(days=2)) == []
