@@ -13,6 +13,7 @@
 #   fleet go 8698            background agent on a work item: map → /wayfinder, else /implement
 #   fleet review 6966        background agent reviewing a PR: /review-pr
 #   fleet code 9006          VS Code in the item's worktree, .env* copied from the main checkout
+#   fleet clean [-n]         remove worktrees of Done work items where nothing can be lost
 #   fleet help               explained (Norwegian)
 #
 # What the list shows is written to ~/.cache/fleet/screen.txt and state.json every
@@ -190,13 +191,17 @@ def reviews(everyone):
     return [r for r in out if r.vote < 5 and (everyone or r.asked)]
 
 
-def agents():
-    """{name: state} for fleet's background sessions, done ones included."""
+def sessions():
+    """Every background/interactive Claude session `claude agents` knows, done ones included."""
     try:
-        raw = json.loads(subprocess.run(["claude", "agents", "--json", "--all"], capture_output=True,
-                                        text=True, timeout=20).stdout or "[]")
+        return json.loads(subprocess.run(["claude", "agents", "--json", "--all"], capture_output=True,
+                                         text=True, timeout=20).stdout or "[]")
     except (subprocess.SubprocessError, ValueError, OSError):
-        return {}
+        return []
+
+
+def agents(raw):
+    """{name: state} for fleet's sessions."""
     out = {}
     for a in sorted(raw, key=lambda a: a.get("startedAt", 0)):
         if (a.get("name") or "").startswith("fleet-"):
@@ -207,16 +212,34 @@ def agents():
 class Snapshot:
     def __init__(self, items=(), prs=(), agents_=None, at=0.0, error=""):
         self.items, self.prs, self.agents, self.at, self.error = list(items), list(prs), agents_ or {}, at, error
+        self.cleanup = []  # Cleanup: worktrees of Done items fleet couldn't safely remove
+        self.cleaned = []  # result lines of what this refresh removed
 
 
-def snapshot(everyone):
+def snapshot(everyone, clean=False):
+    """Everything the list shows. clean: also remove worktrees of Done items where it's safe."""
+    raw = sessions()
     try:
-        s = Snapshot(work(), reviews(everyone), agents(), time.time())
+        s = Snapshot(work(), reviews(everyone), agents(raw), time.time())
     except RuntimeError as e:
         return Snapshot(at=time.time(), error=str(e))
-    trees = worktrees()
+    ts_ = trees()
+    by_id = {}
+    for t in ts_:
+        for i in t.ids:
+            by_id.setdefault(i, []).append((t.main, t.path))
     for w in s.items + [t for m in s.items for t in m.children]:
-        w.trees = trees.get(w.id, [])
+        w.trees = by_id.get(w.id, [])
+    try:
+        cands = candidates(ts_, raw)
+    except RuntimeError as e:
+        s.error = f"opprydding: {e}"
+        return s
+    for c in cands:
+        if clean and not c.reasons:
+            s.cleaned.append(remove(c, raw))
+        else:
+            s.cleanup.append(c)
     return s
 
 
@@ -226,10 +249,16 @@ TREE_ID = re.compile(r"(?:^t?|[-_/+])(\d{3,6})(?=$|[-_/+.])")  # fleet-9006, t90
 SKIP_DIRS = {".git", ".claude", "node_modules", "bin", "obj", "dist", "build", ".next", ".turbo", ".venv"}
 
 
-def worktrees():
-    """{work item id: [(main checkout, worktree)]} for linked worktrees of every repo under
-    ROOTS whose dir name or branch carries the id (fleet-<id>, t<id>, feat/<id>-…)."""
-    out = {}
+class Tree:
+    """A linked worktree that belongs to work items: its dir name or branch carries their ids."""
+    def __init__(self, main, path, branch, head, locked, ids):
+        self.main, self.path, self.branch, self.head, self.locked, self.ids = main, path, branch, head, locked, ids
+
+
+def trees():
+    """Linked worktrees of every repo under ROOTS whose dir name or branch carries a work
+    item id (fleet-<id>, t<id>, feat/<id>-…)."""
+    out = []
     for root in ROOTS:
         try:
             names = sorted(os.listdir(root))
@@ -241,14 +270,135 @@ def worktrees():
                 continue
             entries = wf.sh("git", "-C", d, "worktree", "list", "--porcelain").split("\n\n")
             for e in entries[1:]:  # the first is the main checkout
-                f = dict(l.split(" ", 1) for l in e.splitlines() if " " in l)
+                ls = e.splitlines()
+                f = dict(l.split(" ", 1) for l in ls if " " in l)
                 path, branch = f.get("worktree"), f.get("branch", "").removeprefix("refs/heads/")
                 if not path or not os.path.isdir(path):
                     continue
                 ids = {int(i) for x in (os.path.basename(path), branch) for i in TREE_ID.findall(x)}
-                for i in ids:
-                    out.setdefault(i, []).append((d, path))
+                locked = next((l.removeprefix("locked").strip() or "låst" for l in ls if l.startswith("locked")), None)
+                if ids:
+                    out.append(Tree(d, path, branch, f.get("HEAD", ""), locked, ids))
     return out
+
+
+def worktrees():
+    """{work item id: [(main checkout, worktree)]}."""
+    out = {}
+    for t in trees():
+        for i in t.ids:
+            out.setdefault(i, []).append((t.main, t.path))
+    return out
+
+
+# ── cleanup ─────────────────────────────────────────────────────────────────
+# A worktree is finished when every work item its name carries is Done (Done/Closed/
+# Removed/Resolved): that happens when its PR completes. It is removed — with the
+# local branch when a completed PR merged it, and the Claude sessions that worked in it —
+# only when nothing can be lost; otherwise it's listed with the reasons.
+
+LOG = os.path.join(OUT, "cleanup.log")
+
+
+class Cleanup:
+    def __init__(self, tree, items, reasons, pr):
+        self.tree, self.items, self.reasons, self.pr = tree, items, reasons, pr
+        self.id, self.title, self.url = items[0].id, items[0].title, items[0].url
+        self.key = f"fleet-clean-{tree.path}"
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def inside(path, tree):
+    return path == tree or path.startswith(tree.rstrip("/") + "/")
+
+
+def merged_pr(t):
+    """The completed PR whose last source commit is this worktree's HEAD, or None."""
+    m = re.search(r"dev\.azure\.com/[^/]+/([^/]+)/_git/([^/]+?)/?$",
+                  wf.sh("git", "-C", t.main, "remote", "get-url", "origin"))
+    if not m or not t.branch:
+        return None
+    proj, repo_ = urllib.parse.unquote(m.group(1)), urllib.parse.unquote(m.group(2))
+    q = urllib.parse.urlencode({"searchCriteria.sourceRefName": f"refs/heads/{t.branch}",
+                                "searchCriteria.status": "completed", "$top": 20})
+    prs = rest(f"git/repositories/{urllib.parse.quote(repo_)}/pullrequests?{q}", project=proj)["value"]
+    return next((p for p in prs if (p.get("lastMergeSourceCommit") or {}).get("commitId") == t.head), None)
+
+
+def check(t, others, raw):
+    """(reasons it isn't safe to remove, completed PR or None)."""
+    reasons = []
+    busy = [a for a in raw if inside(a.get("cwd", ""), t.path) and a.get("state") != "done"]
+    if busy:
+        reasons.append("agent " + ", ".join(f"{a.get('name') or a['id']} {a.get('state')}" for a in busy))
+    if any(inside(o.path, t.path) for o in others if o is not t):
+        reasons.append("har worktrees inni")
+    if t.locked:
+        pid = re.search(r"pid (\d+)", t.locked)
+        if not pid or alive(int(pid.group(1))):
+            reasons.append(f"låst ({t.locked[:40]})")
+    if wf.sh("git", "-C", t.path, "status", "--porcelain"):
+        reasons.append("ulagrede endringer")
+    pr = merged_pr(t)
+    if not pr and wf.sh("git", "-C", t.path, "rev-list", "--count", "HEAD", "--not", "--remotes") not in ("", "0"):
+        reasons.append("commits som ikke er pushet/merget")
+    return reasons, pr
+
+
+def candidates(ts_, raw):
+    """Cleanup per worktree whose work items are all Done, with what stands in the way."""
+    ids = sorted({i for t in ts_ for i in t.ids})
+    wf.fetch(ids)
+    out = []
+    for t in ts_:
+        items = [wf._cache[i] for i in sorted(t.ids) if i in wf._cache]
+        if len(items) != len(t.ids) or not all(it.done for it in items):
+            continue
+        reasons, pr = check(t, ts_, raw)
+        out.append(Cleanup(t, items, reasons, pr))
+    # innermost first, so a nested worktree goes before the one around it
+    return sorted(out, key=lambda c: -c.tree.path.count("/"))
+
+
+def log(line):
+    os.makedirs(OUT, exist_ok=True)
+    with open(LOG, "a") as f:
+        f.write(f"{datetime.datetime.now().isoformat(timespec='seconds')}  {line}\n")
+
+
+def remove(c, raw, force=False):
+    """Remove the worktree, then its branch (when a completed PR merged it), and the Claude
+    sessions that worked in it. force: also when dirty/locked/busy. Returns a result line."""
+    t, done = c.tree, []
+    for a in raw:
+        if inside(a.get("cwd", ""), t.path):
+            if a.get("state") != "done":
+                subprocess.run(["claude", "stop", a["id"]], capture_output=True)
+            subprocess.run(["claude", "rm", a["id"]], capture_output=True)
+            done.append(f"session {a.get('name') or a['id']}")
+    if os.path.isdir(t.path):
+        if t.locked and force:
+            wf.sh("git", "-C", t.main, "worktree", "unlock", t.path)
+        r = subprocess.run(["git", "-C", t.main, "worktree", "remove"] + (["--force"] if force else []) + [t.path],
+                           capture_output=True, text=True)
+        if r.returncode:
+            line = f"✗ {short(t.path)}: {r.stderr.strip().splitlines()[-1] if r.stderr.strip() else 'git feilet'}"
+            log(line)
+            return line
+    done.insert(0, "worktree")
+    if t.branch and c.pr and t.branch not in ("main", "master"):
+        if subprocess.run(["git", "-C", t.main, "branch", "-D", t.branch], capture_output=True).returncode == 0:
+            done.append(f"branch {t.branch}")
+    line = f"🧹 #{c.id} Done → fjernet {', '.join(done)} ({short(t.path)})"
+    log(line)
+    return line
 
 
 _env_files = {}
@@ -488,6 +638,13 @@ def set_sprint(w):
 def menu(x):
     """(title, [(key, label, action | submenu-builder, confirm?)]) for the row's `m` menu.
     An action returns its result line; a builder (marked by confirm "sub") returns a menu."""
+    if isinstance(x, Cleanup):
+        what = "ulagrede endringer og ikke-pushede commits går tapt" if x.reasons else "fjernes"
+        return (f"#{x.id} {os.path.basename(x.tree.path)}", [
+            ("f", "rydd likevel (force)", lambda: remove(x, sessions(), force=True),
+             f"fjern {short(x.tree.path)} med makt? {what} ({', '.join(x.reasons)})"),
+            ("v", "VS Code i worktreet", lambda: open_code(x.tree.main, x.tree.path), False),
+            ("o", "åpne work item", lambda: subprocess.run(["open", x.url]) and "", False)])
     if isinstance(x, Review):
         return (f"!{x.id} {x.title[:50]}", [
             ("a", "approve", lambda: approve(x), False),
@@ -594,6 +751,14 @@ def lines(snap, everyone, open_=()):
         out.append((pr_row(snap, r, wrepo), r))
     if not snap.prs:
         out.append(([("  ingen", "dim")], None))
+    if snap.cleanup:
+        out.append(([], None))
+        out.append(([(f"Opprydding · worktrees for Done work items ({len(snap.cleanup)})", "bold")], None))
+        for c in snap.cleanup:
+            where_ = f"{os.path.basename(c.tree.main)}/…/{os.path.basename(c.tree.path)}"
+            why = ", ".join(c.reasons) or "trygt å fjerne"
+            out.append(([("🧹 ", None), (f"#{c.id:<5} ", "dim"), (c.title[:50], None),
+                         (f"  ⎇ {where_}", "cyan"), (f"  — {why}", "yellow" if c.reasons else "dim")], c))
     return out
 
 
@@ -646,6 +811,10 @@ def write_state(snap, everyone, open_=(), cur=None, msg=""):
                           "agentState": snap.agents.get(r.key), "start": f"fleet review {r.id}"}
                          for r in snap.prs],
         "agents": snap.agents,
+        "cleanup": [{"workItems": [i.id for i in c.items], "title": c.title, "worktree": c.tree.path,
+                     "branch": c.tree.branch, "blockedBy": c.reasons, "mergedPr": (c.pr or {}).get("pullRequestId"),
+                     "force": f"fleet clean --force {c.tree.path}"} for c in snap.cleanup],
+        "cleanedThisRefresh": snap.cleaned, "cleanupLog": LOG,
     }
     for name, body in (("screen.txt", "\n".join(screen) + "\n"),
                        ("state.json", json.dumps(state, indent=2, ensure_ascii=False) + "\n")):
@@ -719,7 +888,7 @@ def tui(scr, a):
         nonlocal snap, loading
         while True:
             loading = True
-            s = snapshot(a.all)
+            s = snapshot(a.all, clean=not a.no_clean)
             with lock:
                 snap = s
             loading = False
@@ -746,6 +915,8 @@ def tui(scr, a):
             if names and not a.quiet:
                 notify(s, names)
                 msg = f"⏸ venter på deg: {', '.join(names)}"
+            if s.cleaned:
+                msg = " · ".join(s.cleaned)
             seen = s.agents
         ls = lines(s, a.all, open_)
         rows = [x for _, x in ls if x is not None]
@@ -863,6 +1034,8 @@ def tui(scr, a):
                 act(opt[2])
         elif k == ord("m"):
             pop = menu(cur)
+        elif isinstance(cur, Cleanup) and k in (10, 13, curses.KEY_ENTER, ord("v")):
+            pop = menu(cur)
         elif k in (10, 13, curses.KEY_ENTER):
             what = f"#{cur.id} {cur.title[:50]}" if isinstance(cur, Work) else f"!{cur.id} {cur.title[:50]}"
             st = s.agents.get(cur.key)
@@ -950,6 +1123,38 @@ def cmd_code(a):
     run_action(open_code, main, tree)
 
 
+def cmd_clean(a):
+    raw = sessions()
+    cands = candidates(trees(), raw)
+    if a.force:
+        path = os.path.realpath(os.path.expanduser(a.force))
+        c = next((c for c in cands if os.path.realpath(c.tree.path) == path), None)
+        if not c:
+            die(f"{a.force} er ikke en worktree for et Done work item")
+        line = remove(c, raw, force=True)
+        return print(red(line) if line.startswith("✗") else green(line))
+    if not cands:
+        return print(dim("ingen worktrees for Done work items"))
+    while True:  # again after removing, so a worktree that had finished ones inside can go too
+        removed, blocked = 0, []
+        for c in cands:
+            head = f"#{c.id} {c.title[:50]}  {short(c.tree.path)}"
+            if c.reasons:
+                blocked.append(yellow(f"🧹 {head}  — {', '.join(c.reasons)}"))
+            elif a.dry_run:
+                print(green(f"🧹 {head}  — ville fjernet") + dim(f" (branch {c.tree.branch})" if c.pr else ""))
+            else:
+                line = remove(c, raw)
+                removed += not line.startswith("✗")
+                print(red(line) if line.startswith("✗") else green(line))
+        if not removed or not blocked:
+            break
+        raw = sessions()
+        cands = candidates(trees(), raw)
+    for line in blocked:
+        print(line)
+
+
 def run_action(fn, *args):
     try:
         print(green(fn(*args)))
@@ -996,6 +1201,8 @@ GUIDE = """\
   fleet wi <id> state [S]   sett state S (uten S: list typens states)
   fleet wi <id> sprint      flytt til prosjektets nåværende sprint (default-teamet)
   fleet code <id> [-n N]    VS Code i itemets worktree, med .env* kopiert fra hovedtreet
+  fleet clean [-n]          fjern worktrees for Done work items der ingenting kan gå tapt
+  fleet clean --force <wt>  fjern likevel (ulagrede endringer går tapt; branchen beholdes)
   fleet help                denne teksten
 
 {b}TASTER{r}
@@ -1021,6 +1228,15 @@ GUIDE = """\
   Kloner finnes én mappe ned i FLEET_ROOTS (default ~/visense, kolon-separert).
   Følg med: `claude agents` (venstre pane) · status vises også på linja (▶ ⏸ ✓).
 
+{b}OPPRYDDING{r}  {d}(automatisk i lista; --no-clean slår av){r}
+  Et worktree er ferdig når alle work items navnet bærer er Done — det skjer når PR-en
+  fullføres. Ved hver oppdatering fjernes slike worktrees hvis
+    ingen agent jobber der · ingen ulagrede endringer · ingen ikke-pushede commits
+    (med mindre en fullført PR merget akkurat HEAD) · ikke låst · ingen worktrees inni
+  Sammen med worktreet: den lokale branchen (bare når en fullført PR merget den) og
+  Claude-sesjonene som jobbet der. Logg: {log}
+  Det som står i veien listes under «Opprydding» med grunnen; enter/m → f rydd likevel.
+
 {b}FOR CLAUDE{r}
   Lista skrives hvert {write}. sekund til
     {out}/screen.txt   som tekst, akkurat som den vises
@@ -1033,7 +1249,8 @@ GUIDE = """\
 def cmd_help(a):
     on = TTY
     print(GUIDE.format(b="\033[1m" if on else "", r="\033[0m" if on else "", org=A().org,
-                       refresh=REFRESH, write=WRITE, home=short(HOME), out=short(OUT), agents=AGENTS))
+                       refresh=REFRESH, write=WRITE, home=short(HOME), out=short(OUT), agents=AGENTS,
+                       d="\033[2m" if on else "", log=short(LOG)))
 
 
 # ── cli ─────────────────────────────────────────────────────────────────────
@@ -1047,6 +1264,7 @@ def main():
     s.add_argument("-a", "--all", action="store_true", help="all others' PRs, not just where I'm reviewer")
     s.add_argument("--no-split", action="store_true", help="don't open the claude agents pane in Ghostty")
     s.add_argument("-q", "--quiet", action="store_true", help="no notification when an agent needs me")
+    s.add_argument("--no-clean", action="store_true", help="don't remove worktrees of Done work items")
     s.set_defaults(fn=cmd_live)
 
     s = sub.add_parser("ls", help="print the list once (and write the state files)")
@@ -1076,6 +1294,11 @@ def main():
     s.add_argument("id", type=int)
     s.add_argument("-n", type=int, help="which worktree, when there are several")
     s.set_defaults(fn=cmd_code)
+
+    s = sub.add_parser("clean", help="remove worktrees of Done work items where nothing can be lost")
+    s.add_argument("-n", "--dry-run", action="store_true", help="only list what would go and what's in the way")
+    s.add_argument("--force", metavar="WORKTREE", help="remove this one anyway (uncommitted changes are lost)")
+    s.set_defaults(fn=cmd_clean)
 
     s = sub.add_parser("help", help="forklaring (norsk)")
     s.set_defaults(fn=cmd_help)
