@@ -21,6 +21,7 @@
 #   wf go 8698 [ticket]    interactive /wayfinder session on the next ticket
 #   wf run 8592 [8593 ..]  background /implement agent per ticket (worktree)
 #   wf fan 8591            wf run every launchable ticket of a spec
+#   wf done 8591 [..]      close items; a map or spec only when everything under it is done
 #   wf open 8698           open in browser
 #   wf help                the whole workflow explained (Norwegian)
 #
@@ -235,6 +236,18 @@ class Ado:
             ops.append({"op": "add", "path": "/fields/System.State", "value": "Doing"})
         self.api(f"wit/workitems/{item.id}", ops, method="PATCH", ctype="application/json-patch+json")
 
+    def done_state(self, item):
+        """The type's Completed-category state: Done, Closed, … depending on the process."""
+        path = f"wit/workitemtypes/{urllib.parse.quote(item.type)}/states"
+        states = self.api(path, project=urllib.parse.quote(item.project))["value"]
+        return next((s["name"] for s in states if s.get("category") == "Completed"), "Done")
+
+    def close(self, item):
+        state = self.done_state(item)
+        self.api(f"wit/workitems/{item.id}", [{"op": "add", "path": "/fields/System.State", "value": state}],
+                 method="PATCH", ctype="application/json-patch+json")
+        return state
+
     def read_hint(self, id):
         return f"`az boards work-item show --id {id}`"
 
@@ -315,6 +328,13 @@ class GitHub:
     def claim(self, item, who):
         if not sh("gh", "issue", "edit", str(item.id), "-R", self.repo, "--add-assignee", who):
             die(f"could not assign #{item.id} to {who}")
+
+    def close(self, item):
+        r = subprocess.run(["gh", "issue", "close", str(item.id), "-R", self.repo, "--reason", "completed"],
+                           capture_output=True, text=True)
+        if r.returncode:
+            die(f"could not close #{item.id}: {r.stderr.strip()}")
+        return "closed"
 
     def read_hint(self, id):
         return f"`gh issue view {id} -R {self.repo} --comments`"
@@ -705,6 +725,43 @@ def cmd_fan(a):
     cmd_run(a)
 
 
+def open_under(item):
+    """What must be done before item can be: its open children, and for a map also its
+    specs and their tickets."""
+    under = many(item.links(CHILD))
+    if item.is_map:
+        specs = map_specs(item)
+        fetch([c for s in specs for c in s.links(CHILD)])
+        under += specs + [c for s in specs for c in many(s.links(CHILD))]
+    return sorted({t.id: t for t in under if not t.done}.values(), key=lambda t: t.id)
+
+
+def cmd_done(a):
+    items = many(a.ids)
+    for i in set(a.ids) - {t.id for t in items}:
+        die(f"{T().noun} {i} not found in {T().where}")
+    skipped = False
+    # tickets before specs before maps, so `wf done <spec> <map>` closes both
+    for t in sorted(items, key=lambda t: (t.is_map, t.is_spec, t.id)):
+        if t.done:
+            print(dim(f"{t.id} already {t.state} — skip"))
+            continue
+        left = open_under(t)
+        if left and not a.force:
+            skipped = True
+            print(red(f"{t.id} has {len(left)} open under it — skip (--force)"))
+            for x in left:
+                print(line(x, dim(f"  {x.state}")))
+            continue
+        if a.dry_run:
+            print(line(t, dim("  would close")))
+            continue
+        t.state, t.done = T().close(t), True
+        print(line(t, green(f"  → {t.state}")))
+    if skipped:
+        sys.exit(1)
+
+
 def cmd_open(a):
     subprocess.run(["open", get(a.id).url])
 
@@ -758,6 +815,8 @@ GUIDE = """\
   wf run <id…>            /implement-agent i bakgrunnen, worktree t<id>, navn <repo>-<id>
                           -i interaktiv · -f ignorer sjekker · --no-claim
   wf fan <spec> [-y]      run på alle klare ikke-HITL tickets i spec-en
+  wf done <id…> [-f]      lukk (ADO: typens ferdig-state, GitHub: close). Kart/spec bare når
+                          alt under er ferdig — kart: barn, specs og specenes tickets
   wf open <id>            åpne i nettleser
   wf help [kommando]      denne teksten, eller flaggene til én kommando
 
@@ -767,7 +826,7 @@ GUIDE = """\
 
   · run/fan {y}skriver til trackeren{r}: setter deg som assignee (ADO: også state Doing)
     før agenten starter, så den ikke startes to ganger. Ticketen lukkes ikke — gjør det
-    etter merge.
+    etter merge med wf done.
   · run hopper over Done, blokkerte og andres tickets, og alt som mangler ready-for-agent
     — unntatt task-tickets rett under et kart (-f overstyrer alt).
   · HITL (hitl, ready-for-human, grilling, prototype) startes aldri i bakgrunnen.
@@ -840,6 +899,11 @@ def main():
     s.add_argument("-y", "--yes", action="store_true")
     s.add_argument("--no-claim", action="store_true")
     s.set_defaults(fn=cmd_fan)
+
+    s = sub.add_parser("done", help="close items; a map or spec only when everything under it is done")
+    s.add_argument("ids", type=int, nargs="+")
+    s.add_argument("-f", "--force", action="store_true", help="close even with open items under it")
+    s.set_defaults(fn=cmd_done)
 
     s = sub.add_parser("help", help="forklaring av modellen, flyten og kommandoene")
     s.add_argument("topic", nargs="?")
