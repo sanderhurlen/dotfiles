@@ -65,10 +65,10 @@ def die(msg):
     sys.exit(1)
 
 
-def rest(path, body=None, method=None, scope="project", version="7.1"):
+def rest(path, body=None, method=None, scope="project", version="7.1", project=None):
     """ADO call. Raises RuntimeError with ADO's message instead of exiting, so the TUI
-    can show it and carry on."""
-    base = A().org if scope == "org" else f"{A().org}/{urllib.parse.quote(A().project)}"
+    can show it and carry on. project overrides this repo's project."""
+    base = A().org if scope == "org" else f"{A().org}/{urllib.parse.quote(project or A().project)}"
     url = f"{base}/_apis/{path}" + ("&" if "?" in path else "?") + f"api-version={version}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method or ("POST" if data else "GET"),
@@ -131,6 +131,7 @@ class PR:
         self.title = raw.get("title", "")
         self.repo = raw["repository"]["name"]
         self.project_id = raw["repository"]["project"]["id"]
+        self.project = raw["repository"]["project"]["name"]
         self.source, self.target = head(raw.get("sourceRefName")), head(raw.get("targetRefName"))
         self.draft = raw.get("isDraft", False)
         self.auto = bool(raw.get("autoCompleteSetBy"))
@@ -164,7 +165,7 @@ def policies(pr):
     art = f"vstfs:///CodeReview/CodeReviewId/{pr.project_id}/{pr.id}"
     try:
         evs = rest("policy/evaluations?artifactId=" + urllib.parse.quote(art, safe=""),
-                   version="7.1-preview.1")["value"]
+                   version="7.1-preview.1", project=pr.project)["value"]
     except RuntimeError:
         evs = []
     for e in evs:
@@ -271,8 +272,9 @@ def create(repo_name, body, draft=False):
     return PR(raw)
 
 
-def complete(pr):
-    """Complete now when nothing blocks, else turn on auto-complete. Returns what happened."""
+def complete(pr, mode=None):
+    """Complete now when nothing blocks, else turn on auto-complete. mode "now" only
+    completes (raises when blocked), "auto" only sets auto-complete. Returns what happened."""
     if not pr.policies and pr.allowed is None:
         policies(pr)
     strategy = next((m for m in MERGE if pr.allowed is None or m in pr.allowed), "squash")
@@ -280,18 +282,21 @@ def complete(pr):
     path = f"git/repositories/{pr.raw['repository']['id']}/pullrequests/{pr.id}"
     if pr.draft:
         raise RuntimeError(f"!{pr.id} er draft — publiser den først")
-    if pr.ready:
-        rest(path, {"status": "completed", "completionOptions": opts,
-                    "lastMergeSourceCommit": pr.raw["lastMergeSourceCommit"]}, method="PATCH")
-        return f"✓ fullført !{pr.id} ({strategy})"
-    rest(path, {"autoCompleteSetBy": {"id": me()[0]}, "completionOptions": opts}, method="PATCH")
     waiting = [n for n, s, b in pr.policies if b and s not in ("approved", "notApplicable")]
+    if mode == "now" and not pr.ready:
+        raise RuntimeError(f"!{pr.id} kan ikke fullføres nå: " + (", ".join(waiting) or "konflikter"))
+    if pr.ready and mode != "auto":
+        rest(path, {"status": "completed", "completionOptions": opts,
+                    "lastMergeSourceCommit": pr.raw["lastMergeSourceCommit"]}, method="PATCH", project=pr.project)
+        return f"✓ fullført !{pr.id} ({strategy})"
+    rest(path, {"autoCompleteSetBy": {"id": me()[0]}, "completionOptions": opts}, method="PATCH",
+         project=pr.project)
     return f"⚡ auto-complete på !{pr.id} ({strategy})" + (f", venter på {', '.join(waiting)}" if waiting else "")
 
 
 def abandon(pr):
     rest(f"git/repositories/{pr.raw['repository']['id']}/pullrequests/{pr.id}", {"status": "abandoned"},
-         method="PATCH")
+         method="PATCH", project=pr.project)
     return f"⊘ forlatt !{pr.id}"
 
 
