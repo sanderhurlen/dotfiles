@@ -1,0 +1,934 @@
+#!/usr/bin/env python3
+#
+# fleet — my Azure DevOps work and PRs to review, one key to hand each to a
+# background Claude agent.
+#
+# Shares tracker, auth and PR plumbing with wf/wp/wr (bin/wf, bin/wr). Whole
+# org: work items assigned to me in To Do/Doing, active PRs I haven't approved.
+#
+# Type:
+#
+#   fleet                    live list (TUI); in Ghostty also opens `claude agents` in a pane to the left
+#   fleet ls                 same list, printed once
+#   fleet go 8698            background agent on a work item: map → /wayfinder, else /implement
+#   fleet review 6966        background agent reviewing a PR: /review-pr
+#   fleet help               explained (Norwegian)
+#
+# What the list shows is written to ~/.cache/fleet/screen.txt and state.json every
+# 15 s, so a Claude session can read it.
+#
+# Agents run in the local clone of the item's/PR's repo (found under FLEET_ROOTS,
+# default ~/visense), else in the first root. Named fleet-wi-<id> / fleet-pr-<id>.
+# TUI: ↑↓/jk move · m actions for the row · enter start agent · →/← unfold/fold a map · o open · a all PRs · r refresh · q quit
+
+import argparse
+import curses
+import datetime
+import importlib.machinery
+import importlib.util
+import json
+import locale
+import os
+import re
+import shlex
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+def _load(name):
+    loader = importlib.machinery.SourceFileLoader(name, os.path.join(os.path.dirname(os.path.realpath(__file__)), name))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(name, loader))
+    loader.exec_module(mod)
+    return mod
+
+
+wr = _load("wr")
+wf, wp = wr.wf, wr.wp
+from_wf = ("bold", "dim", "cyan", "green", "yellow", "red", "TTY")
+globals().update({k: getattr(wf, k) for k in from_wf})
+A, ts, ago, rest, me = wp.A, wp.ts, wp.ago, wr.rest, wr.me
+
+STATES = ("Doing", "To Do")
+REFRESH = 15  # seconds between data refreshes
+SKIP = "--dangerously-skip-permissions"  # every agent fleet starts, and every one dispatched from agent view
+AGENTS = f"claude agents {SKIP}"
+WRITE = 15    # seconds between state file writes
+OUT = os.path.expanduser(os.environ.get("FLEET_OUT", "~/.cache/fleet"))
+ROOTS = [os.path.expanduser(p) for p in os.environ.get("FLEET_ROOTS", "~/visense").split(":") if p]
+HOME = ROOTS[0]
+
+
+def die(msg):
+    print(f"fleet: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+# ── local clones ────────────────────────────────────────────────────────────
+
+_clones = None
+
+
+def clones():
+    """{(project, repo) lowercased: path} for ADO clones one level under each root.
+    A dir named like its repo wins over other clones of it (feature copies)."""
+    global _clones
+    if _clones is None:
+        _clones = {}
+        for root in ROOTS:
+            try:
+                names = sorted(os.listdir(root))
+            except OSError:
+                continue
+            for n in names:
+                d = os.path.join(root, n)
+                if not os.path.exists(os.path.join(d, ".git")):
+                    continue
+                m = re.search(r"dev\.azure\.com/[^/]+/([^/]+)/_git/([^/]+?)/?$",
+                              wf.sh("git", "-C", d, "remote", "get-url", "origin"))
+                if not m:
+                    continue
+                key = (urllib.parse.unquote(m.group(1)).lower(), urllib.parse.unquote(m.group(2)).lower())
+                if key not in _clones or n.lower() == key[1]:
+                    _clones[key] = d
+    return _clones
+
+
+_repo_ids = None
+
+
+def repo_ids():
+    """{repo id: (project, name)} for every repo in the org."""
+    global _repo_ids
+    if _repo_ids is None:
+        _repo_ids = {r["id"]: (r["project"]["name"], r["name"])
+                     for r in rest("git/repositories", scope="org")["value"]}
+    return _repo_ids
+
+
+# ── data ────────────────────────────────────────────────────────────────────
+
+
+class Work:
+    def __init__(self, it, parent=None, status=None):
+        self.it, self.parent, self.status = it, parent, status
+        self.id, self.title, self.state, self.url = it.id, it.title, it.state, it.url
+        self.project, self.type = it.project, it.type
+        self.kind = "map" if it.is_map else "spec" if it.is_spec else "item"
+        self.key = f"fleet-wi-{self.id}"
+        self.children, self.done_children = [], 0  # a map's open tickets (Work), and how many are done
+
+    @property
+    def decision(self):
+        """A map ticket that resolves a decision (research, grilling, …), not a task to execute."""
+        return self.parent is not None and self.it.kind not in (None, "task") and not self.it.is_spec
+
+    @property
+    def skill(self):
+        return "/wayfinder" if self.kind == "map" or self.decision else "/implement"
+
+    @property
+    def prompt(self):
+        return f"/wayfinder {self.parent.id} ticket {self.id}" if self.decision else f"{self.skill} {self.id}"
+
+
+def unfold(m):
+    """Fill a map's children: open tickets as frontier (ledig), claimed (tatt), blocked (blokkert)."""
+    kids = wf.many(m.it.links(wf.CHILD))
+    take, claimed, blocked = wf.classify(kids, need_ready=False)
+    m.children = [Work(t, m, st) for st, ts_ in (("ledig", take), ("tatt", claimed), ("blokkert", blocked))
+                  for t in ts_]
+    m.done_children = sum(k.done for k in kids)
+
+
+def work():
+    """My work items in To Do/Doing across the org: Doing first, then by id."""
+    q = ("SELECT [System.Id] FROM WorkItems WHERE [System.AssignedTo] = @Me AND [System.State] IN ("
+         + ", ".join(f"'{s}'" for s in STATES) + ") ORDER BY [System.Id]")
+    ids = [w["id"] for w in rest("wit/wiql", {"query": q}, scope="org")["workItems"]]
+    wf._cache.clear()
+    its = wf.many(ids)
+    wf.fetch([p for t in its for p in t.links(wf.PARENT)])
+    maps_ = {p.id: p for t in its for p in wf.many(t.links(wf.PARENT)) if p.is_map}
+    items = [Work(t, next((Work(maps_[p]) for p in t.links(wf.PARENT) if p in maps_), None)) for t in its]
+    maps = [w for w in items if w.kind == "map"]
+    wf.fetch([c for m in maps for c in m.it.links(wf.CHILD)])
+    for m in maps:
+        unfold(m)
+    return sorted(items, key=lambda w: (STATES.index(w.state) if w.state in STATES else 9, w.id))
+
+
+class Review:
+    def __init__(self, raw, my_id):
+        self.pr = wr.PR(raw)
+        p = self.pr
+        self.id, self.title, self.repo, self.url = p.id, p.title, p.repo, p.url
+        self.project = raw["repository"]["project"]["name"]
+        self.url = f"{A().org}/{urllib.parse.quote(self.project)}/_git/{urllib.parse.quote(self.repo)}" \
+                   f"/pullrequest/{self.id}"
+        self.who, self.created, self.source, self.target = p.who, p.created, p.source, p.target
+        mine = next((r for r in raw.get("reviewers") or [] if r.get("id") == my_id), None)
+        self.asked = mine is not None
+        self.vote = mine.get("vote", 0) if mine else 0
+        self.key = f"fleet-pr-{self.id}"
+
+
+def reviews(everyone):
+    """Active, non-draft PRs by others that I haven't approved. Only those I'm a reviewer
+    on unless everyone. Newest first."""
+    my_id = me()[0]
+    raw = rest("git/pullrequests?searchCriteria.status=active&$top=500", scope="org")["value"]
+    out = [Review(r, my_id) for r in raw
+           if not r.get("isDraft") and (r.get("createdBy") or {}).get("id") != my_id]
+    return [r for r in out if r.vote < 5 and (everyone or r.asked)]
+
+
+def agents():
+    """{name: state} for fleet's background sessions, done ones included."""
+    try:
+        raw = json.loads(subprocess.run(["claude", "agents", "--json", "--all"], capture_output=True,
+                                        text=True, timeout=20).stdout or "[]")
+    except (subprocess.SubprocessError, ValueError, OSError):
+        return {}
+    out = {}
+    for a in sorted(raw, key=lambda a: a.get("startedAt", 0)):
+        if (a.get("name") or "").startswith("fleet-"):
+            out[a["name"]] = a.get("state") or a.get("status") or "?"
+    return out
+
+
+class Snapshot:
+    def __init__(self, items=(), prs=(), agents_=None, at=0.0, error=""):
+        self.items, self.prs, self.agents, self.at, self.error = list(items), list(prs), agents_ or {}, at, error
+
+
+def snapshot(everyone):
+    try:
+        return Snapshot(work(), reviews(everyone), agents(), time.time())
+    except RuntimeError as e:
+        return Snapshot(at=time.time(), error=str(e))
+
+
+# ── launching ───────────────────────────────────────────────────────────────
+
+
+def trust(path):
+    """Skip claude's trust/import dialogs for path (a repo's main checkout, or the dir)."""
+    common = wf.sh("git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    root = os.path.dirname(common) if common.endswith("/.git") else path
+    cfg_path = os.path.expanduser("~/.claude.json")
+    try:
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return
+    proj = cfg.setdefault("projects", {}).setdefault(root, {})
+    if proj.get("hasTrustDialogAccepted") and proj.get("hasClaudeMdExternalIncludesApproved"):
+        return
+    proj.update(hasTrustDialogAccepted=True, hasClaudeMdExternalIncludesApproved=True,
+                hasClaudeMdExternalIncludesWarningShown=True)
+    tmp = f"{cfg_path}.fleet-{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(cfg, f, indent=2)
+    os.replace(tmp, cfg_path)
+
+
+def where_work(w):
+    """(cwd, worktree) for a work item: the one local clone its (and its children's) linked
+    commits/PRs touch, in a worktree; else HOME. Maps always run in HOME."""
+    if w.skill == "/wayfinder":
+        return HOME, None
+    items = [w.it] + wf.many(w.it.links(wf.CHILD))
+    ids = repo_ids()
+    paths = {clones().get(tuple(s.lower() for s in ids[r])) for t in items for r in t.repos if r in ids}
+    paths.discard(None)
+    if len(paths) == 1:
+        return paths.pop(), f"fleet-{w.id}"
+    return HOME, None
+
+
+def where_review(r):
+    return clones().get((r.project.lower(), r.repo.lower())), None
+
+
+def plan(x):
+    """(cwd, cmd) that starts the background agent for a Work or Review."""
+    if isinstance(x, Work):
+        cwd, wt = where_work(x)
+        prompt = x.prompt
+    else:
+        cwd, wt = where_review(x)
+        prompt = f"/review-pr {x.id}" if cwd else f"/review-pr {x.url}"
+        cwd = cwd or HOME
+    cmd = ["claude", SKIP, "--bg", "-n", x.key]
+    if wt:
+        cmd += ["-w", wt]
+    return cwd, cmd + [prompt]
+
+
+def launch(x):
+    """Start the agent. Returns a one-line result; raises RuntimeError on failure."""
+    cwd, cmd = plan(x)
+    trust(cwd)
+    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if r.returncode:
+        raise RuntimeError((r.stderr or r.stdout).strip().splitlines()[-1] if (r.stderr or r.stdout).strip()
+                           else f"claude exited {r.returncode}")
+    m = re.search(r"backgrounded · (\w+)", r.stdout)
+    return f"▶ {x.key} startet{f' ({m.group(1)})' if m else ''} i {short(cwd)}: {cmd[-1][:60]}"
+
+
+def short(path):
+    return path.replace(os.path.expanduser("~"), "~", 1)
+
+
+# ── actions ─────────────────────────────────────────────────────────────────
+# What the `m` menu offers, and `fleet pr` / `fleet wi` run. Each returns a one-line
+# result and raises RuntimeError with ADO's message.
+
+
+def fresh(r):
+    """The PR as ADO has it now (policies and merge commit change under us)."""
+    return wr.PR(rest(f"git/pullrequests/{r.id}", scope="org"))
+
+
+def approve(r):
+    p = r.pr
+    rest(f"git/repositories/{p.raw['repository']['id']}/pullrequests/{p.id}/reviewers/{me()[0]}",
+         {"vote": 10}, method="PUT", project=p.project)
+    return f"✓ godkjent !{p.id}"
+
+
+def auto_complete(r):
+    return wr.complete(fresh(r), "auto")
+
+
+def complete_now(r):
+    return wr.complete(fresh(r), "now")
+
+
+def abandon(r):
+    return wr.abandon(fresh(r))
+
+
+def patch_item(w, ops):
+    url = f"{A().org}/{urllib.parse.quote(w.project)}/_apis/wit/workitems/{w.id}?api-version=7.1"
+    req = urllib.request.Request(url, data=json.dumps(ops).encode(), method="PATCH",
+                                 headers={"Authorization": f"Bearer {A().token()}",
+                                          "Content-Type": "application/json-patch+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as e:
+        try:
+            m = json.loads(e.read().decode("utf-8-sig")).get("message")
+        except ValueError:
+            m = None
+        raise RuntimeError(m or f"HTTP {e.code}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(str(e.reason))
+
+
+_states = {}
+
+
+def states(w):
+    """The work item type's states, in the process's order."""
+    k = (w.project, w.type)
+    if k not in _states:
+        _states[k] = [x["name"] for x in rest(f"wit/workitemtypes/{urllib.parse.quote(w.type)}/states",
+                                              project=w.project)["value"]]
+    return _states[k]
+
+
+def set_state(w, state):
+    if state not in states(w):
+        raise RuntimeError(f"{w.type} har ikke state «{state}» — {', '.join(states(w))}")
+    patch_item(w, [{"op": "add", "path": "/fields/System.State", "value": state}])
+    return f"✓ #{w.id} → {state}"
+
+
+_sprints = {}
+
+
+def sprint(project):
+    """(name, path) of the project's default team's current iteration."""
+    if project not in _sprints:
+        team = rest(f"projects/{urllib.parse.quote(project)}", scope="org").get("defaultTeam", {}).get("name") \
+            or f"{project} Team"
+        cur = rest("work/teamsettings/iterations?$timeframe=current", project=f"{project}/{team}")["value"]
+        if not cur:
+            raise RuntimeError(f"{team} har ingen nåværende sprint")
+        _sprints[project] = (cur[0]["name"], cur[0]["path"])
+    return _sprints[project]
+
+
+def set_sprint(w):
+    name, path = sprint(w.project)
+    patch_item(w, [{"op": "add", "path": "/fields/System.IterationPath", "value": path}])
+    return f"✓ #{w.id} → {name}"
+
+
+def menu(x):
+    """(title, [(key, label, action | submenu-builder, confirm?)]) for the row's `m` menu.
+    An action returns its result line; a builder (marked by confirm "sub") returns a menu."""
+    if isinstance(x, Review):
+        return (f"!{x.id} {x.title[:50]}", [
+            ("a", "approve", lambda: approve(x), False),
+            ("u", "sett auto-complete", lambda: auto_complete(x), False),
+            ("c", "complete nå", lambda: complete_now(x), f"complete !{x.id} {x.title[:40]} → {x.target}?"),
+            ("x", "abandon", lambda: abandon(x), f"abandon !{x.id} {x.title[:40]}?"),
+            ("g", "start review-agent", lambda: launch(x), False),
+            ("o", "åpne i nettleser", lambda: subprocess.run(["open", x.url]) and "", False)])
+    return (f"#{x.id} {x.title[:50]}", [
+        ("s", f"endre status ({x.state})", lambda: status_menu(x), "sub"),
+        ("i", "sett nåværende sprint", lambda: set_sprint(x), False),
+        ("g", f"start agent ({x.skill})", lambda: launch(x), False),
+        ("o", "åpne i nettleser", lambda: subprocess.run(["open", x.url]) and "", False)])
+
+
+def status_menu(w):
+    return (f"#{w.id} status", [(str(n), st + ("  (nå)" if st == w.state else ""),
+                                 lambda st=st: set_state(w, st), False)
+                                for n, st in enumerate(states(w)[:9], 1)])
+
+
+# ── rendering ───────────────────────────────────────────────────────────────
+
+AGENT = {"running": ("▶", "cyan"), "working": ("▶", "cyan"), "blocked": ("⏸", "yellow"),
+         "done": ("✓", "green"), "idle": ("✓", "green"), "failed": ("✗", "red"), "error": ("✗", "red")}
+VOTE = {-10: ("✗", "red"), -5: ("⏸", "yellow"), 0: ("○", "dim")}
+KIND = {"map": ("kart", "cyan"), "spec": ("spec", "green")}
+STATUS = {"ledig": "green", "tatt": "yellow", "blokkert": "red"}
+
+
+def agent_chip(snap, x):
+    st = snap.agents.get(x.key)
+    if not st:
+        return []
+    icon, tone = AGENT.get(st, ("●", "dim"))
+    return [(f"  {icon} agent {st}", tone)]
+
+
+def work_row(snap, w, multi, folded):
+    label, tone = KIND.get(w.kind, (w.type.lower()[:5], "dim"))
+    parts = [("● " if w.state == "Doing" else "○ ", "yellow" if w.state == "Doing" else "dim"),
+             (f"#{w.id:<5} ", "dim"), (f"{label:<5} ", tone)]
+    if multi:
+        parts.append((f"{w.project[:12]:<12}  ", "dim"))
+    if w.kind == "map":
+        parts.append(("▸ " if folded else "▾ ", "cyan"))
+    parts += [(w.title[:70], "bold"), (f"  {w.state}", "dim")]
+    if w.kind == "map":
+        parts.append((f"  {len(w.children)} åpne, {w.done_children} done", "dim"))
+    parts.append((f"  → {w.skill}", "dim"))
+    return parts + agent_chip(snap, w)
+
+
+def child_row(snap, t, last, pad):
+    kind = t.it.kind or t.type.lower()[:5]
+    who = f" @{t.it.assignee.split('@')[0]}" if t.it.assignee else ""
+    parts = [(" " * pad + ("└ " if last else "├ "), "dim"), (f"#{t.id:<5} ", "dim"), (f"{kind:<9} ", "cyan"),
+             (f"{t.status:<8} ", STATUS.get(t.status, "dim")), (t.title[:70], None), (who, "dim")]
+    if t.it.hitl:
+        parts.append(("  HITL", "red"))
+    parts.append((f"  → {t.skill}", "dim"))
+    return parts + agent_chip(snap, t)
+
+
+def pr_row(snap, r, wrepo):
+    icon, tone = VOTE.get(r.vote, ("○", "dim"))
+    parts = [(icon + " ", tone), (f"!{r.id:<5} ", "dim"), (f"{r.repo:<{wrepo}}  ", "bold"),
+             (r.title[:60], None), (f"  @{r.who} {ago(r.created)}", "dim")]
+    if not r.asked:
+        parts.append(("  (ikke reviewer)", "dim"))
+    return parts + agent_chip(snap, r)
+
+
+def lines(snap, everyone, open_=()):
+    """[(parts, Work | Review | None)] — everything the list shows, in order. Maps in
+    open_ (ids) show their open tickets under them."""
+    out = []
+    multi = len({w.project for w in snap.items}) > 1
+    out.append(([(f"Work items · To Do/Doing ({len(snap.items)})", "bold")], None))
+    for w in snap.items:
+        folded = w.id not in open_
+        out.append((work_row(snap, w, multi, folded), w))
+        if w.kind == "map" and not folded:
+            pad = 29 if multi else 15
+            for n, t in enumerate(w.children):
+                out.append((child_row(snap, t, n == len(w.children) - 1, pad), t))
+            if not w.children:
+                out.append(([(" " * pad + "└ ingen åpne tickets", "dim")], None))
+    if not snap.items:
+        out.append(([("  ingen", "dim")], None))
+    out.append(([], None))
+    who = "alle andres" if everyone else "der jeg er reviewer"
+    out.append(([(f"PRer uten min godkjenning · {who} ({len(snap.prs)})", "bold")], None))
+    wrepo = max([len(r.repo) for r in snap.prs] + [4])
+    for r in snap.prs:
+        out.append((pr_row(snap, r, wrepo), r))
+    if not snap.prs:
+        out.append(([("  ingen", "dim")], None))
+    return out
+
+
+def plain(parts):
+    return "".join(s for s, _ in parts)
+
+
+PAINT = {"green": green, "red": red, "yellow": yellow, "cyan": cyan, "dim": dim, "bold": bold}
+
+
+# ── state file ──────────────────────────────────────────────────────────────
+
+
+def work_json(snap, w):
+    out = {"id": w.id, "title": w.title, "state": w.state, "type": w.type, "kind": w.kind,
+           "project": w.project, "url": w.url, "prompt": w.prompt, "agent": w.key,
+           "agentState": snap.agents.get(w.key), "start": f"fleet go {w.id}"}
+    if w.parent:
+        out.update(ticketType=w.it.kind, status=w.status, assignee=w.it.assignee, hitl=w.it.hitl)
+    if w.kind == "map":
+        out.update(doneTickets=w.done_children, tickets=[work_json(snap, t) for t in w.children])
+    return out
+
+
+def write_state(snap, everyone, open_=(), cur=None, msg=""):
+    """screen.txt: the list as text. state.json: the same, structured (maps with all their
+    open tickets, folded or not), plus how to act."""
+    os.makedirs(OUT, exist_ok=True)
+    now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    screen = [f"fleet · {now} · data fra {datetime.datetime.fromtimestamp(snap.at).strftime('%H:%M:%S')}"
+              if snap.at else f"fleet · {now} · henter …"]
+    if snap.error:
+        screen.append(f"FEIL: {snap.error}")
+    for parts, x in lines(snap, everyone, open_):
+        screen.append(("> " if x is not None and x is cur else "  ") + plain(parts))
+    if msg:
+        screen += ["", msg]
+    screen += ["", "Handlinger: `fleet go <wi>` · `fleet review <pr>` · `fleet pr <pr> approve|auto|complete|abandon`"
+               " · `fleet wi <wi> state <S>|sprint` · `claude agents --json --all`"]
+    state = {
+        "updated": now, "dataAt": snap.at, "error": snap.error or None, "message": msg or None,
+        "allPrs": everyone, "selected": cur.key if cur else None, "unfoldedMaps": sorted(open_),
+        "workItems": [work_json(snap, w) for w in snap.items],
+        "pullRequests": [{"id": r.id, "title": r.title, "project": r.project, "repo": r.repo,
+                          "author": r.who, "source": r.source, "target": r.target, "url": r.url,
+                          "imReviewer": r.asked, "myVote": r.vote, "agent": r.key,
+                          "agentState": snap.agents.get(r.key), "start": f"fleet review {r.id}"}
+                         for r in snap.prs],
+        "agents": snap.agents,
+    }
+    for name, body in (("screen.txt", "\n".join(screen) + "\n"),
+                       ("state.json", json.dumps(state, indent=2, ensure_ascii=False) + "\n")):
+        tmp = os.path.join(OUT, f".{name}.{os.getpid()}")
+        with open(tmp, "w") as f:
+            f.write(body)
+        os.replace(tmp, os.path.join(OUT, name))
+
+
+# ── ghostty ─────────────────────────────────────────────────────────────────
+
+SPLIT = """
+on run argv
+  tell application "Ghostty"
+    set t to selected tab of front window
+    repeat with x in terminals of t
+      if (id of x as text) is item 3 of argv then return "skip"
+    end repeat
+    set me_ to focused terminal of t
+    set cfg to {initial working directory:item 1 of argv, initial input:item 2 of argv & linefeed}
+    set pane to split me_ direction left with configuration cfg
+    focus me_
+    return id of pane as text
+  end tell
+end run
+"""
+
+
+def split_agents_pane():
+    """In Ghostty, open `claude agents` in a split to the left — unless this tab still has
+    the one fleet opened last time."""
+    if os.environ.get("TERM_PROGRAM") != "ghostty":
+        return
+    path = os.path.join(OUT, "pane")
+    try:
+        with open(path) as f:
+            last = f.read().strip()
+    except OSError:
+        last = ""
+    r = subprocess.run(["osascript", "-", HOME, AGENTS, last or "-"], input=SPLIT,
+                       capture_output=True, text=True)
+    pane = r.stdout.strip()
+    if r.returncode == 0 and pane and pane != "skip":
+        os.makedirs(OUT, exist_ok=True)
+        with open(path, "w") as f:
+            f.write(pane + "\n")
+
+
+# ── tui ─────────────────────────────────────────────────────────────────────
+
+
+def tui(scr, a):
+    curses.curs_set(0)
+    curses.use_default_colors()
+    pal = {}
+    for i, (name, col) in enumerate([("green", curses.COLOR_GREEN), ("red", curses.COLOR_RED),
+                                     ("yellow", curses.COLOR_YELLOW), ("cyan", curses.COLOR_CYAN)], 1):
+        curses.init_pair(i, col, -1)
+        pal[name] = curses.color_pair(i)
+    pal.update(dim=curses.A_DIM, bold=curses.A_BOLD)
+
+    snap = Snapshot()
+    lock, wake = threading.Lock(), threading.Event()
+    sel, top, msg, err, written, shown = 0, 0, "", False, 0.0, None
+    open_, key = set(), None  # unfolded map ids; key of the selected row, kept across refreshes
+    ask = None  # (question, action) awaiting y
+    pop = None  # open menu: (title, options), see menu()
+    loading = True
+
+    def loader():
+        nonlocal snap, loading
+        while True:
+            loading = True
+            s = snapshot(a.all)
+            with lock:
+                snap = s
+            loading = False
+            wake.wait(REFRESH)
+            wake.clear()
+
+    threading.Thread(target=loader, daemon=True).start()
+    scr.timeout(500)
+
+    def act(fn):
+        nonlocal msg, err
+        try:
+            msg = fn() or ""
+        except RuntimeError as e:
+            msg, err = str(e), True
+        wake.set()
+
+    while True:
+        with lock:
+            s = snap
+        ls = lines(s, a.all, open_)
+        rows = [x for _, x in ls if x is not None]
+        keys_ = [x.key for x in rows]
+        sel = keys_.index(key) if key in keys_ else max(0, min(sel, len(rows) - 1))
+        cur = rows[sel] if rows else None
+        key = cur.key if cur else None
+        if time.time() - written >= WRITE or (s.at, key, msg, a.all, tuple(sorted(open_))) != shown:
+            write_state(s, a.all, open_, cur, msg)
+            written, shown = time.time(), (s.at, key, msg, a.all, tuple(sorted(open_)))
+
+        h, w = scr.getmaxyx()
+        scr.erase()
+        title = f" fleet · {A().org.rsplit('/', 1)[-1]} " + ("· henter … " if loading else "")
+        scr.addnstr(0, 0, title, w - 1, curses.A_BOLD)
+        if s.error:
+            scr.addnstr(0, len(title), s.error, max(0, w - 1 - len(title)), pal["red"])
+        at = next((y for y, (_, x) in enumerate(ls) if x is cur), 0)
+        body = h - 3
+        top = min(max(top, at - body + 1), at)
+        if sel == 0:
+            top = 0
+        for y, (parts, it) in enumerate(ls[top:top + body]):
+            x, row = 0, y + 1
+            hl = curses.A_REVERSE if it is not None and it is cur else 0
+            for txt, t in parts:
+                if x >= w - 1:
+                    break
+                scr.addnstr(row, x, txt, w - 1 - x, pal.get(t, 0) | hl)
+                x += len(txt)
+            if hl and x < w - 1:
+                scr.addnstr(row, x, " " * (w - 1 - x), w - 1 - x, hl)
+        if pop:
+            title_, opts = pop
+            bw = min(w - 2, max([len(title_) + 4] + [len(l) + 8 for _, l, _, _ in opts]))
+            by, bx = max(1, h - 3 - len(opts) - 2), max(0, w - bw - 2)
+            for n, line_ in enumerate([f"┌ {title_} ".ljust(bw - 1, "─") + "┐"]
+                                      + [f"│  {k}  {l}".ljust(bw - 1) + "│" for k, l, _, _ in opts]
+                                      + ["└" + "─" * (bw - 2) + "┘"]):
+                scr.addnstr(by + n, bx, line_, w - 1 - bx, pal["cyan"] if n in (0, len(opts) + 1) else 0)
+            for n, (k_, _, _, _) in enumerate(opts, 1):
+                scr.addnstr(by + n, bx + 3, k_, 1, pal["yellow"] | curses.A_BOLD)
+        keys = f"↑↓ flytt · m valg · enter start agent · →/← fold ut/inn kart · o åpne · a {'mine' if a.all else 'alle'} PRer · r oppdater · q avslutt" \
+               f"  ·  {short(OUT)}/screen.txt"
+        if ask:
+            scr.addnstr(h - 1, 0, ask[0] + "  y/n", w - 1, pal["yellow"] | curses.A_BOLD)
+        else:
+            scr.addnstr(h - 1, 0, msg or keys, w - 1, (pal["red"] if err else pal["green"]) if msg else pal["dim"])
+        scr.refresh()
+
+        k = scr.getch()
+        if k != -1:
+            msg, err = "", False
+        if ask:
+            if k == -1:
+                continue
+            _, fn = ask
+            ask = None
+            if k in (ord("y"), ord("Y"), ord("j")):
+                act(fn)
+            continue
+        if pop:
+            if k == -1:
+                continue
+            hit = next((o for o in pop[1] if k == ord(o[0])), None)
+            pop = None
+            if not hit:
+                continue
+            _, _, fn, confirm = hit
+            if confirm == "sub":
+                try:
+                    pop = fn()
+                except RuntimeError as e:
+                    msg, err = str(e), True
+            elif confirm:
+                ask = (confirm, fn)
+            else:
+                act(fn)
+            continue
+        moved = sel
+        if k in (ord("q"), 27):
+            return
+        elif k in (curses.KEY_DOWN, ord("j")):
+            sel += 1
+        elif k in (curses.KEY_UP, ord("k")):
+            sel -= 1
+        elif k in (curses.KEY_NPAGE, 4):
+            sel += body // 2
+        elif k in (curses.KEY_PPAGE, 21):
+            sel -= body // 2
+        elif k in (ord("g"), curses.KEY_HOME):
+            sel = 0
+        elif k in (ord("G"), curses.KEY_END):
+            sel = len(rows) - 1
+        elif k == ord("a"):
+            a.all = not a.all
+            wake.set()
+        elif k == ord("r"):
+            wake.set()
+        elif not cur:
+            continue
+        elif k in (curses.KEY_RIGHT, ord("l"), ord(" ")) and isinstance(cur, Work) and cur.kind == "map":
+            open_ ^= {cur.id} if k == ord(" ") else {cur.id} - open_
+        elif k in (curses.KEY_LEFT, ord("h")) and isinstance(cur, Work) and (cur.kind == "map" or cur.parent):
+            m = cur.parent or cur
+            open_.discard(m.id)
+            key = m.key
+        elif k == ord("o"):
+            subprocess.run(["open", cur.url])
+        elif k == ord("m"):
+            pop = menu(cur)
+        elif k in (10, 13, curses.KEY_ENTER):
+            what = f"#{cur.id} {cur.title[:50]}" if isinstance(cur, Work) else f"!{cur.id} {cur.title[:50]}"
+            st = s.agents.get(cur.key)
+            if st:
+                ask = (f"{cur.key} finnes allerede ({st}) — start ny agent på {what}?", lambda x=cur: launch(x))
+            else:
+                act(lambda x=cur: launch(x))
+        if sel != moved:
+            sel = max(0, min(sel, len(rows) - 1))
+            key = rows[sel].key if rows else None
+
+
+# ── commands ────────────────────────────────────────────────────────────────
+
+
+def cmd_live(a):
+    if not (TTY and sys.stdin.isatty()):
+        return cmd_ls(a)
+    if not a.no_split:
+        split_agents_pane()
+    locale.setlocale(locale.LC_ALL, "")
+    os.environ.setdefault("ESCDELAY", "25")
+    try:
+        curses.wrapper(tui, a)
+    except KeyboardInterrupt:
+        pass
+
+
+def cmd_ls(a):
+    s = snapshot(a.all)
+    write_state(s, a.all)
+    if s.error:
+        die(s.error)
+    for parts, _ in lines(s, a.all, {w.id for w in s.items} if a.unfold else ()):
+        print("".join(PAINT[t](x) if t else x for x, t in parts))
+
+
+def find_work(id):
+    wf._cache.clear()
+    items = wf.many([id])
+    if not items:
+        die(f"fant ikke work item {id}")
+    parent = next((p for p in wf.many(items[0].links(wf.PARENT)) if p.is_map), None)
+    w = Work(items[0], Work(parent) if parent else None)
+    if w.kind == "map":
+        unfold(w)
+    return w
+
+
+def find_review(id):
+    try:
+        raw = rest(f"git/pullrequests/{id}", scope="org")
+    except RuntimeError as e:
+        die(str(e))
+    return Review(raw, me()[0])
+
+
+def start(x, dry):
+    cwd, cmd = plan(x)
+    if dry:
+        return print(dim(f"(cd {shlex.quote(cwd)} && {' '.join(shlex.quote(c) for c in cmd)})"))
+    try:
+        print(green(launch(x)))
+    except RuntimeError as e:
+        die(str(e))
+
+
+def cmd_go(a):
+    start(find_work(a.id), a.dry_run)
+
+
+def cmd_review(a):
+    start(find_review(a.id), a.dry_run)
+
+
+def run_action(fn, *args):
+    try:
+        print(green(fn(*args)))
+    except RuntimeError as e:
+        die(str(e))
+
+
+def cmd_pr(a):
+    fn = {"approve": approve, "auto": auto_complete, "complete": complete_now, "abandon": abandon}[a.action]
+    run_action(fn, find_review(a.id))
+
+
+def cmd_wi(a):
+    w = find_work(a.id)
+    if a.action == "sprint":
+        return run_action(set_sprint, w)
+    if not a.value:
+        print(" · ".join(states(w)))
+        return
+    run_action(set_state, w, " ".join(a.value))
+
+
+GUIDE = """\
+{b}fleet — jobben min i Azure DevOps, én tast for å sette en Claude-agent på den{r}
+
+{b}ORG{r}  {org} (alle prosjekter)
+
+{b}LISTA{r}
+  Work items   tildelt meg, state To Do eller Doing. Doing først.
+  PRer         aktive, ikke draft, ikke mine, uten min godkjenning (stemme < 5).
+               Default bare der jeg er reviewer; `a` / -a viser alle andres.
+
+{b}KOMMANDOER{r}
+
+  fleet [-a] [--no-split]   levende liste, oppdateres hvert {refresh}. sekund
+                            i Ghostty: `claude agents` i en pane til venstre (ikke om den fortsatt er der)
+  fleet ls [-a] [-u]        lista, skrevet ut én gang (-u: kartene foldet ut)
+  fleet go <id> [-n]        bakgrunnsagent på et work item (-n: vis kommandoen)
+  fleet review <id> [-n]    bakgrunnsagent som reviewer en PR
+  fleet pr <id> approve|auto|complete|abandon
+                            godkjenn · sett auto-complete · fullfør nå (feiler om noe blokkerer) · forlat
+  fleet wi <id> state [S]   sett state S (uten S: list typens states)
+  fleet wi <id> sprint      flytt til prosjektets nåværende sprint (default-teamet)
+  fleet help                denne teksten
+
+{b}TASTER{r}
+  ↑↓ / j k  flytt · enter start agent · o åpne i nettleser · a mine/alle PRer · r oppdater · q avslutt
+  → / l     fold ut kart (åpne tickets: ledig / tatt / blokkert) · ← / h fold inn · space veksle
+  m         valg for raden:
+              PR         a approve · u auto-complete · c complete · x abandon · g review-agent · o åpne
+              work item  s endre status (1–9) · i nåværende sprint · g agent · o åpne
+            complete og abandon spør y/n først. esc lukker.
+  Har elementet allerede en agent, spør enter y/n først.
+
+{b}AGENTENE{r}
+  kart  → claude --bg -n fleet-wi-<id> "/wayfinder <id>"   i {home}
+  annet → claude --bg -n fleet-wi-<id> "/implement <id>"   i repoet commits/PRer på itemet
+          (eller barna) peker til, i worktree fleet-<id> — ellers i {home}
+  kart-ticket → "/wayfinder <kart> ticket <id>" i {home}; task-tickets → "/implement <id>"
+  PR    → claude --bg -n fleet-pr-<id> "/review-pr <id>"   i lokal klone av PR-ens repo
+  Alle startes med --dangerously-skip-permissions — også agent view (`{agents}`).
+  Kloner finnes én mappe ned i FLEET_ROOTS (default ~/visense, kolon-separert).
+  Følg med: `claude agents` (venstre pane) · status vises også på linja (▶ ⏸ ✓).
+
+{b}FOR CLAUDE{r}
+  Lista skrives hvert {write}. sekund til
+    {out}/screen.txt   som tekst, akkurat som den vises
+    {out}/state.json   strukturert, med `start`-kommando per element
+  Les dem, start agenter med `fleet go <id>` / `fleet review <id>`, og handle med
+  `fleet pr <id> …` / `fleet wi <id> …`.
+"""
+
+
+def cmd_help(a):
+    on = TTY
+    print(GUIDE.format(b="\033[1m" if on else "", r="\033[0m" if on else "", org=A().org,
+                       refresh=REFRESH, write=WRITE, home=short(HOME), out=short(OUT), agents=AGENTS))
+
+
+# ── cli ─────────────────────────────────────────────────────────────────────
+
+
+def main():
+    p = argparse.ArgumentParser(prog="fleet", description="my ADO work and PRs, handed to Claude agents")
+    sub = p.add_subparsers(dest="cmd")
+
+    s = sub.add_parser("live", help="live list")
+    s.add_argument("-a", "--all", action="store_true", help="all others' PRs, not just where I'm reviewer")
+    s.add_argument("--no-split", action="store_true", help="don't open the claude agents pane in Ghostty")
+    s.set_defaults(fn=cmd_live)
+
+    s = sub.add_parser("ls", help="print the list once (and write the state files)")
+    s.add_argument("-a", "--all", action="store_true")
+    s.add_argument("-u", "--unfold", action="store_true", help="show maps' open tickets")
+    s.set_defaults(fn=cmd_ls)
+
+    for name, fn, h in (("go", cmd_go, "background agent on a work item"),
+                        ("review", cmd_review, "background agent reviewing a PR")):
+        s = sub.add_parser(name, help=h)
+        s.add_argument("id", type=int)
+        s.add_argument("-n", "--dry-run", action="store_true", help="print the command, start nothing")
+        s.set_defaults(fn=fn)
+
+    s = sub.add_parser("pr", help="act on a PR: approve, auto(-complete), complete, abandon")
+    s.add_argument("id", type=int)
+    s.add_argument("action", choices=("approve", "auto", "complete", "abandon"))
+    s.set_defaults(fn=cmd_pr)
+
+    s = sub.add_parser("wi", help="act on a work item: state <State> (none: list states), sprint")
+    s.add_argument("id", type=int)
+    s.add_argument("action", choices=("state", "sprint"))
+    s.add_argument("value", nargs="*")
+    s.set_defaults(fn=cmd_wi)
+
+    s = sub.add_parser("help", help="forklaring (norsk)")
+    s.set_defaults(fn=cmd_help)
+
+    argv = sys.argv[1:]
+    if not argv or argv[0] not in sub.choices and argv[0] not in ("-h", "--help"):
+        argv = ["live"] + argv
+    a = p.parse_args(argv)
+    wf._tracker = A()
+    try:
+        a.fn(a)
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
