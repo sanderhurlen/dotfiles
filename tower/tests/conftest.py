@@ -28,16 +28,20 @@ def config(rot: Path) -> Config:
 
 
 class FalskRunner:
-    """Kannet svar per kall i stedet for `claude -p`. `svar(prompt)` gir dict eller kaster AgentFeil.
+    """Kannet svar per kall i stedet for `claude -p`. `svar(prompt)` (triage) og `utkast(prompt)` gir dict
+    eller kaster AgentFeil. Agenten velges ut fra schemaet.
 
-    Med `porter=True` blokkerer hvert kall til testen slipper det med `slipp()`.
+    Med `porter=True` blokkerer hvert kall til testen slipper det med `slipp()`; `porter="utkast"` bare utkast.
     """
 
-    def __init__(self, svar=None, porter: bool = False) -> None:
+    def __init__(self, svar=None, porter: bool | str = False, utkast=None) -> None:
         self.svar = svar or (lambda prompt: {"kategori": "svar", "haster": False, "sammendrag": "s",
                                              "begrunnelse": "b"})
+        self.utkast = utkast or (lambda prompt: {"tekst": "Hei\n\nDet passer.\n\n--\nSander\nVisense",
+                                                 "sjekk": []})
         self.porter = porter
-        self.kall: list[str] = []
+        self.kall: list[str] = []  # triage-prompter
+        self.utkast_kall: list[str] = []
         self.aktive = 0
         self.maks_aktive = 0
         self.avbrutt = 0
@@ -52,16 +56,17 @@ class FalskRunner:
 
         from tower.agent import Resultat
 
-        self.kall.append(prompt)
+        er_utkast = "sjekk" in schema.get("properties", {})
+        (self.utkast_kall if er_utkast else self.kall).append(prompt)
         self.aktive += 1
         self.maks_aktive = max(self.maks_aktive, self.aktive)
         try:
-            if self.porter:
+            if self.porter is True or self.porter == "utkast" and er_utkast:
                 self._port = self._port or asyncio.Event()
                 await self._port.wait()
             else:
                 await asyncio.sleep(0)
-            return Resultat(self.svar(prompt), 0.01)
+            return Resultat((self.utkast if er_utkast else self.svar)(prompt), 0.01)
         except asyncio.CancelledError:
             self.avbrutt += 1
             raise

@@ -34,6 +34,21 @@ class Runner(Protocol):
     async def kjør(self, instruks: str, schema: dict, prompt: str) -> Resultat: ...
 
 
+async def med_nytt_forsøk(runner: Runner, instruks: str, schema: dict, prompt: str, forsøk: int = 2) -> Resultat:
+    """Kjører med ett automatisk nytt forsøk. Kosten summeres; siste `AgentFeil` kastes med samlet kost."""
+    usd = 0.0
+    for i in range(forsøk):
+        try:
+            r = await runner.kjør(instruks, schema, prompt)
+        except AgentFeil as e:
+            usd += e.usd
+            if i == forsøk - 1:
+                raise AgentFeil(str(e), usd) from e
+            continue
+        return Resultat(r.svar, usd + r.usd)
+    raise AssertionError("uoppnåelig")
+
+
 def ren_env() -> dict[str, str]:
     """Miljøet uten Claude Code-variabler, så en tower startet fra en Claude-økt ikke smitter agenten."""
     return {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_CODE", "CLAUDECODE"))}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from tower.kanal import Tråd
 from tower.triage import Triage
+from tower.utkast import ÅPNE, FEILET, GENERERER, KLART, Utkast
 
 SKJEMA = """
 CREATE TABLE IF NOT EXISTS trad (
@@ -26,6 +28,20 @@ CREATE TABLE IF NOT EXISTS kjoring (
     usd REAL NOT NULL,
     feil TEXT
 );
+-- Alle versjoner beholdes (Kurator-input). Siste versjon per Tråd er den som vises.
+CREATE TABLE IF NOT EXISTS utkast (
+    trad TEXT NOT NULL,
+    versjon INTEGER NOT NULL,
+    melding_id TEXT NOT NULL,  -- siste Melding da utkastet ble bestilt
+    status TEXT NOT NULL,
+    tekst TEXT NOT NULL DEFAULT '',
+    sjekk TEXT NOT NULL DEFAULT '[]',  -- JSON-liste
+    feil TEXT,
+    instruks TEXT,
+    opprettet TEXT NOT NULL,
+    endret TEXT NOT NULL,
+    PRIMARY KEY (trad, versjon)
+);
 """
 # Lagt til etter tracer-sliken; eldre tower.db får dem ved åpning.
 NYE_KOLONNER = {
@@ -33,6 +49,7 @@ NYE_KOLONNER = {
     "triage_melding_id": "TEXT",  # Meldingen triagen (eller feilen) gjelder
     "triage_feil": "TEXT",
 }
+U_KOLONNER = "trad, versjon, melding_id, status, tekst, sjekk, feil, instruks"
 KOLONNER = "id, kanal, status, siste_melding_id, kategori, haster, sammendrag, begrunnelse, triage_melding_id, triage_feil"
 
 # Trådstatus. Senere slices legger til venter på meg, avvist, utsatt.
@@ -48,6 +65,7 @@ class Rad:
     triage: Triage | None = None  # siste vellykkede, kan gjelde en eldre Melding
     triage_melding_id: str | None = None
     triage_feil: str | None = None
+    utkast: Utkast | None = None  # siste versjon
 
     @property
     def trenger_triage(self) -> bool:
@@ -57,11 +75,25 @@ class Rad:
     def triage_feilet(self) -> bool:
         return self.triage_feil is not None and self.triage_melding_id == self.siste_melding_id
 
+    @property
+    def trenger_utkast(self) -> bool:
+        """Triagert som svar for siste Melding, og ingen ferdig eller feilet versjon for den ennå."""
+        if (self.status != TRIAGERT or self.triage is None or self.triage.kategori != "svar"
+                or self.triage_melding_id != self.siste_melding_id or self.triage_feilet):
+            return False
+        u = self.utkast
+        return u is None or u.melding_id != self.siste_melding_id or u.status == GENERERER
 
-def _rad(r: tuple) -> Rad:
+
+def _rad(r: tuple, utkast: Utkast | None = None) -> Rad:
     id, kanal, status, siste, kategori, haster, sammendrag, begrunnelse, tmid, tfeil = r
     triage = Triage(kategori, bool(haster), sammendrag, begrunnelse) if kategori else None
-    return Rad(id, kanal, status, siste, triage, tmid, tfeil)
+    return Rad(id, kanal, status, siste, triage, tmid, tfeil, utkast)
+
+
+def _utkast(r: tuple) -> Utkast:
+    trad, versjon, melding_id, status, tekst, sjekk, feil, instruks = r
+    return Utkast(trad, versjon, melding_id, status, tekst, tuple(json.loads(sjekk)), feil, instruks)
 
 
 def ny_status(forrige: Rad | None, tråd: Tråd, nå: datetime, dager: int) -> str | None:
@@ -91,10 +123,12 @@ class Db:
 
     def rad(self, tråd_id: str) -> Rad | None:
         r = self.con.execute(f"SELECT {KOLONNER} FROM trad WHERE id = ?", (tråd_id,)).fetchone()
-        return _rad(r) if r else None
+        return _rad(r, self.utkast(tråd_id)) if r else None
 
     def alle(self) -> dict[str, Rad]:
-        return {r[0]: _rad(r) for r in self.con.execute(f"SELECT {KOLONNER} FROM trad")}
+        siste = {u.tråd_id: u for u in map(_utkast, self.con.execute(
+            f"SELECT {U_KOLONNER} FROM utkast u WHERE versjon = (SELECT MAX(versjon) FROM utkast WHERE trad = u.trad)"))}
+        return {r[0]: _rad(r, siste.get(r[0])) for r in self.con.execute(f"SELECT {KOLONNER} FROM trad")}
 
     def registrer(self, tråd: Tråd, nå: datetime, dager: int) -> Rad:
         """Oppdaterer status for en hentet Tråd og returnerer raden."""
@@ -108,6 +142,9 @@ class Db:
                 "ON CONFLICT(id) DO UPDATE SET status = excluded.status, "
                 "siste_melding_id = excluded.siste_melding_id, endret = excluded.endret",
                 (tråd.id, tråd.kanal, status, tråd.siste.id, nå.isoformat()))
+            self.con.execute(
+                f"UPDATE utkast SET status = 'utdatert', endret = ? WHERE trad = ? AND melding_id != ? "
+                f"AND status IN ({', '.join('?' * len(ÅPNE))})", (nå.isoformat(), tråd.id, tråd.siste.id, *ÅPNE))
         return self.rad(tråd.id)
 
     def lagre_triage(self, tråd_id: str, melding_id: str, triage: Triage, nå: datetime) -> Rad | None:
@@ -128,6 +165,43 @@ class Db:
                 "UPDATE trad SET triage_melding_id = siste_melding_id, triage_feil = ?, endret = ? "
                 "WHERE id = ? AND siste_melding_id = ?", (feil, nå.isoformat(), tråd_id, melding_id)).rowcount
         return self.rad(tråd_id) if n else None
+
+    def utkast(self, tråd_id: str) -> Utkast | None:
+        """Siste versjon."""
+        r = self.con.execute(f"SELECT {U_KOLONNER} FROM utkast WHERE trad = ? ORDER BY versjon DESC LIMIT 1",
+                             (tråd_id,)).fetchone()
+        return _utkast(r) if r else None
+
+    def versjoner(self, tråd_id: str) -> list[Utkast]:
+        return [_utkast(r) for r in self.con.execute(
+            f"SELECT {U_KOLONNER} FROM utkast WHERE trad = ? ORDER BY versjon", (tråd_id,))]
+
+    def nytt_utkast(self, tråd_id: str, melding_id: str, nå: datetime, instruks: str | None = None) -> Utkast:
+        """Ny versjon i `genererer` for `melding_id`."""
+        with self.con:
+            versjon = self.con.execute("SELECT COALESCE(MAX(versjon), 0) + 1 FROM utkast WHERE trad = ?",
+                                       (tråd_id,)).fetchone()[0]
+            self.con.execute(
+                "INSERT INTO utkast (trad, versjon, melding_id, status, instruks, opprettet, endret) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)", (tråd_id, versjon, melding_id, GENERERER, instruks, nå.isoformat(),
+                                                 nå.isoformat()))
+        return self.utkast(tråd_id)
+
+    def _avslutt_utkast(self, u: Utkast, nå: datetime, status: str, **felt) -> Utkast | None:
+        """Flytter en versjon ut av `genererer`. None hvis den er utdatert i mellomtiden."""
+        sett = "".join(f", {k} = ?" for k in felt)
+        with self.con:
+            n = self.con.execute(
+                f"UPDATE utkast SET status = ?, endret = ?{sett} WHERE trad = ? AND versjon = ? AND status = ?",
+                (status, nå.isoformat(), *felt.values(), u.tråd_id, u.versjon, GENERERER)).rowcount
+        return self.utkast(u.tråd_id) if n else None
+
+    def lagre_utkast(self, u: Utkast, tekst: str, sjekk: tuple[str, ...], nå: datetime) -> Utkast | None:
+        return self._avslutt_utkast(u, nå, KLART, tekst=tekst, sjekk=json.dumps(list(sjekk), ensure_ascii=False),
+                                    feil=None)
+
+    def lagre_utkast_feil(self, u: Utkast, feil: str, nå: datetime) -> Utkast | None:
+        return self._avslutt_utkast(u, nå, FEILET, feil=feil)
 
     def logg_kjøring(self, jobb: str, tråd_id: str, usd: float, nå: datetime, feil: str | None = None) -> None:
         with self.con:

@@ -165,7 +165,7 @@ async def test_triage_sorterer_og_vises(config):
         hode = tekst(a, "#hode")
         assert "Om URGENT: API returning 500 errors since 07:00" in hode and "fordi" in hode
         status = tekst(a, "#status")
-        assert "agenter i ro" in status and "$0.070 i dag" in status
+        assert "agenter i ro" in status and "$0.110 i dag" in status  # 7 triage + 4 utkast
 
 
 async def test_besvart_og_gammel_triageres_ikke(config):
@@ -266,7 +266,7 @@ async def test_triage_feiler_og_omstart_tar_resten(config):
         dt.move_cursor(row=dt.get_row_index(harbor), animate=False)
         await pilot.pause()
         assert "timeout etter 60 s" in tekst(a, "#hode")
-        assert "$0.062 i dag" in tekst(a, "#status")  # 6 × 0.01 + 2 × 0.001
+        assert "$0.092 i dag" in tekst(a, "#status")  # 6 triage × 0.01 + 2 × 0.001 + 3 utkast
 
     r = FalskRunner(triage_etter_emne)
     a = app(config, r)
@@ -274,3 +274,138 @@ async def test_triage_feiler_og_omstart_tar_resten(config):
         await a.poll()
         await a.agenter.ferdig()
         assert r.kall == []  # alt triagert eller feilet for siste Melding
+
+
+def utkastkolonne(a: Tower) -> dict[str, str]:
+    dt = a.query_one(DataTable)
+    return {k.value: str(dt.get_row_at(dt.get_row_index(k))[4]) for k in dt.rows}
+
+
+def velg(a: Tower, tråd_id: str) -> None:
+    dt = a.query_one(DataTable)
+    dt.move_cursor(row=dt.get_row_index(tråd_id), animate=False)
+
+
+NORDLYS = "mail:AAQkADMock-nordlys-erp"
+
+
+async def test_utkast_for_svar_med_hint_og_plassholdere(config):
+    kb = config.kunnskapsbase
+    (kb / "personer").mkdir(parents=True)
+    (kb / "stil.md").write_text("- Kort og direkte (2026-10-01)")
+    (kb / "personer" / "kari.md").write_text("---\nadresser: [kari.nordby@nordlys-energi.no]\n---\n- Prosjektleder")
+
+    def utkast(prompt):
+        return {"tekst": "Hei Kari\n\nLevering [[dato]].\n\n--\nSander\nVisense", "sjekk": ["Bekreft dato"]}
+
+    r = FalskRunner(triage_etter_emne, utkast=utkast)
+    a = app(config, r)
+    async with a.run_test(size=(160, 40)) as pilot:
+        await a.poll()
+        await a.agenter.ferdig()
+        await pilot.pause()
+        assert len(r.utkast_kall) == 4  # bare svar, ikke info
+        kol = utkastkolonne(a)
+        assert "klart" in kol[NORDLYS] and "—" in kol["mail:AAQkADMock-azure-newsletter"]
+        assert "4 utkast klare" in tekst(a, "#status")
+        nordlys_prompt = next(p for p in r.utkast_kall if "ERP" in p)
+        assert "## stil.md" in nordlys_prompt and "## personer/kari.md" in nordlys_prompt
+        assert "## personer/kari.md" in next(p for p in r.kall if "ERP" in p)  # triage får også oppslaget
+        assert "## personer/kari.md" not in next(p for p in r.utkast_kall if "Harbor" in p)
+
+        velg(a, NORDLYS)
+        await pilot.pause()
+        w = a.query_one("#utkast", Static)
+        innhold = tekst(a, "#utkast")
+        assert w.display and w.has_class("klart") and w.border_title == "Utkast v1"
+        assert innhold.index("Bekreft dato") < innhold.index("Hei Kari") and "[[dato]]" in innhold
+        assert r"[b reverse yellow]\[\[dato]][/]" in w.content  # uthevet
+
+        velg(a, "mail:AAQkADMock-azure-newsletter")
+        await pilot.pause()
+        assert not a.query_one("#utkast", Static).display  # info: ingen ramme
+
+
+async def til(pilot, betingelse, n: int = 200) -> None:
+    for _ in range(n):
+        if betingelse():
+            return
+        await pilot.pause()
+    raise AssertionError("betingelsen ble aldri sann")
+
+
+def bare_nordlys_svar(prompt: str) -> dict:
+    return {"kategori": "svar" if "ERP" in prompt else "info", "haster": False, "sammendrag": "s", "begrunnelse": "b"}
+
+
+async def test_ny_melding_gjør_utkast_utdatert_og_lager_v2(config):
+    r = FalskRunner()
+    a = app(config, r)
+    async with a.run_test(size=(160, 40)) as pilot:
+        await a.poll()
+        await a.agenter.ferdig()
+        velg(a, NORDLYS)
+        ny_melding(config, NORDLYS, "ny-1", "Og en ting til")
+        await a.poll()
+        assert a.rader[NORDLYS].utkast.status == "utdatert"
+        assert "utdatert" in utkastkolonne(a)[NORDLYS]
+        assert "Ny melding kom etter dette utkastet" in tekst(a, "#utkast")
+        await a.agenter.ferdig()
+        await pilot.pause()
+        assert [(v.versjon, v.melding_id, v.status) for v in a.db.versjoner(NORDLYS)] == [
+            (1, "AAMkADMock-nordlys-erp-1", "utdatert"), (2, "ny-1", "klart")]
+        assert "v2" in utkastkolonne(a)[NORDLYS] and a.query_one("#utkast", Static).border_title == "Utkast v2"
+        assert "Og en ting til" in r.utkast_kall[-1]
+
+
+async def test_ny_melding_midt_i_utkast_dreper_det(config):
+    r = FalskRunner(bare_nordlys_svar, porter="utkast")
+    a = app(config, r)
+    async with a.run_test(size=(160, 40)) as pilot:
+        await a.poll()
+        await til(pilot, lambda: ("utkast", NORDLYS) in a.agenter.kjørende)
+        await pilot.pause()
+        assert "skriver" in utkastkolonne(a)[NORDLYS] and "utkast Kari" in tekst(a, "#status")
+        ny_melding(config, NORDLYS, "ny-1", "Glem det")
+        await a.poll()
+        await til(pilot, lambda: r.avbrutt == 1)
+        r.slipp()
+        await a.agenter.ferdig()
+        assert [(v.melding_id, v.status) for v in a.db.versjoner(NORDLYS)] == [
+            ("AAMkADMock-nordlys-erp-1", "utdatert"), ("ny-1", "klart")]
+        assert len(r.utkast_kall) == 2
+
+
+async def test_utkast_feiler_og_avbrutt_utkast_tas_opp_ved_omstart(config):
+    def feiler(prompt):
+        from tower.agent import AgentFeil
+        raise AgentFeil("timeout etter 60 s", 0.001)
+
+    r = FalskRunner(bare_nordlys_svar, utkast=feiler)
+    a = app(config, r)
+    async with a.run_test(size=(160, 40)) as pilot:
+        await a.poll()
+        await a.agenter.ferdig()
+        await pilot.pause()
+        assert len(r.utkast_kall) == 2  # ett nytt forsøk
+        assert a.rader[NORDLYS].utkast.status == "feilet" and "feilet" in utkastkolonne(a)[NORDLYS]
+        velg(a, NORDLYS)
+        await pilot.pause()
+        assert "timeout etter 60 s" in tekst(a, "#utkast")
+
+    # avsluttet midt i et utkast: versjonen står i genererer og kjøres ved neste oppstart
+    ny_melding(config, NORDLYS, "ny-1", "Fortsatt?")
+    r = FalskRunner(bare_nordlys_svar, porter="utkast")
+    a = app(config, r)
+    async with a.run_test(size=(160, 40)) as pilot:
+        await a.poll()
+        await til(pilot, lambda: ("utkast", NORDLYS) in a.agenter.kjørende)
+    assert r.avbrutt == 1 and a.db.utkast(NORDLYS).status == "genererer"
+
+    r = FalskRunner(bare_nordlys_svar)
+    a = app(config, r)
+    async with a.run_test(size=(160, 40)):
+        await a.poll()
+        await a.agenter.ferdig()
+        assert r.kall == [] and len(r.utkast_kall) == 1
+        assert [(v.versjon, v.status) for v in a.db.versjoner(NORDLYS)] == [(1, "utdatert"), (2, "klart")]

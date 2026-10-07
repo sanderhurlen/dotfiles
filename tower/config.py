@@ -40,6 +40,10 @@ class Config:
         return self.rot / "outbox"
 
     @property
+    def kunnskapsbase(self) -> Path:
+        return self.rot / "kunnskapsbase"
+
+    @property
     def agent_cwd(self) -> Path:
         return self.rot / "agent"  # nøytral cwd for `claude -p`
 

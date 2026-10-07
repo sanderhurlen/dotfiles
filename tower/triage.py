@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from tower.agent import AgentFeil, Runner
+from tower.agent import Runner, med_nytt_forsøk
 from tower.kanal import Tråd
 from tower.prompt import tråd_tekst
 
@@ -21,7 +21,6 @@ SCHEMA = {
     "required": ["kategori", "haster", "sammendrag", "begrunnelse"],
     "additionalProperties": False,
 }
-FORSØK = 2  # ett automatisk nytt forsøk
 
 
 @dataclass(frozen=True)
@@ -33,16 +32,7 @@ class Triage:
 
 
 async def triager(runner: Runner, t: Tråd, kunnskapsbase: str = "") -> tuple[Triage, float]:
-    """Triage og samlet kost. Kaster `AgentFeil` (med kost) når alle forsøk feiler."""
-    usd = 0.0
-    for forsøk in range(FORSØK):
-        try:
-            r = await runner.kjør(INSTRUKS, SCHEMA, tråd_tekst(t, kunnskapsbase))
-        except AgentFeil as e:
-            usd += e.usd
-            if forsøk == FORSØK - 1:
-                raise AgentFeil(str(e), usd) from e
-            continue
-        s = r.svar
-        return Triage(s["kategori"], bool(s["haster"]), s["sammendrag"], s["begrunnelse"]), usd + r.usd
-    raise AssertionError("uoppnåelig")
+    """Triage og samlet kost. Kaster `AgentFeil` (med kost) når også det nye forsøket feiler."""
+    r = await med_nytt_forsøk(runner, INSTRUKS, SCHEMA, tråd_tekst(t, kunnskapsbase))
+    s = r.svar
+    return Triage(s["kategori"], bool(s["haster"]), s["sammendrag"], s["begrunnelse"]), r.usd
