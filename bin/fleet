@@ -12,6 +12,7 @@
 #   fleet ls                 same list, printed once
 #   fleet go 8698            background agent on a work item: map → /wayfinder, else /implement
 #   fleet review 6966        background agent reviewing a PR: /review-pr
+#   fleet code 9006          VS Code in the item's worktree, .env* copied from the main checkout
 #   fleet help               explained (Norwegian)
 #
 # What the list shows is written to ~/.cache/fleet/screen.txt and state.json every
@@ -31,6 +32,7 @@ import locale
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -121,6 +123,7 @@ class Work:
         self.kind = "map" if it.is_map else "spec" if it.is_spec else "item"
         self.key = f"fleet-wi-{self.id}"
         self.children, self.done_children = [], 0  # a map's open tickets (Work), and how many are done
+        self.trees = []  # local worktrees for this item, see worktrees()
 
     @property
     def decision(self):
@@ -208,9 +211,99 @@ class Snapshot:
 
 def snapshot(everyone):
     try:
-        return Snapshot(work(), reviews(everyone), agents(), time.time())
+        s = Snapshot(work(), reviews(everyone), agents(), time.time())
     except RuntimeError as e:
         return Snapshot(at=time.time(), error=str(e))
+    trees = worktrees()
+    for w in s.items + [t for m in s.items for t in m.children]:
+        w.trees = trees.get(w.id, [])
+    return s
+
+
+# ── worktrees ───────────────────────────────────────────────────────────────
+
+TREE_ID = re.compile(r"(?:^t?|[-_/+])(\d{3,6})(?=$|[-_/+.])")  # fleet-9006, t9006, feat/9006-x
+SKIP_DIRS = {".git", ".claude", "node_modules", "bin", "obj", "dist", "build", ".next", ".turbo", ".venv"}
+
+
+def worktrees():
+    """{work item id: [(main checkout, worktree)]} for linked worktrees of every repo under
+    ROOTS whose dir name or branch carries the id (fleet-<id>, t<id>, feat/<id>-…)."""
+    out = {}
+    for root in ROOTS:
+        try:
+            names = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for n in names:
+            d = os.path.join(root, n)
+            if not os.path.isdir(os.path.join(d, ".git")):
+                continue
+            entries = wf.sh("git", "-C", d, "worktree", "list", "--porcelain").split("\n\n")
+            for e in entries[1:]:  # the first is the main checkout
+                f = dict(l.split(" ", 1) for l in e.splitlines() if " " in l)
+                path, branch = f.get("worktree"), f.get("branch", "").removeprefix("refs/heads/")
+                if not path or not os.path.isdir(path):
+                    continue
+                ids = {int(i) for x in (os.path.basename(path), branch) for i in TREE_ID.findall(x)}
+                for i in ids:
+                    out.setdefault(i, []).append((d, path))
+    return out
+
+
+_env_files = {}
+
+
+def env_files(main):
+    """.env* files in a checkout, relative paths, skipping dependency/build dirs. Cached."""
+    if main not in _env_files:
+        found = []
+        for dirpath, dirs, files in os.walk(main):
+            dirs[:] = [x for x in dirs if x not in SKIP_DIRS]
+            found += [os.path.relpath(os.path.join(dirpath, f), main) for f in files if f.startswith(".env")]
+        _env_files[main] = sorted(found)
+    return _env_files[main]
+
+
+def copy_env(main, tree):
+    """Copy the main checkout's .env* files into a worktree: only where the worktree has the
+    directory but not the file. Returns the copied relative paths."""
+    copied = []
+    for rel in env_files(main):
+        dst = os.path.join(tree, rel)
+        if os.path.exists(dst) or not os.path.isdir(os.path.dirname(dst)):
+            continue
+        try:
+            shutil.copy2(os.path.join(main, rel), dst)
+            copied.append(rel)
+        except OSError:
+            pass
+    return copied
+
+
+def open_code(main, tree):
+    copied = copy_env(main, tree)
+    r = subprocess.run(["code", tree], capture_output=True, text=True)
+    if r.returncode:
+        r = subprocess.run(["open", "-a", "Visual Studio Code", tree], capture_output=True, text=True)
+    if r.returncode:
+        raise RuntimeError(f"fikk ikke åpnet VS Code: {(r.stderr or '').strip()[:80]}")
+    return f"⎇ VS Code i {short(tree)}" + (f" · kopierte {', '.join(copied)}" if copied else "")
+
+
+def code_menu(w):
+    return (f"#{w.id} worktrees", [(str(n), short(tree), lambda m=main, t=tree: open_code(m, t), False)
+                                   for n, (main, tree) in enumerate(w.trees[:9], 1)])
+
+
+def code_option(w):
+    """The menu's `v` entry: straight to VS Code with one worktree, a picker with several."""
+    if not w.trees:
+        return []
+    if len(w.trees) == 1:
+        main, tree = w.trees[0]
+        return [("v", f"VS Code i {os.path.basename(tree)}", lambda: open_code(main, tree), False)]
+    return [("v", f"VS Code i worktree ({len(w.trees)})", lambda: code_menu(w), "sub")]
 
 
 # ── launching ───────────────────────────────────────────────────────────────
@@ -407,6 +500,7 @@ def menu(x):
         ("s", f"endre status ({x.state})", lambda: status_menu(x), "sub"),
         ("i", "sett nåværende sprint", lambda: set_sprint(x), False),
         ("g", f"start agent ({x.skill})", lambda: launch(x), False),
+        *code_option(x),
         ("o", "åpne i nettleser", lambda: subprocess.run(["open", x.url]) and "", False)])
 
 
@@ -433,6 +527,13 @@ def agent_chip(snap, x):
     return [(f"  {icon} agent {st}", tone)]
 
 
+def tree_chip(w):
+    if not w.trees:
+        return []
+    name = os.path.basename(w.trees[0][1]) + (f" +{len(w.trees) - 1}" if len(w.trees) > 1 else "")
+    return [(f"  ⎇ {name}", "cyan")]
+
+
 def work_row(snap, w, multi, folded):
     label, tone = KIND.get(w.kind, (w.type.lower()[:5], "dim"))
     parts = [("● " if w.state == "Doing" else "○ ", "yellow" if w.state == "Doing" else "dim"),
@@ -445,7 +546,7 @@ def work_row(snap, w, multi, folded):
     if w.kind == "map":
         parts.append((f"  {len(w.children)} åpne, {w.done_children} done", "dim"))
     parts.append((f"  → {w.skill}", "dim"))
-    return parts + agent_chip(snap, w)
+    return parts + tree_chip(w) + agent_chip(snap, w)
 
 
 def child_row(snap, t, last, pad):
@@ -456,7 +557,7 @@ def child_row(snap, t, last, pad):
     if t.it.hitl:
         parts.append(("  HITL", "red"))
     parts.append((f"  → {t.skill}", "dim"))
-    return parts + agent_chip(snap, t)
+    return parts + tree_chip(t) + agent_chip(snap, t)
 
 
 def pr_row(snap, r, wrepo):
@@ -509,7 +610,10 @@ PAINT = {"green": green, "red": red, "yellow": yellow, "cyan": cyan, "dim": dim,
 def work_json(snap, w):
     out = {"id": w.id, "title": w.title, "state": w.state, "type": w.type, "kind": w.kind,
            "project": w.project, "url": w.url, "prompt": w.prompt, "agent": w.key,
-           "agentState": snap.agents.get(w.key), "start": f"fleet go {w.id}"}
+           "agentState": snap.agents.get(w.key), "start": f"fleet go {w.id}",
+           "worktrees": [t for _, t in w.trees]}
+    if w.trees:
+        out["openInCode"] = f"fleet code {w.id}"
     if w.parent:
         out.update(ticketType=w.it.kind, status=w.status, assignee=w.it.assignee, hitl=w.it.hitl)
     if w.kind == "map":
@@ -751,6 +855,12 @@ def tui(scr, a):
             key = m.key
         elif k == ord("o"):
             subprocess.run(["open", cur.url])
+        elif k == ord("v") and isinstance(cur, Work) and cur.trees:
+            opt = code_option(cur)[0]
+            if opt[3] == "sub":
+                pop = opt[2]()
+            else:
+                act(opt[2])
         elif k == ord("m"):
             pop = menu(cur)
         elif k in (10, 13, curses.KEY_ENTER):
@@ -828,6 +938,18 @@ def cmd_review(a):
     start(find_review(a.id), a.dry_run)
 
 
+def cmd_code(a):
+    trees = worktrees().get(a.id, [])
+    if not trees:
+        die(f"ingen worktree for #{a.id} under {', '.join(short(r) for r in ROOTS)}")
+    if a.n is None and len(trees) > 1:
+        for n, (_, t) in enumerate(trees, 1):
+            print(f"{n}  {short(t)}")
+        die("flere worktrees — velg med -n N")
+    main, tree = trees[(a.n or 1) - 1]
+    run_action(open_code, main, tree)
+
+
 def run_action(fn, *args):
     try:
         print(green(fn(*args)))
@@ -873,6 +995,7 @@ GUIDE = """\
                             godkjenn · sett auto-complete · fullfør nå (feiler om noe blokkerer) · forlat
   fleet wi <id> state [S]   sett state S (uten S: list typens states)
   fleet wi <id> sprint      flytt til prosjektets nåværende sprint (default-teamet)
+  fleet code <id> [-n N]    VS Code i itemets worktree, med .env* kopiert fra hovedtreet
   fleet help                denne teksten
 
 {b}TASTER{r}
@@ -880,8 +1003,12 @@ GUIDE = """\
   → / l     fold ut kart (åpne tickets: ledig / tatt / blokkert) · ← / h fold inn · space veksle
   m         valg for raden:
               PR         a approve · u auto-complete · c complete · x abandon · g review-agent · o åpne
-              work item  s endre status (1–9) · i nåværende sprint · g agent · o åpne
+              work item  s endre status (1–9) · i nåværende sprint · g agent · v VS Code · o åpne
             complete og abandon spør y/n først. esc lukker.
+  v         VS Code i itemets worktree (⎇ på linja). Kopierer .env* fra hovedtreet dit
+            worktreet har mappa men ikke fila — eksisterende filer røres ikke.
+            Worktree hører til itemet når mappe- eller branchnavnet har id-en: fleet-<id>,
+            t<id>, feat/<id>-…
   Har elementet allerede en agent, spør enter y/n først.
 
 {b}AGENTENE{r}
@@ -944,6 +1071,11 @@ def main():
     s.add_argument("action", choices=("state", "sprint"))
     s.add_argument("value", nargs="*")
     s.set_defaults(fn=cmd_wi)
+
+    s = sub.add_parser("code", help="open VS Code in a work item's worktree, copying .env* from the main checkout")
+    s.add_argument("id", type=int)
+    s.add_argument("-n", type=int, help="which worktree, when there are several")
+    s.set_defaults(fn=cmd_code)
 
     s = sub.add_parser("help", help="forklaring (norsk)")
     s.set_defaults(fn=cmd_help)
