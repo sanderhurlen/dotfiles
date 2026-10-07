@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+#
+# pg-token
+#
+# Keeps a fresh Microsoft Entra token in ~/.pgpass for Azure Database for
+# PostgreSQL servers, so psql and DataGrip ("pgpass" authentication) connect
+# without pasting a token. Uses your `az login`; tokens last about an hour,
+# and the launchd job from azure/install.sh reruns this every 30 minutes.
+#
+# Config (never committed) — ~/.config/pg-token/hosts, one server per line:
+#   <host> <user>
+#   myserver.postgres.database.azure.com me@example.com
+#
+# Only the block between the pg-token markers in ~/.pgpass is rewritten.
+#
+# Usage: pg-token           refresh ~/.pgpass
+#        pg-token --print   print the token on stdout
+
+set -euo pipefail
+
+# launchd starts with a bare PATH; az lives in Homebrew.
+PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+HOSTS="${PG_TOKEN_HOSTS:-$HOME/.config/pg-token/hosts}"
+PGPASS="${PGPASSFILE:-$HOME/.pgpass}"
+BEGIN='# >>> pg-token >>>'
+END='# <<< pg-token <<<'
+
+die() { printf 'pg-token: %s\n' "$1" >&2; exit 1; }
+
+token() {
+	az account get-access-token --resource-type oss-rdbms \
+		--query accessToken -o tsv 2>/dev/null \
+		|| die "no token — run 'az login'"
+}
+
+case "${1:-}" in
+	-h|--help) sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+	--print) token; exit 0 ;;
+	"") ;;
+	*) die "unknown argument: $1" ;;
+esac
+
+command -v az >/dev/null 2>&1 || die "az is required (brew install azure-cli)"
+[ -f "$HOSTS" ] || die "no config at $HOSTS — see 'pg-token --help'"
+
+tok=$(token)
+
+# Any port, any database: the token is the same for all of them.
+block="$BEGIN"
+count=0
+while read -r host user _; do
+	case "$host" in ''|\#*) continue ;; esac
+	[ -n "$user" ] || die "line for $host in $HOSTS has no user"
+	block="$block"$'\n'"$host:*:*:$user:$tok"
+	count=$((count + 1))
+done <"$HOSTS"
+[ "$count" -gt 0 ] || die "no servers in $HOSTS"
+block="$block"$'\n'"$END"
+
+# Everything outside our block is kept as it was.
+kept=""
+if [ -f "$PGPASS" ]; then
+	kept=$(awk -v b="$BEGIN" -v e="$END" '
+		$0 == b { skip = 1; next }
+		$0 == e { skip = 0; next }
+		!skip
+	' "$PGPASS")
+fi
+
+tmp=$(mktemp "${PGPASS}.XXXXXX")
+chmod 600 "$tmp"
+{
+	[ -n "$kept" ] && printf '%s\n' "$kept"
+	printf '%s\n' "$block"
+} >"$tmp"
+mv "$tmp" "$PGPASS"
+
+printf 'pg-token: refreshed %s for %d server(s)\n' "$PGPASS" "$count"
