@@ -24,7 +24,7 @@
 #
 # Agents run in the local clone of the item's/PR's repo (found under FLEET_ROOTS,
 # default ~/visense), else in the first root. Named fleet-wi-<id> / fleet-pr-<id> / fleet-fix-<id>.
-# TUI: ↑↓/jk move · m actions for the row · enter start agent (pick prompt, or type one) · →/← unfold/fold a map · o open · a all PRs · r refresh · q quit
+# TUI: ↑↓/jk move · m actions for the row · enter start agent (pick prompt, or type one) · →/← unfold/fold a map or spec · o open · a all PRs · r refresh · q quit
 
 import argparse
 import concurrent.futures
@@ -127,7 +127,7 @@ class Work:
         self.project, self.type = it.project, it.type
         self.kind = "map" if it.is_map else "spec" if it.is_spec else "item"
         self.key = f"fleet-wi-{self.id}"
-        self.children, self.done_children = [], 0  # a map's open tickets (Work), and how many are done
+        self.children, self.done_children = [], 0  # a map's/spec's open tickets (Work), and how many are done
         self.trees = []  # local worktrees for this item, see worktrees()
         self.prs = []  # my active PRs (Mine) that link this item or carry its id in their branch
 
@@ -141,12 +141,21 @@ class Work:
         return "/wayfinder" if self.kind == "map" or self.decision else "/implement"
 
     @property
+    def folds(self):
+        """Shows its open tickets under it: maps and specs."""
+        return self.kind in ("map", "spec")
+
+    @property
+    def task(self):
+        return not self.folds and (self.type.lower() == "task" or self.it.kind == "task")
+
+    @property
     def prompt(self):
         return f"/wayfinder {self.parent.id} ticket {self.id}" if self.decision else f"{self.skill} {self.id}"
 
 
 def unfold(m):
-    """Fill a map's children: open tickets as frontier (ledig), claimed (tatt), blocked (blokkert)."""
+    """Fill a map's or spec's children: open tickets as frontier (ledig), claimed (tatt), blocked (blokkert)."""
     kids = wf.many(m.it.links(wf.CHILD))
     take, claimed, blocked = wf.classify(kids, need_ready=False)
     m.children = [Work(t, m, st) for st, ts_ in (("ledig", take), ("tatt", claimed), ("blokkert", blocked))
@@ -155,20 +164,26 @@ def unfold(m):
 
 
 def work():
-    """My work items in To Do/Doing across the org: Doing first, then by id."""
+    """My work items in To Do/Doing across the org: bugs first, then Doing, then by id. Tasks
+    under a map or spec only show as its children; the parent is listed even if not mine."""
     q = ("SELECT [System.Id] FROM WorkItems WHERE [System.AssignedTo] = @Me AND [System.State] IN ("
          + ", ".join(f"'{s}'" for s in STATES) + ") ORDER BY [System.Id]")
     ids = [w["id"] for w in rest("wit/wiql", {"query": q}, scope="org")["workItems"]]
     wf._cache.clear()
     its = wf.many(ids)
     wf.fetch([p for t in its for p in t.links(wf.PARENT)])
-    maps_ = {p.id: p for t in its for p in wf.many(t.links(wf.PARENT)) if p.is_map}
-    items = [Work(t, next((Work(maps_[p]) for p in t.links(wf.PARENT) if p in maps_), None)) for t in its]
-    maps = [w for w in items if w.kind == "map"]
-    wf.fetch([c for m in maps for c in m.it.links(wf.CHILD)])
-    for m in maps:
+    heads = {p.id: p for t in its for p in wf.many(t.links(wf.PARENT)) if p.is_map or p.is_spec}
+    items = [Work(t, next((Work(heads[p]) for p in t.links(wf.PARENT) if p in heads), None)) for t in its]
+    under = {w.parent.id for w in items if w.task and w.parent}
+    items = [w for w in items if not (w.task and w.parent)]
+    mine_ = {w.id for w in items}
+    items += [Work(heads[i]) for i in sorted(under - mine_)]
+    folds = [w for w in items if w.folds]
+    wf.fetch([c for m in folds for c in m.it.links(wf.CHILD)])
+    for m in folds:
         unfold(m)
-    return sorted(items, key=lambda w: (STATES.index(w.state) if w.state in STATES else 9, w.id))
+    return sorted(items, key=lambda w: (w.type.lower() != "bug",
+                                        STATES.index(w.state) if w.state in STATES else 9, w.id))
 
 
 class Review:
@@ -943,10 +958,10 @@ def work_row(snap, w, multi, folded):
              (f"#{w.id:<5} ", "dim"), (f"{label:<5} ", tone)]
     if multi:
         parts.append((f"{w.project[:12]:<12}  ", "dim"))
-    if w.kind == "map":
+    if w.folds:
         parts.append(("▸ " if folded else "▾ ", "cyan"))
     parts += [(w.title[:70], "bold"), (f"  {w.state}", "dim")]
-    if w.kind == "map":
+    if w.folds:
         parts.append((f"  {len(w.children)} åpne, {w.done_children} done", "dim"))
     parts.append((f"  → {w.skill}", "dim"))
     return parts + pr_chip(w) + tree_chip(w) + agent_chip(snap, w)
@@ -996,7 +1011,7 @@ def lines(snap, everyone, open_=()):
     for w in snap.items:
         folded = w.id not in open_
         out.append((work_row(snap, w, multi, folded), w))
-        if w.kind == "map" and not folded:
+        if w.folds and not folded:
             pad = 29 if multi else 15
             for n, t in enumerate(w.children):
                 out.append((child_row(snap, t, n == len(w.children) - 1, pad), t))
@@ -1053,7 +1068,7 @@ def work_json(snap, w):
         out["openInCode"] = f"fleet code {w.id}"
     if w.parent:
         out.update(ticketType=w.it.kind, status=w.status, assignee=w.it.assignee, hitl=w.it.hitl)
-    if w.kind == "map":
+    if w.folds:
         out.update(doneTickets=w.done_children, tickets=[work_json(snap, t) for t in w.children])
     return out
 
@@ -1252,7 +1267,7 @@ def tui(scr, a):
                 put(by + n, bx, line_, w - 1 - bx, pal["cyan"] if n in (0, len(opts) + 1) else 0)
             for n, (k_, _, _, _) in enumerate(opts, 1):
                 put(by + n, bx + 3, k_, 1, pal["yellow"] | curses.A_BOLD)
-        keys = f"↑↓ flytt · m valg · enter start agent · →/← fold ut/inn kart · o åpne · a {'mine' if a.all else 'alle'} PRer · r oppdater · q avslutt" \
+        keys = f"↑↓ flytt · m valg · enter start agent · →/← fold ut/inn kart/spec · o åpne · a {'mine' if a.all else 'alle'} PRer · r oppdater · q avslutt" \
                f"  ·  {short(OUT)}/screen.txt"
         if edit:
             put(h - 1, 0, f"{edit[0]}: {edit[1]}"[-(w - 2):] + "█", w - 1, pal["cyan"] | curses.A_BOLD)
@@ -1339,10 +1354,10 @@ def tui(scr, a):
             wake.set()
         elif not cur:
             continue
-        elif k in (curses.KEY_RIGHT, ord("l"), ord(" ")) and isinstance(cur, Work) and cur.kind == "map":
+        elif k in (curses.KEY_RIGHT, ord("l"), ord(" ")) and isinstance(cur, Work) and cur.folds:
             open_ ^= {cur.id} if k == ord(" ") else {cur.id} - open_
-        elif k in (curses.KEY_LEFT, ord("h")) and isinstance(cur, Work) and (cur.kind == "map" or cur.parent):
-            m = cur.parent or cur
+        elif k in (curses.KEY_LEFT, ord("h")) and isinstance(cur, Work) and (cur.folds or cur.parent):
+            m = cur if cur.folds and cur.id in open_ else cur.parent or cur
             open_.discard(m.id)
             key = m.key
         elif k == ord("o") and cur.url:
@@ -1394,9 +1409,9 @@ def find_work(id):
     items = wf.many([id])
     if not items:
         die(f"fant ikke work item {id}")
-    parent = next((p for p in wf.many(items[0].links(wf.PARENT)) if p.is_map), None)
+    parent = next((p for p in wf.many(items[0].links(wf.PARENT)) if p.is_map or p.is_spec), None)
     w = Work(items[0], Work(parent) if parent else None)
-    if w.kind == "map":
+    if w.folds:
         unfold(w)
     return w
 
@@ -1556,7 +1571,7 @@ GUIDE = """\
                             levende liste, oppdateres hvert {refresh}. sekund
                             varsler (macOS) når en fleet-agent blir blocked — venter på deg (-q: av)
                             i Ghostty: `claude agents` i en pane til venstre (ikke om den fortsatt er der)
-  fleet ls [-a] [-u]        lista, skrevet ut én gang (-u: kartene foldet ut)
+  fleet ls [-a] [-u]        lista, skrevet ut én gang (-u: kart/spec foldet ut)
   fleet go <id> [-n]        bakgrunnsagent på et work item (-n: vis kommandoen)
   fleet review <id> [-n]    bakgrunnsagent som reviewer en PR
   fleet fix <id> [-n]       bakgrunnsagent som fikser min PR: konflikter, bygg, review-kommentarer
@@ -1573,7 +1588,7 @@ GUIDE = """\
 
 {b}TASTER{r}
   ↑↓ / j k  flytt · enter start agent · o åpne i nettleser · a mine/alle PRer · r oppdater · q avslutt
-  → / l     fold ut kart (åpne tickets: ledig / tatt / blokkert) · ← / h fold inn · space veksle
+  → / l     fold ut kart/spec (åpne tickets: ledig / tatt / blokkert) · ← / h fold inn · space veksle
   m         valg for raden:
               PR         a approve · u auto-complete · c complete · x abandon · g review-agent · o åpne
               work item  s endre status (1–9) · i nåværende sprint · g agent · v VS Code · o åpne
@@ -1646,7 +1661,7 @@ def main():
 
     s = sub.add_parser("ls", help="print the list once (and write the state files)")
     s.add_argument("-a", "--all", action="store_true")
-    s.add_argument("-u", "--unfold", action="store_true", help="show maps' open tickets")
+    s.add_argument("-u", "--unfold", action="store_true", help="show maps' and specs' open tickets")
     s.set_defaults(fn=cmd_ls)
 
     for name, fn, h in (("go", cmd_go, "background agent on a work item"),
