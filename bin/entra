@@ -124,10 +124,10 @@ def reason(raw):
     return str(msg).strip().splitlines()[0][:300]
 
 
-def call(url, tok, body=None, method=None):
+def call(url, tok, body=None, method=None, ctype="application/json"):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method or ("POST" if data is not None else "GET"),
-                                 headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
+                                 headers={"Authorization": f"Bearer {tok}", "Content-Type": ctype})
     try:
         with urllib.request.urlopen(req, timeout=60) as r:  # GroupEntitlements can take half a minute
             raw = r.read()
@@ -196,8 +196,8 @@ def pages(path, cfg=None, tok=None):
     return out
 
 
-def ado(url, body=None, method=None):
-    return call(url, token(HOME, ADO_RES), body, method)
+def ado(url, body=None, method=None, ctype="application/json"):
+    return call(url, token(HOME, ADO_RES), body, method, ctype)
 
 
 def parallel(jobs):
@@ -394,6 +394,35 @@ def ado_users():
             if not cont:
                 return {u["user"].get("originId"): u for u in out}
     return S.get("ado_users", fetch)
+
+
+def ado_ok(res, what):
+    """DevOps answers 200 with isSuccess false when it refuses; make that a Fail."""
+    op = (res or {}).get("operationResult") or res or {}
+    if op.get("isSuccess") is False:
+        errs = "; ".join(str(e.get("value", e)) for e in op.get("errors") or []) or "ukjent feil"
+        raise Fail(f"DevOps avviste {what}: {errs}")
+    return res
+
+
+def ado_license(u, lic):
+    """Give an Entra user a DevOps license, adding them to the org if they aren't in it."""
+    level = {"licensingSource": "account", "accountLicenseType": "express" if lic == "Basic" else "stakeholder"}
+    e = ado_users().get(u["id"])
+    if e:
+        ado_ok(ado(f"{VSAEX}/userentitlements/{e['id']}?api-version=7.1",
+                   [{"op": "replace", "path": "/accessLevel", "value": level}],
+                   method="PATCH", ctype="application/json-patch+json"), "lisensen")
+    else:
+        ado_ok(ado(f"{VSAEX}/userentitlements?api-version=7.1",
+                   {"accessLevel": level, "user": {"origin": "aad", "originId": u["id"], "subjectKind": "user",
+                                                   "principalName": u.get("userPrincipalName")}}), "brukeren")
+
+
+def ado_remove(u):
+    e = ado_users().get(u["id"])
+    if e:
+        ado(f"{VSAEX}/userentitlements/{e['id']}?api-version=7.1", method="DELETE")
 
 
 def rules():
@@ -699,11 +728,11 @@ class TenantTab(Tab):
 
 class UserTab(Tab):
     name = "brukere"
-    keys = "enter vis · d bare DevOps · o portal · c kopier UPN"
+    keys = "space marker · * marker alle · m handlinger · enter vis · t bare gjester · d bare DevOps · o portal · c kopier UPN"
 
     def __init__(self):
         super().__init__()
-        self.devops, self.ado = False, {}
+        self.devops, self.guests, self.ado, self.marked = False, False, {}, set()
 
     def fetch(self):
         users = S.users()
@@ -716,16 +745,121 @@ class UserTab(Tab):
         return users
 
     def keep(self, u):
-        return not self.devops or u["id"] in self.ado
+        return (not self.devops or u["id"] in self.ado) and (not self.guests or u.get("userType") == "Guest")
 
     def mark(self):
-        return " · bare DevOps" if self.devops else ""
+        return (" · bare DevOps" if self.devops else "") + (" · bare gjester" if self.guests else "") + (f" · {len(self.marked)} markert" if self.marked else "")
 
     def cells(self, u):
         lic = (self.ado.get(u["id"]) or {}).get("accessLevel", {}).get("licenseDisplayName", "")
         flags = ("deaktivert", "red") if u.get("accountEnabled") is False else \
                 ("gjest", "yellow") if u.get("userType") == "Guest" else ("", None)
-        return [(u.get("displayName") or "?", "bold"), (u.get("userPrincipalName", ""), "dim"), flags, (lic, "cyan")]
+        return [("◆" if u["id"] in self.marked else "·", "yellow" if u["id"] in self.marked else "dim"),
+                (u.get("displayName") or "?", "bold"), (u.get("userPrincipalName", ""), "dim"), flags, (lic, "cyan")]
+
+    def chosen(self, row):
+        """The marked users, or the row under the cursor when none are."""
+        return [u for u in self.rows or [] if u["id"] in self.marked] or ([row] if row else [])
+
+    def actions(self, ui, row):
+        us = self.chosen(row)
+        if not us:
+            return
+        who = us[0].get("displayName", "?") if len(us) == 1 else f"{len(us)} brukere"
+        acts = [("Legg i gruppe …", self.add_group), ("Fjern fra gruppe …", self.remove_group)]
+        if S.ado_here():
+            acts += [(f"DevOps: gi {lic}-lisens (legger til i {ORG} om nødvendig)", lambda ui, us, lic=lic: self.license(ui, us, lic))
+                     for lic in LICENSES]
+            acts.append((f"DevOps: fjern fra {ORG}", self.remove_ado))
+        guests = [u for u in us if u.get("userType") == "Guest"]
+        if guests:
+            acts.append((f"Fjern gjestetilgang — slett {len(guests)} " + ("gjest" if len(guests) == 1 else "gjester")
+                         + (f" ({len(us) - len(guests)} medlemmer hoppes over)" if len(guests) < len(us) else ""),
+                         self.remove_guests))
+        acts.append(("Kopier e-postadresser", lambda ui, us: ui.copy("; ".join(u.get("mail") or u.get("userPrincipalName", "") for u in us))))
+        if self.marked:
+            acts.append(("Fjern markering", lambda ui, us: self.marked.clear()))
+        act = ui.pick(f"Handling for {who}", acts, lambda a: [(a[0], None)])
+        if act:
+            act[1](ui, us)
+
+    def each(self, ui, us, verb, fn):
+        """fn on every user at once; one line saying how it went."""
+        ui.busy(verb)
+        res = parallel({u["id"]: (lambda u=u: fn(u)) for u in us})
+        bad = [(u, res[u["id"]]) for u in us if isinstance(res[u["id"]], Fail)]
+        ok = len(us) - len(bad)
+        if bad:
+            hint = " — trenger du admin? (A)" if any("privileges" in str(e) or "403" in str(e) for _, e in bad) else ""
+            ui.say(f"{verb}: ✓ {ok}  ✗ {len(bad)} — " + "; ".join(f"{u.get('displayName')}: {e}" for u, e in bad[:3]) + hint, True)
+        else:
+            ui.say(f"✓ {verb}: {ok} " + ("bruker" if ok == 1 else "brukere"))
+            self.marked.clear()
+
+    def add_group(self, ui, us):
+        ui.busy()
+        g = ui.pick(f"Legg {len(us)} i gruppe", S.groups(), lambda g: [(g.get("displayName") or g["id"], None),
+                                                                      ((g.get("description") or "")[:60], "dim")])
+        if not g:
+            return
+        def add(u):
+            try:
+                graph(f"groups/{g['id']}/members/$ref", {"@odata.id": f"{GRAPH}/directoryObjects/{u['id']}"})
+            except Fail as e:
+                if "already exist" not in str(e):
+                    raise
+        self.each(ui, us, f"lagt i {g['displayName']}", add)
+
+    def remove_group(self, ui, us):
+        ui.busy()
+        res = parallel({u["id"]: (lambda u=u: pages(q(f"users/{u['id']}/memberOf/microsoft.graph.group",
+                                                      {"$select": "id,displayName", "$top": "999"}))) for u in us})
+        member, names = {}, {}
+        for uid, gs in res.items():
+            for g in listed(gs):
+                member.setdefault(g["id"], set()).add(uid)
+                names[g["id"]] = g.get("displayName") or g["id"]
+        g = ui.pick(f"Fjern {len(us)} fra gruppe", sorted(member, key=lambda i: names[i].lower()),
+                    lambda i: [(names[i], None), (f"{len(member[i])} av {len(us)}", "dim")])
+        if not g or not ui.yes(f"fjerne {len(member[g])} fra {names[g]}?"):
+            return
+        self.each(ui, [u for u in us if u["id"] in member[g]], f"fjernet fra {names[g]}",
+                  lambda u: graph(f"groups/{g}/members/{u['id']}/$ref", method="DELETE"))
+
+    def remove_guests(self, ui, us):
+        guests = [u for u in us if u.get("userType") == "Guest"]
+        names = ", ".join(u.get("displayName") or "?" for u in guests[:3]) + (" …" if len(guests) > 3 else "")
+        in_ado = sum(1 for u in guests if u["id"] in self.ado)
+        if not ui.yes(f"slette {len(guests)} gjest(er) fra {S.org or S.alias} ({names})?"
+                      + (f" {in_ado} fjernes også fra {ORG}." if in_ado else "") + " kan gjenopprettes i 30 dager"):
+            return
+
+        def remove(u):
+            # DevOps keeps the license of a deleted Entra user until it is removed there too.
+            if u["id"] in self.ado:
+                ado_remove(u)
+            graph(f"users/{u['id']}", method="DELETE")
+        self.each(ui, guests, "gjestetilgang fjernet", remove)
+        S.cache.pop(("users", S.cfg), None)
+        S.cache.pop("ado_users", None)
+        self.rows = None
+
+    def license(self, ui, us, lic):
+        if not ui.yes(f"gi {len(us)} {lic}-lisens i {ORG}?"):
+            return
+        self.each(ui, us, f"{lic}-lisens", lambda u: ado_license(u, lic))
+        S.cache.pop("ado_users", None)
+        self.rows = None
+
+    def remove_ado(self, ui, us):
+        inside = [u for u in us if u["id"] in self.ado]
+        if not inside:
+            return ui.say(f"ingen av dem er i {ORG}", True)
+        if not ui.yes(f"fjerne {len(inside)} fra {ORG}? (lisens og all tilgang)"):
+            return
+        self.each(ui, inside, f"fjernet fra {ORG}", ado_remove)
+        S.cache.pop("ado_users", None)
+        self.rows = None
 
     def text(self, u):
         return " ".join(filter(None, (u.get("displayName"), u.get("userPrincipalName"), u.get("mail"))))
@@ -734,6 +868,20 @@ class UserTab(Tab):
         return UserDetail(u)
 
     def key(self, ui, k, u):
+        if k == " " and u:
+            self.marked ^= {u["id"]}
+            self.sel += 1
+            return True
+        if k == "*":
+            ids = {x["id"] for x in self.visible()}
+            self.marked = self.marked - ids if ids <= self.marked else self.marked | ids
+            return True
+        if k == "m":
+            self.actions(ui, u)
+            return True
+        if k == "t":
+            self.guests, self.sel = not self.guests, 0
+            return True
         if k == "d":
             if not S.ado_here():
                 ui.say("DevOps hører til hjemmetenanten (main)", True)
@@ -971,11 +1119,7 @@ def new_rule(ui):
             "licenseRule": {"licensingSource": "account", "accountLicenseType": "express" if lic == "Basic" else "stakeholder",
                             "licenseDisplayName": lic},
             "projectEntitlements": [{"projectRef": {"id": p["id"]}, "group": {"groupType": role[1]}}] if p else []}
-    res = ado(f"{RULES}?api-version=7.1-preview.1", body) or {}
-    op = res.get("operationResult") or res
-    if op.get("isSuccess") is False:
-        errs = "; ".join(str(e.get("value", e)) for e in op.get("errors") or []) or "ukjent feil"
-        raise Fail(f"DevOps avviste regelen: {errs}")
+    ado_ok(ado(f"{RULES}?api-version=7.1-preview.1", body), "regelen")
     S.cache.pop("rules", None)
     ui.say(f"✓ regel opprettet: {what} — DevOps synker innen kort tid")
 
@@ -1562,7 +1706,12 @@ GUIDE = """\
   1 tenant   azt sine tenanter (main, b2c-dev, b2c-stg …) med abonnementer under.
              enter bytter tenant — og abonnement, på en abonnementslinje. Ikke innlogget: az login først.
              l logg inn på nytt · n ny tenant (domene eller GUID, som `azt <domene>`)
-  2 brukere  alle brukere i tenanten; lisens i DevOps til høyre. d bare DevOps-brukere.
+  2 brukere  alle brukere i tenanten; lisens i DevOps til høyre. d bare DevOps-brukere, t bare gjester.
+             space markerer (◆), * markerer alle synlige (filtrer først). m: handlinger på de
+             markerte, eller på linjen du står på — legg i / fjern fra gruppe, DevOps-lisens
+             Basic/Stakeholder (legger til i org), fjern fra DevOps, kopier e-postadresser,
+             fjern gjestetilgang (sletter gjestebrukerne, og fjerner dem fra DevOps; gjenopprettes fra
+             Slettede brukere i 30 dager, DevOps-lisensen må gis på nytt).
              enter: profil, Entra-roller (aktive, PIM-aktiverte ⚡ og kvalifiserte ○), Azure-roller
              i alle abonnementer (også via grupper), grupper (→ hvilken DevOps-tilgang de gir),
              DevOps-lisens og -grupper. + legg i gruppe · - fjern fra gruppe
