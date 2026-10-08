@@ -713,7 +713,16 @@ def start_menu(x, agents_):
             for n, (label, r, p) in enumerate(starts(x)[:9], 1)]
     what = f"#{x.id}" if isinstance(x, Work) else f"!{x.id}"
     return (f"start agent · {what} {x.title[:40]}",
-            opts + [("e", "egendefinert prompt …", lambda text: launch(x, text), "edit")])
+            opts + [("e", "egendefinert prompt …", lambda text: launch(x, f"{about(x)}\n\n{text}"), "edit")])
+
+
+def about(x):
+    """One line naming the row, put before a typed prompt so the agent knows what it's about."""
+    if isinstance(x, Work):
+        return f"Gjelder {x.type.lower()} #{x.id} «{x.title}» i {x.project} ({x.url})."
+    if isinstance(x, Mine):
+        return f"Gjelder min PR !{x.id} «{x.title}» i {x.repo}, {x.source} → {x.target} ({x.url})."
+    return f"Gjelder PR !{x.id} «{x.title}» av {x.who} i {x.repo}, {x.source} → {x.target} ({x.url})."
 
 
 def stuck(before, after):
@@ -1581,6 +1590,7 @@ GUIDE = """\
                   (har PR/worktree) · /to-tickets (spec) · oppsummer (kart)
                   PR: forklar for meg · test lokalt   min PR: /code-review · /pr
               e   egendefinert prompt — enter starter, esc avbryter, ctrl-u/w sletter
+                  (prefikses med hvilket element den gjelder: id, tittel, url)
             Samme agentnavn og mappe som radens egen. Finnes agenten, spør y/n først.
 
 {b}AGENTENE{r}
