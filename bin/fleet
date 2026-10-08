@@ -665,8 +665,12 @@ def where_fix(m):
 
 
 def plan(x, prompt=None):
-    """(cwd, cmd) that starts the background agent for a Work or Review. prompt: instead of the row's own."""
-    if isinstance(x, Work):
+    """(cwd, cmd) that starts the background agent for a Work, Mine, Review, or anything with
+    where() → (cwd, worktree) and prompt (wp's failed runs). prompt: instead of the row's own."""
+    if hasattr(x, "where"):
+        cwd, wt = x.where()
+        prompt = prompt or x.prompt
+    elif isinstance(x, Work):
         cwd, wt = where_work(x)
         prompt = prompt or x.prompt
     elif isinstance(x, Mine):

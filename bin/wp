@@ -12,11 +12,12 @@
 #   wp ls [filters]          same list, printed once
 #   wp approve 23536         approve every pending approval on run 23536
 #   wp follow 23536          notify when it waits for approval or finishes (again: stop)
+#   wp fix 23536             background Claude agent fixing the failed run (fleet's launcher)
 #   wp open 23536            open run in browser
 #   wp help                  explained (Norwegian)
 #
 # Filters: -A all repos · -p pipeline · -b branch · -m mine · -w waiting · -n N
-# TUI: ↑↓/jk move · space approve · f follow · enter open · w waiting · a all repos · r refresh · q quit
+# TUI: ↑↓/jk move · space approve · f follow · x fix · enter open · w waiting · a all repos · r refresh · q quit
 
 import argparse
 import concurrent.futures
@@ -28,6 +29,7 @@ import importlib.util
 import json
 import locale
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -99,6 +101,7 @@ class Run:
         self.pipeline = raw["definition"]["name"]
         self.status = raw.get("status")  # notStarted | inProgress | completed | cancelling
         self.result = raw.get("result")  # succeeded | failed | canceled | partiallySucceeded
+        self.ref, self.commit = raw.get("sourceBranch") or "", raw.get("sourceVersion") or ""
         self.branch = (raw.get("sourceBranch") or "").replace("refs/heads/", "").replace("refs/pull/", "PR ")
         self.branch = self.branch.removesuffix("/merge")
         self.who = (raw.get("requestedFor") or {}).get("uniqueName", "").split("@")[0]
@@ -350,6 +353,81 @@ def watch():
         time.sleep(POLL)
 
 
+# ── fix ─────────────────────────────────────────────────────────────────────
+# A failed run handed to a background Claude agent, started the way fleet starts its
+# own. A PR build becomes fleet's fix agent for that PR (fleet-fix-<pr>, so fleet shows
+# it); a branch build gets fleet-run-<id> in a worktree that branches off it and opens a PR.
+
+_fleet = None
+
+
+def fleet():
+    global _fleet
+    if _fleet is None:
+        loader = importlib.machinery.SourceFileLoader("fleet", os.path.join(_here, "fleet"))
+        _fleet = importlib.util.module_from_spec(importlib.util.spec_from_loader("fleet", loader))
+        loader.exec_module(_fleet)
+    return _fleet
+
+
+def errors(r, most=8):
+    """[(task, message, log id)] for the failed tasks/jobs in r's timeline."""
+    out = []
+    for rec in timeline(r):
+        if rec.get("result") != "failed" or rec.get("type") not in ("Task", "Job", "Checkpoint"):
+            continue
+        msgs = [i.get("message", "") for i in rec.get("issues") or [] if i.get("type") == "error"] or [""]
+        out += [(rec["name"], " ".join(m.split())[:300], (rec.get("log") or {}).get("id")) for m in msgs]
+    return out[:most]
+
+
+def about_run(r):
+    """The run and what failed, in words, for an agent's prompt."""
+    errs = "".join(f"\n- {t}" + (f" (log {l})" if l else "") + (f": {m}" if m else "") for t, m, l in errors(r))
+    failed = [n for n, s in r.stages if s == "fail"]
+    return (f"Pipeline-run {r.pipeline} {r.number} (build {r.id}, {r.url}) på {r.ref} @ {r.commit[:10]} "
+            f"endte {r.state}" + (f" i {', '.join(failed)}" if failed else "") + "."
+            + (f" Feil:{errs}" if errs else "")
+            + f"\nLogger: `az devops invoke --area build --resource logs --route-parameters project={A().project} "
+              f"buildId={r.id} logId=<log>` eller {A().org}/{urllib.parse.quote(A().project)}"
+              f"/_apis/build/builds/{r.id}/logs/<log> med `az account get-access-token`.")
+
+
+class Broken:
+    """A failed branch build, as fleet.launch wants it: key, where(), prompt."""
+    def __init__(self, r):
+        self.run, self.key = r, f"fleet-run-{r.id}"
+        b = r.ref.removeprefix("refs/heads/")
+        self.prompt = (about_run(r) + f"\nFinn årsaken og fiks den. `git fetch origin && git switch -c fix/run-{r.id} "
+                       f"origin/{b}`, commit, push og lag PR mot {b} (`az repos pr create`). Er feilen ikke i koden "
+                       f"(flaky test, infrastruktur, secrets), ikke endre noe — si hva som feilet og hvorfor. "
+                       f"Ikke complete PR-en.")
+
+    def where(self):
+        main = fleet().clones().get((A().project.lower(), self.run.repo.lower()))
+        if not main:
+            raise RuntimeError(f"ingen lokal klone av {A().project}/{self.run.repo} under "
+                               f"{', '.join(fleet().short(p) for p in fleet().ROOTS)}")
+        return main, f"fleet-run{self.run.id}"
+
+
+def fixer(r):
+    """What fix(r) hands to fleet: fleet's fix agent for a PR build, else a Broken."""
+    if r.status != "completed" or r.result not in ("failed", "partiallySucceeded"):
+        raise RuntimeError(f"{r.pipeline} {r.number} har ikke feilet ({r.state})")
+    if r.ref.startswith("refs/pull/"):
+        fl = fleet()
+        m = fl.Mine(fl.rest(f"git/pullrequests/{r.ref.split('/')[2]}", scope="org"))
+        fl.detail(m)
+        return m, m.prompt + "\n" + about_run(r)
+    return Broken(r), None
+
+
+def fix(r):
+    """Start the agent. Returns fleet's one-line result; raises RuntimeError."""
+    return fleet().launch(*fixer(r))
+
+
 # ── rendering ───────────────────────────────────────────────────────────────
 
 ICON = {"succeeded": "✓", "failed": "✗", "canceled": "⊘", "partiallySucceeded": "!", "inProgress": "●",
@@ -456,7 +534,7 @@ def tui(scr, a):
                 scr.addnstr(row, x, " " * (w - 1 - x), w - 1 - x, hl)
         if not rs:
             scr.addnstr(2, 2, "ingen runs", w - 3, pal["dim"])
-        keys = "↑↓ flytt · space godkjenn · f følg · enter åpne · w venter · a alle repoer · r oppdater · q avslutt"
+        keys = "↑↓ flytt · space godkjenn · f følg · x fiks · enter åpne · w venter · a alle repoer · r oppdater · q avslutt"
         scr.addnstr(h - 1, 0, msg or keys, w - 1, (pal["red"] if err else pal["green"]) if msg else pal["dim"])
         scr.refresh()
 
@@ -491,6 +569,14 @@ def tui(scr, a):
             r = rs[sel]
             try:
                 msg = f"◉ følger {r.pipeline} {r.number}" if follow(r) else f"sluttet å følge {r.pipeline} {r.number}"
+            except RuntimeError as e:
+                msg, err = str(e), True
+        elif k == ord("x") and rs:
+            msg = f"starter fiks for {rs[sel].pipeline} {rs[sel].number} …"
+            scr.addnstr(h - 1, 0, msg.ljust(w - 1), w - 1, pal["dim"])
+            scr.refresh()
+            try:
+                msg = fix(rs[sel])
             except RuntimeError as e:
                 msg, err = str(e), True
         elif k == ord("w"):
@@ -554,6 +640,18 @@ def cmd_follow(a):
     print(cyan(f"◉ følger {r.pipeline} {r.number}") if on else f"sluttet å følge {r.pipeline} {r.number}")
 
 
+def cmd_fix(a):
+    r = find(a.id)
+    try:
+        x, prompt = fixer(r)
+        if a.dry_run:
+            cwd, cmd = fleet().plan(x, prompt)
+            return print(dim(f"(cd {shlex.quote(cwd)} && {' '.join(shlex.quote(c) for c in cmd)})"))
+        print(green(fleet().launch(x, prompt)))
+    except RuntimeError as e:
+        die(str(e))
+
+
 def cmd_open(a):
     subprocess.run(["open", find(a.id).url])
 
@@ -571,6 +669,7 @@ GUIDE = """\
   wp ls [filtre]          samme liste, skrevet ut én gang (også når stdout ikke er en terminal)
   wp approve <run> [-c k] godkjenn alle ventende approvals på run-en (build id)
   wp follow <run>         varsel når den venter på godkjenning eller er ferdig (igjen: slutt)
+  wp fix <run> [-n]       Claude-agent i bakgrunnen som fikser den feilede run-en (-n: vis bare kommandoen)
   wp open <run>           åpne i nettleser
   wp help [kommando]      denne teksten, eller flaggene til én kommando
 
@@ -579,6 +678,7 @@ GUIDE = """\
   ↑↓ / j k        flytt            pgup/pgdn, ^u/^d   halv side
   space           godkjenn valgt run — alle stages som venter på den
   f               følg valgt run (◉) — macOS-varsel ved venting/ferdig; igjen: slutt å følge
+  x               fiks valgt run — feilet run gis til en Claude-agent i bakgrunnen (se FIKS)
   enter / o       åpne i nettleser
   w               bare runs som venter på godkjenning (av/på)
   a               dette repoet / hele prosjektet
@@ -598,6 +698,13 @@ GUIDE = """\
   ⏸ coreservices-deploy  20260930.1  main  ✓test ✓staging ⏸prod ○demo  @tarjei 3d 12:04
   status · pipeline · run · branch · stages · startet av · siden · varighet
   ✓ ok  ✗ feilet  ! delvis  ● kjører  ○ venter  ⏸ venter på godkjenning  - hoppet over/avbrutt
+
+{b}FIKS{r}  {d}(x / wp fix){r}
+
+  Startes som fleet starter sine: `claude --bg`, i den lokale klonen av repoet under ~/visense.
+  PR-bygg  → fleet-fix-<pr>, samme agent som `fleet fix <pr>`, med feilene fra run-en i prompten
+  branch   → fleet-run-<id> i worktree fleet-run<id>: branch fix/run-<id>, fiks, push, PR mot branchen
+  Bare feilede (✗ / !) runs. Følg med i `claude agents` eller fleet.
 
 {b}VERDT Å VITE{r}
 
@@ -659,6 +766,11 @@ def main():
     s = sub.add_parser("follow", help="notify when the run waits for approval or finishes; again to stop")
     s.add_argument("id", type=int)
     s.set_defaults(fn=cmd_follow)
+
+    s = sub.add_parser("fix", help="background Claude agent fixing a failed run")
+    s.add_argument("id", type=int)
+    s.add_argument("-n", "--dry-run", action="store_true", help="print the command, don't start it")
+    s.set_defaults(fn=cmd_fix)
 
     s = sub.add_parser("watch", help=argparse.SUPPRESS)
     s.set_defaults(fn=lambda a: watch(), bare=True)
