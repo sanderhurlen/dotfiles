@@ -24,7 +24,7 @@
 #
 # Agents run in the local clone of the item's/PR's repo (found under FLEET_ROOTS,
 # default ~/visense), else in the first root. Named fleet-wi-<id> / fleet-pr-<id> / fleet-fix-<id>.
-# TUI: ↑↓/jk move · m actions for the row · enter start agent · →/← unfold/fold a map · o open · a all PRs · r refresh · q quit
+# TUI: ↑↓/jk move · m actions for the row · enter start agent (pick prompt, or type one) · →/← unfold/fold a map · o open · a all PRs · r refresh · q quit
 
 import argparse
 import concurrent.futures
@@ -632,19 +632,19 @@ def where_fix(m):
     return main, f"fleet-pr{m.id}"
 
 
-def plan(x):
-    """(cwd, cmd) that starts the background agent for a Work or Review."""
+def plan(x, prompt=None):
+    """(cwd, cmd) that starts the background agent for a Work or Review. prompt: instead of the row's own."""
     if isinstance(x, Work):
         cwd, wt = where_work(x)
-        prompt = x.prompt
+        prompt = prompt or x.prompt
     elif isinstance(x, Mine):
         cwd, wt = where_fix(x)
         if not cwd:
             raise RuntimeError(f"ingen lokal klone av {x.project}/{x.repo} under {', '.join(short(r) for r in ROOTS)}")
-        prompt = x.prompt
+        prompt = prompt or x.prompt
     else:
         cwd, wt = where_review(x)
-        prompt = f"/review-pr {x.id}" if cwd else f"/review-pr {x.url}"
+        prompt = prompt or (f"/review-pr {x.id}" if cwd else f"/review-pr {x.url}")
         cwd = cwd or HOME
     cmd = ["claude", SKIP, "--bg", "-n", x.key]
     if wt:
@@ -652,9 +652,9 @@ def plan(x):
     return cwd, cmd + [prompt]
 
 
-def launch(x):
+def launch(x, prompt=None):
     """Start the agent. Returns a one-line result; raises RuntimeError on failure."""
-    cwd, cmd = plan(x)
+    cwd, cmd = plan(x, prompt)
     trust(cwd)
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     if r.returncode:
@@ -662,6 +662,58 @@ def launch(x):
                            else f"claude exited {r.returncode}")
     m = re.search(r"backgrounded · (\w+)", r.stdout)
     return f"▶ {x.key} startet{f' ({m.group(1)})' if m else ''} i {short(cwd)}: {cmd[-1][:60]}"
+
+
+def starts(x):
+    """[(label, row, prompt)] offered when enter starts an agent on x: its own prompt first, then
+    fixing its PRs, then what fits the kind of row. row is whose agent (name, cwd) runs it;
+    prompt None = row's own."""
+    if isinstance(x, Mine):
+        return [(f"fiks: {'; '.join(x.todo) or 'sjekk bygg og kommentarer'}", x, None),
+                (f"/code-review {x.source} mot {x.target}", x,
+                 f"/code-review PR !{x.id} ({x.url}): endringene på {x.source} mot {x.target}, "
+                 f"merge-base som fast punkt. Rapporter funn, ikke endre koden."),
+                ("/pr  skriv PR-beskrivelsen på nytt", x,
+                 f"/pr Skriv PR-beskrivelsen til !{x.id} ({x.url}) på nytt ut fra endringene på {x.source} "
+                 f"mot {x.target} og work items {', '.join(f'#{i}' for i in sorted(x.items)) or '-'}, "
+                 f"og oppdater PR-en i ADO.")]
+    if isinstance(x, Review):
+        return [(f"/review-pr {x.id}", x, None),
+                ("forklar PR-en for meg (ingen kommentarer)", x,
+                 f"Forklar PR !{x.id} «{x.title}» ({x.url}) av {x.who} for meg: hva endres og hvorfor, hva "
+                 f"jeg bør se nøye på, og risiko. Bare les — ikke post kommentarer, ikke stem."),
+                ("test lokalt: bygg og kjør testene", x,
+                 f"Sjekk ut PR !{x.id} ({x.url}), kildebranch {x.source}, i et worktree. Bygg, kjør testene og "
+                 f"det som berøres, og rapporter hva som feiler eller oppfører seg rart. Ikke post kommentarer.")]
+    out = [(x.prompt, x, None)]
+    out += [(f"fiks PR !{m.id}: {'; '.join(m.todo) or 'sjekk bygg og kommentarer'}", m, None) for m in x.prs]
+    if x.kind == "map":
+        out.append(("oppsummer kartet: gjort, neste, blokkert", x,
+                    f"Oppsummer kart #{x.id} «{x.title}» ({x.url}): hva er avgjort og gjort, hva er neste ledige "
+                    f"ticket, og hva blokkerer. Bare les — ikke endre noe."))
+    elif x.kind == "spec":
+        out.append((f"/to-tickets {x.id}", x, f"/to-tickets {x.id}"))
+    elif not x.decision:
+        skill = "/diagnosing-bugs" if x.type.lower() == "bug" else "/tdd"
+        out.append((f"{skill} {x.id}", x, f"{skill} #{x.id} «{x.title}» ({x.url})"))
+        if x.prs or x.trees:
+            out.append((f"/code-review {x.id}", x,
+                        f"/code-review #{x.id}: endringene på branchen for #{x.id} mot målbranchen, merge-base som "
+                        f"fast punkt, spec fra work item #{x.id}. Rapporter funn, ikke endre koden."))
+    return out
+
+
+def start_menu(x, agents_):
+    """The menu enter opens on a Work/Review/Mine: numbered prompts from starts(), e for my own.
+    Asks y/n first when that agent already exists."""
+    def ask(r):
+        st = agents_.get(r.key)
+        return f"{r.key} finnes allerede ({st}) — start ny?" if st else False
+    opts = [(str(n), label, lambda r=r, p=p: launch(r, p), ask(r))
+            for n, (label, r, p) in enumerate(starts(x)[:9], 1)]
+    what = f"#{x.id}" if isinstance(x, Work) else f"!{x.id}"
+    return (f"start agent · {what} {x.title[:40]}",
+            opts + [("e", "egendefinert prompt …", lambda text: launch(x, text), "edit")])
 
 
 def stuck(before, after):
@@ -1112,6 +1164,7 @@ def tui(scr, a):
     open_, key = set(), None  # unfolded map ids; key of the selected row, kept across refreshes
     ask = None  # (question, action) awaiting y
     pop = None  # open menu: (title, options), see menu()
+    edit = None  # prompt being typed: [label, text, launch(text), confirm question | False]
     loading = True
 
     def loader():
@@ -1183,20 +1236,46 @@ def tui(scr, a):
             title_, opts = pop
             bw = min(w - 2, max([len(title_) + 4] + [len(l) + 8 for _, l, _, _ in opts]))
             by, bx = max(1, h - 3 - len(opts) - 2), max(0, w - bw - 2)
-            for n, line_ in enumerate([f"┌ {title_} ".ljust(bw - 1, "─") + "┐"]
-                                      + [f"│  {k}  {l}".ljust(bw - 1) + "│" for k, l, _, _ in opts]
+            fit = lambda t, n: t if len(t) <= n else t[:n - 1] + "…"
+            for n, line_ in enumerate([f"┌ {fit(title_, bw - 4)} ".ljust(bw - 1, "─") + "┐"]
+                                      + [f"│  {k}  {fit(l, bw - 8)}".ljust(bw - 1) + "│" for k, l, _, _ in opts]
                                       + ["└" + "─" * (bw - 2) + "┘"]):
                 put(by + n, bx, line_, w - 1 - bx, pal["cyan"] if n in (0, len(opts) + 1) else 0)
             for n, (k_, _, _, _) in enumerate(opts, 1):
                 put(by + n, bx + 3, k_, 1, pal["yellow"] | curses.A_BOLD)
         keys = f"↑↓ flytt · m valg · enter start agent · →/← fold ut/inn kart · o åpne · a {'mine' if a.all else 'alle'} PRer · r oppdater · q avslutt" \
                f"  ·  {short(OUT)}/screen.txt"
-        if ask:
+        if edit:
+            put(h - 1, 0, f"{edit[0]}: {edit[1]}"[-(w - 2):] + "█", w - 1, pal["cyan"] | curses.A_BOLD)
+        elif ask:
             put(h - 1, 0, ask[0] + "  y/n", w - 1, pal["yellow"] | curses.A_BOLD)
         else:
             put(h - 1, 0, msg or keys, w - 1, (pal["red"] if err else pal["green"]) if msg else pal["dim"])
         scr.refresh()
 
+        if edit:
+            try:
+                c = scr.get_wch()
+            except curses.error:
+                continue
+            if c in ("\n", "\r", curses.KEY_ENTER):
+                (_, text, fn, confirm), edit = edit, None
+                if text.strip():
+                    if confirm:
+                        ask = (confirm, lambda: fn(text.strip()))
+                    else:
+                        act(lambda: fn(text.strip()))
+            elif c == "\x1b":
+                edit = None
+            elif c in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+                edit[1] = edit[1][:-1]
+            elif c == "\x15":  # ctrl-u
+                edit[1] = ""
+            elif c == "\x17":  # ctrl-w
+                edit[1] = re.sub(r"\S*$", "", edit[1].rstrip())
+            elif isinstance(c, str) and c.isprintable():
+                edit[1] += c
+            continue
         k = scr.getch()
         if k != -1:
             msg, err = "", False
@@ -1221,6 +1300,9 @@ def tui(scr, a):
                     pop = fn()
                 except RuntimeError as e:
                     msg, err = str(e), True
+            elif confirm == "edit":
+                st = s.agents.get(cur.key)
+                edit = ["prompt", "", fn, f"{cur.key} finnes allerede ({st}) — start ny?" if st else False]
             elif confirm:
                 ask = (confirm, fn)
             else:
@@ -1267,12 +1349,7 @@ def tui(scr, a):
         elif isinstance(cur, (Cleanup, Orphan)) and k in (10, 13, curses.KEY_ENTER, ord("v")):
             pop = menu(cur)
         elif k in (10, 13, curses.KEY_ENTER):
-            what = f"#{cur.id} {cur.title[:50]}" if isinstance(cur, Work) else f"!{cur.id} {cur.title[:50]}"
-            st = s.agents.get(cur.key)
-            if st:
-                ask = (f"{cur.key} finnes allerede ({st}) — start ny agent på {what}?", lambda x=cur: launch(x))
-            else:
-                act(lambda x=cur: launch(x))
+            pop = start_menu(cur, s.agents)
         if sel != moved:
             sel = max(0, min(sel, len(rows) - 1))
             key = rows[sel].key if rows else None
@@ -1498,7 +1575,13 @@ GUIDE = """\
             worktreet har mappa men ikke fila — eksisterende filer røres ikke.
             Worktree hører til itemet når mappe- eller branchnavnet har id-en: fleet-<id>,
             t<id>, feat/<id>-…
-  Har elementet allerede en agent, spør enter y/n først.
+  enter     start agent — velg prompt:
+              1   radens egen (/implement, /wayfinder, /review-pr, fiks-prompten)
+              2…  work item: fiks lenket PR · /diagnosing-bugs (Bug) el. /tdd · /code-review
+                  (har PR/worktree) · /to-tickets (spec) · oppsummer (kart)
+                  PR: forklar for meg · test lokalt   min PR: /code-review · /pr
+              e   egendefinert prompt — enter starter, esc avbryter, ctrl-u/w sletter
+            Samme agentnavn og mappe som radens egen. Finnes agenten, spør y/n først.
 
 {b}AGENTENE{r}
   kart  → claude --bg -n fleet-wi-<id> "/wayfinder <id>"   i {home}
