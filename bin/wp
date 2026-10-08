@@ -11,7 +11,7 @@
 #   wp                       live list (TUI); space approves the selected run
 #   wp ls [filters]          same list, printed once
 #   wp approve 23536         approve every pending approval on run 23536
-#   wp follow 23536          notify on every status change until it finishes (again: stop)
+#   wp follow 23536          notify when it waits for approval or finishes (again: stop)
 #   wp open 23536            open run in browser
 #   wp help                  explained (Norwegian)
 #
@@ -221,8 +221,9 @@ def approve(run, comment=""):
 
 # ── follow ──────────────────────────────────────────────────────────────────
 # Followed runs live in FOLLOW, keyed org/project/id, with the state last seen. One
-# detached `wp watch` polls them, sends a macOS notification on every change, and
-# drops a run once it finishes or is older than FORGET. It exits when none are left.
+# detached `wp watch` polls them, sends a macOS notification when one starts waiting for
+# approval or finishes, and drops a run once it finishes or is older than FORGET. It
+# exits when none are left.
 
 
 def key(r):
@@ -274,23 +275,19 @@ def follow(r):
 
 
 SAY = {"succeeded": "✓ fullført", "failed": "✗ feilet", "canceled": "⊘ avbrutt",
-       "partiallySucceeded": "! delvis fullført", "inProgress": "● kjører", "notStarted": "○ i kø",
-       "cancelling": "⊘ avbrytes", "waiting": "⏸ venter på godkjenning", "completed": "· ferdig"}
+       "partiallySucceeded": "! delvis fullført"}
 
 
 def news(old, r):
-    """One line saying what changed since `old` (a seen() dict), or None."""
-    now = seen(r)
-    if now == old:
-        return None
-    was = dict(map(tuple, old.get("stages", [])))
-    moved = " ".join(CHIP[s] + short(n) for n, s in r.stages if was.get(n) != s and n != "__default")
-    state = SAY.get(r.state, r.state)
+    """What to tell about r since `old` (a seen() dict), or None. Only a new wait for
+    approval and the finish are worth a notification; stages moving along are not."""
     if r.state == "waiting":
-        state += ": " + ", ".join(short(n) for n in r.waiting)
-    if r.state == old.get("state"):
-        return moved or state
-    return f"{moved}  ·  {state}" if moved and r.status != "completed" else state
+        if old.get("state") == "waiting" and old.get("waiting") == r.waiting:
+            return None
+        return "⏸ venter på godkjenning: " + ", ".join(short(n) for n in r.waiting)
+    if r.status == "completed" and old.get("state") != r.state:
+        return SAY.get(r.state, r.state)
+    return None
 
 
 def notify(title, text):
@@ -336,6 +333,7 @@ def watch():
             line = news(f, r)
             if line:
                 notify(f"{r.pipeline} {r.number}", line)
+            if seen(r) != {n: f.get(n) for n in ("state", "stages", "waiting")}:
                 updates[k] = seen(r)
             if r.status == "completed" and not r.approvals:
                 gone.append(k)
@@ -572,7 +570,7 @@ GUIDE = """\
   wp [filtre]             levende liste, oppdateres hvert {refresh}. sekund
   wp ls [filtre]          samme liste, skrevet ut én gang (også når stdout ikke er en terminal)
   wp approve <run> [-c k] godkjenn alle ventende approvals på run-en (build id)
-  wp follow <run>         varsel ved hver statusendring til den er ferdig (igjen: slutt å følge)
+  wp follow <run>         varsel når den venter på godkjenning eller er ferdig (igjen: slutt)
   wp open <run>           åpne i nettleser
   wp help [kommando]      denne teksten, eller flaggene til én kommando
 
@@ -580,7 +578,7 @@ GUIDE = """\
 
   ↑↓ / j k        flytt            pgup/pgdn, ^u/^d   halv side
   space           godkjenn valgt run — alle stages som venter på den
-  f               følg valgt run (◉) — macOS-varsel ved hver endring; igjen: slutt å følge
+  f               følg valgt run (◉) — macOS-varsel ved venting/ferdig; igjen: slutt å følge
   enter / o       åpne i nettleser
   w               bare runs som venter på godkjenning (av/på)
   a               dette repoet / hele prosjektet
@@ -658,7 +656,7 @@ def main():
     s.add_argument("-c", "--comment")
     s.set_defaults(fn=cmd_approve)
 
-    s = sub.add_parser("follow", help="notify on status changes until the run finishes; again to stop")
+    s = sub.add_parser("follow", help="notify when the run waits for approval or finishes; again to stop")
     s.add_argument("id", type=int)
     s.set_defaults(fn=cmd_follow)
 
