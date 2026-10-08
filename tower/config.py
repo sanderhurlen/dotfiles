@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from tower.agent import Verktøy
 from tower.kanal import Kanal, Person
 
 STANDARD = {
@@ -15,6 +16,7 @@ STANDARD = {
     "dager": 7,
     "poll_sekunder": 2,
     "modell": "sonnet",
+    "kilder": ["~/visense"],
 }
 
 
@@ -30,6 +32,7 @@ class Config:
     dager: int = 7  # Tråder eldre enn dette ved første syn blir `gammel`
     poll_sekunder: float = 2
     modell: str = "sonnet"  # for triage og utkast
+    kilder: tuple[Path, ...] = ()  # Utkast-agenten kan lese her (og i Kunnskapsbasen) ved regenerering med instruks
 
     @property
     def db(self) -> Path:
@@ -42,6 +45,11 @@ class Config:
     @property
     def kunnskapsbase(self) -> Path:
         return self.rot / "kunnskapsbase"
+
+    def verktøy(self) -> Verktøy:
+        """Lesetilgang ved regenerering med instruks. Kilder som ikke finnes hoppes over."""
+        self.kunnskapsbase.mkdir(parents=True, exist_ok=True)
+        return Verktøy((self.kunnskapsbase, *(k for k in self.kilder if k.is_dir())))
 
     @property
     def agent_cwd(self) -> Path:
@@ -62,6 +70,7 @@ def last(rot: Path | None = None) -> Config:
         dager=int(data["dager"]),
         poll_sekunder=float(data["poll_sekunder"]),
         modell=str(data["modell"]),
+        kilder=tuple(Path(k).expanduser() for k in data["kilder"]),
     )
 
 

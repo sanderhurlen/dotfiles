@@ -10,7 +10,7 @@ from pathlib import Path
 
 from tower.kanal import Tråd
 from tower.triage import Triage
-from tower.utkast import ÅPNE, FEILET, FORKASTET, GENERERER, KLART, SENDT, Utkast
+from tower.utkast import ÅPNE, FEILET, FORKASTET, GENERERER, KLART, SENDT, Research, Utkast
 
 SKJEMA = """
 CREATE TABLE IF NOT EXISTS trad (
@@ -50,8 +50,8 @@ NYE_KOLONNER = {
     "triage_feil": "TEXT",
     "utsatt_til": "TEXT",  # ISO UTC, bare i `utsatt`
 }
-NYE_U_KOLONNER = {"redigert": "TEXT"}
-U_KOLONNER = "trad, versjon, melding_id, status, tekst, sjekk, feil, instruks, redigert"
+NYE_U_KOLONNER = {"redigert": "TEXT", "research": "TEXT"}  # research: JSON-liste av {faktum, kilde}
+U_KOLONNER = "trad, versjon, melding_id, status, tekst, sjekk, feil, instruks, redigert, research"
 KOLONNER = ("id, kanal, status, siste_melding_id, kategori, haster, sammendrag, begrunnelse, triage_melding_id, "
             "triage_feil, utsatt_til")
 
@@ -68,8 +68,9 @@ class Rad:
     triage: Triage | None = None  # siste vellykkede, kan gjelde en eldre Melding
     triage_melding_id: str | None = None
     triage_feil: str | None = None
-    utkast: Utkast | None = None  # siste versjon
+    utkast: Utkast | None = None  # synlig versjon, se `synlig`
     utsatt_til: datetime | None = None
+    regenerering_feil: str | None = None  # siste versjon feilet; `utkast` er da versjonen før
 
     @property
     def trenger_triage(self) -> bool:
@@ -89,16 +90,34 @@ class Rad:
         return u is None or u.melding_id != self.siste_melding_id or u.status == GENERERER
 
 
-def _rad(r: tuple, utkast: Utkast | None = None) -> Rad:
+def _rad(r: tuple, versjoner: list[Utkast] = ()) -> Rad:
     id, kanal, status, siste, kategori, haster, sammendrag, begrunnelse, tmid, tfeil, utsatt_til = r
     triage = Triage(kategori, bool(haster), sammendrag, begrunnelse) if kategori else None
     til = datetime.fromisoformat(utsatt_til) if utsatt_til else None
-    return Rad(id, kanal, status, siste, triage, tmid, tfeil, utkast, til)
+    utkast, feil = synlig(versjoner)
+    return Rad(id, kanal, status, siste, triage, tmid, tfeil, utkast, til, feil)
+
+
+def synlig(versjoner: list[Utkast]) -> tuple[Utkast | None, str | None]:
+    """Versjonen som vises, og feilen når en regenerering feilet.
+
+    Siste versjon, unntatt når den feilet og versjonen før er klar for samme Melding: da står den
+    (en mislykket regenerering tar aldri fra meg et utkast jeg kunne sendt).
+    """
+    if not versjoner:
+        return None, None
+    siste = versjoner[-1]
+    if siste.status == FEILET and len(versjoner) > 1:
+        forrige = versjoner[-2]
+        if forrige.status == KLART and forrige.melding_id == siste.melding_id:
+            return forrige, siste.feil
+    return siste, None
 
 
 def _utkast(r: tuple) -> Utkast:
-    trad, versjon, melding_id, status, tekst, sjekk, feil, instruks, redigert = r
-    return Utkast(trad, versjon, melding_id, status, tekst, tuple(json.loads(sjekk)), feil, instruks, redigert)
+    trad, versjon, melding_id, status, tekst, sjekk, feil, instruks, redigert, research = r
+    funn = tuple(Research(f["faktum"], f["kilde"]) for f in json.loads(research or "[]"))
+    return Utkast(trad, versjon, melding_id, status, tekst, tuple(json.loads(sjekk)), feil, instruks, redigert, funn)
 
 
 def ny_status(forrige: Rad | None, tråd: Tråd, nå: datetime, dager: int) -> str | None:
@@ -129,12 +148,13 @@ class Db:
 
     def rad(self, tråd_id: str) -> Rad | None:
         r = self.con.execute(f"SELECT {KOLONNER} FROM trad WHERE id = ?", (tråd_id,)).fetchone()
-        return _rad(r, self.utkast(tråd_id)) if r else None
+        return _rad(r, self.versjoner(tråd_id)) if r else None
 
     def alle(self) -> dict[str, Rad]:
-        siste = {u.tråd_id: u for u in map(_utkast, self.con.execute(
-            f"SELECT {U_KOLONNER} FROM utkast u WHERE versjon = (SELECT MAX(versjon) FROM utkast WHERE trad = u.trad)"))}
-        return {r[0]: _rad(r, siste.get(r[0])) for r in self.con.execute(f"SELECT {KOLONNER} FROM trad")}
+        versjoner: dict[str, list[Utkast]] = {}
+        for u in map(_utkast, self.con.execute(f"SELECT {U_KOLONNER} FROM utkast ORDER BY trad, versjon")):
+            versjoner.setdefault(u.tråd_id, []).append(u)
+        return {r[0]: _rad(r, versjoner.get(r[0], [])) for r in self.con.execute(f"SELECT {KOLONNER} FROM trad")}
 
     def registrer(self, tråd: Tråd, nå: datetime, dager: int) -> Rad:
         """Oppdaterer status for en hentet Tråd og returnerer raden."""
@@ -173,7 +193,7 @@ class Db:
         return self.rad(tråd_id) if n else None
 
     def utkast(self, tråd_id: str) -> Utkast | None:
-        """Siste versjon."""
+        """Siste versjon (ikke nødvendigvis den synlige, se `Rad.utkast`)."""
         r = self.con.execute(f"SELECT {U_KOLONNER} FROM utkast WHERE trad = ? ORDER BY versjon DESC LIMIT 1",
                              (tråd_id,)).fetchone()
         return _utkast(r) if r else None
@@ -202,9 +222,17 @@ class Db:
                 (status, nå.isoformat(), *felt.values(), u.tråd_id, u.versjon, GENERERER)).rowcount
         return self.utkast(u.tråd_id) if n else None
 
-    def lagre_utkast(self, u: Utkast, tekst: str, sjekk: tuple[str, ...], nå: datetime) -> Utkast | None:
-        return self._avslutt_utkast(u, nå, KLART, tekst=tekst, sjekk=json.dumps(list(sjekk), ensure_ascii=False),
-                                    feil=None)
+    def lagre_utkast(self, u: Utkast, tekst: str, sjekk: tuple[str, ...], nå: datetime,
+                     research: tuple[Research, ...] = ()) -> Utkast | None:
+        """`u` → klart. Eldre åpne versjoner (en regenerering erstatter forrige) forkastes."""
+        ny = self._avslutt_utkast(u, nå, KLART, tekst=tekst, sjekk=json.dumps(list(sjekk), ensure_ascii=False),
+                                  feil=None, research=json.dumps([f.__dict__ for f in research], ensure_ascii=False))
+        if ny:
+            with self.con:
+                self.con.execute(f"UPDATE utkast SET status = ?, endret = ? WHERE trad = ? AND versjon < ? "
+                                 f"AND status IN ({', '.join('?' * len(ÅPNE))})",
+                                 (FORKASTET, nå.isoformat(), u.tråd_id, u.versjon, *ÅPNE))
+        return ny
 
     def lagre_utkast_feil(self, u: Utkast, feil: str, nå: datetime) -> Utkast | None:
         return self._avslutt_utkast(u, nå, FEILET, feil=feil)

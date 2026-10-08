@@ -42,6 +42,8 @@ class FalskRunner:
         self.porter = porter
         self.kall: list[str] = []  # triage-prompter
         self.utkast_kall: list[str] = []
+        self.verktøy: list = []  # verktøy per utkast-kall (None uten)
+        self.instrukser: list[str] = []  # systemprompt per utkast-kall
         self.aktive = 0
         self.maks_aktive = 0
         self.avbrutt = 0
@@ -51,13 +53,16 @@ class FalskRunner:
         if self._port:
             self._port.set()
 
-    async def kjør(self, instruks, schema, prompt):
+    async def kjør(self, instruks, schema, prompt, verktøy=None):
         import asyncio
 
         from tower.agent import Resultat
 
         er_utkast = "sjekk" in schema.get("properties", {})
         (self.utkast_kall if er_utkast else self.kall).append(prompt)
+        if er_utkast:
+            self.verktøy.append(verktøy)
+            self.instrukser.append(instruks)
         self.aktive += 1
         self.maks_aktive = max(self.maks_aktive, self.aktive)
         try:

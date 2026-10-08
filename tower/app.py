@@ -17,7 +17,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.app import SuspendNotSupported
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Static
+from textual.widgets import DataTable, Footer, Input, Static
 
 from tower.agent import AgentFeil, Agenter, ClaudeRunner, Jobb, Runner
 from tower.config import Config
@@ -143,15 +143,23 @@ def utkast_markup(rad: Rad, jobb: str | None, spinner: str) -> str | None:
         return None
     if u is None:
         return None if rad.triage is None else "[dim]I kø for utkast…[/]" if rad.trenger_utkast else None
+    instruks = f"[dim]↺ {escape(u.instruks)}[/]\n" if u.instruks else ""
     if u.status == GENERERER:
-        return f"[magenta]{spinner} Agenten skriver utkast…[/]" if jobb == "kjører" else "[dim]I kø for utkast…[/]"
+        if jobb != "kjører":
+            return instruks + "[dim]I kø for utkast…[/]"
+        return instruks + f"[magenta]{spinner} Agenten {'leter og ' if u.instruks else ''}skriver utkast…[/]"
     if u.status == FEILET:
-        return f"[red]✗ Utkast feilet:[/] {escape(u.feil or '')}"
+        return instruks + f"[red]✗ Utkast feilet:[/] {escape(u.feil or '')}"
     hint = "".join(f"[yellow]›[/] {escape(s)}\n" for s in u.sjekk)
+    kilder = "".join(f"[dim]·[/] {escape(f.faktum)} [dim]{escape(f.kilde)}[/]\n" for f in u.research)
+    if kilder:
+        hint += "[b dim]Kilder[/]\n" + kilder
     pre = "[yellow]↻ Ny melding kom etter dette utkastet[/]\n\n" if u.status == UTDATERT else ""
+    if rad.regenerering_feil:
+        pre += f"[red]✗ Regenerering feilet:[/] {escape(rad.regenerering_feil)}\n[dim]Forrige versjon står.[/]\n\n"
     if u.feil:
         pre += f"[red]✗ Sending feilet:[/] {escape(u.feil)}\n\n"
-    return pre + (hint + "\n" if hint else "") + utkast_tekst_markup(u.gjeldende)
+    return pre + instruks + (hint + "\n" if hint else "") + utkast_tekst_markup(u.gjeldende)
 
 
 def tråd_markup(t: Tråd) -> str:
@@ -208,6 +216,30 @@ class NyMeldingValg(Valg):
                 Binding("r", "velg('r')", "Regenerer"), Binding("escape", "esc", "Se meldingen")]
 
 
+class InstruksPrompt(ModalScreen[str | None]):
+    """Instruks til regenerering. Tom = prøv igjen uten verktøy; `escape` = avbryt (None)."""
+
+    DEFAULT_CSS = """
+    InstruksPrompt { align: center middle; }
+    InstruksPrompt > Vertical { width: 80; height: auto; border: round $accent; padding: 1 2; background: $surface; }
+    InstruksPrompt Input { margin-top: 1; }
+    """
+    BINDINGS = [Binding("escape", "avbryt", "Avbryt")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static("[b]Regenerer utkast[/]\n[dim]Instruks til agenten, tom = prøv igjen. Med instruks kan den "
+                         "lese Kunnskapsbasen og kildene dine.[/]")
+            yield Input(placeholder="f.eks. kortere, og sjekk leveransedato i docs-repoet", id="instruks")
+
+    @on(Input.Submitted)
+    def send_inn(self, e: Input.Submitted) -> None:
+        self.dismiss(e.value.strip())
+
+    def action_avbryt(self) -> None:
+        self.dismiss(None)
+
+
 class Tower(App):
     TITLE = "tower"
     CSS = """
@@ -223,6 +255,7 @@ class Tower(App):
     BINDINGS = [
         Binding("s", "send", "Send"),
         Binding("e", "rediger", "Rediger"),
+        Binding("r", "regenerer", "Regenerer"),
         Binding("a", "avvis", "Avvis"),
         Binding("u", "utsett", "Utsett"),
         Binding("q", "quit", "Avslutt"),
@@ -348,17 +381,27 @@ class Tower(App):
         self.agenter.legg_i_kø(Jobb(nøkkel, f"utkast {motpart(t).split()[0]}", lambda: self.kjør_utkast(t, u)))
 
     async def kjør_utkast(self, t: Tråd, u: Utkast) -> None:
+        """Med instruks (regenerering): forrige versjon i prompten og lesetilgang via verktøy."""
+        jobb = "regenerer" if u.instruks else "utkast"
+        forrige = next((v.gjeldende for v in reversed(self.db.versjoner(t.id)) if v.versjon < u.versjon
+                        and v.gjeldende), None) if u.instruks else None
         try:
-            tekst, sjekk, usd = await skriv_utkast(self.runner, t, self.kunnskap(t))
+            s = await skriv_utkast(self.runner, t, self.kunnskap(t), u.instruks, forrige,
+                                   self.config.verktøy() if u.instruks else None)
         except AgentFeil as e:
-            self.db.logg_kjøring("utkast", t.id, e.usd, self.nå(), feil=str(e))
+            self.db.logg_kjøring(jobb, t.id, e.usd, self.nå(), feil=str(e))
             ny = self.db.lagre_utkast_feil(u, str(e), self.nå())
         else:
-            self.db.logg_kjøring("utkast", t.id, usd, self.nå())
-            ny = self.db.lagre_utkast(u, tekst, sjekk, self.nå())
+            self.db.logg_kjøring(jobb, t.id, s.usd, self.nå())
+            sjekk = s.sjekk + ((f"{s.forkastet} kilde{'r' if s.forkastet > 1 else ''} utenfor tillatte kataloger "
+                                "er fjernet fra Research",) if s.forkastet else ())
+            ny = self.db.lagre_utkast(u, s.tekst, sjekk, self.nå(), s.research)
         self.kost = self.db.kost(self.nå())
         if ny:
             self.rader[t.id] = self.db.rad(t.id)
+            if self.rader[t.id].regenerering_feil:
+                self.notify(f"Regenerering feilet: {self.rader[t.id].regenerering_feil}", severity="error",
+                            timeout=10)
         if self._utkast_for.get(t.id) == u.versjon:
             del self._utkast_for[t.id]
         self.tegn_tabell()
@@ -594,13 +637,45 @@ class Tower(App):
         self.tegn_tabell()
         self.push_screen(NyMeldingValg(), lambda valg: self.etter_ny_melding(t.id, valg))
 
+    def action_regenerer(self) -> None:
+        if not (valgt := self.valgt()):
+            return
+        t, rad = valgt
+        u = rad.utkast
+        if rad.status in FERDIG:
+            grunn = "Tråden er ikke aktiv"
+        elif u is None:
+            grunn = "Ingen utkast å regenerere" if not rad.trenger_utkast else "Utkastet er ikke klart ennå"
+        elif u.status == GENERERER:
+            grunn = "Agenten skriver allerede"
+        elif u.status in (SENDT, FORKASTET):
+            grunn = "Ingen åpent utkast"
+        else:
+            grunn = None
+        if grunn:
+            self.notify(grunn, severity="warning")
+            return
+        self.push_screen(InstruksPrompt(), lambda instruks: self.regenerer(t.id, instruks))
+
+    def regenerer(self, tråd_id: str, instruks: str | None) -> None:
+        """Ny versjon for siste Melding. None = avbrutt; tom = prøv igjen uten verktøy.
+
+        `planlegg` køer den når triagen for siste Melding sier svar (straks, eller når triagen er ferdig).
+        """
+        if instruks is None or self.rader[tråd_id].status in FERDIG:
+            return
+        t = self.tråder[tråd_id]
+        self._hold.discard(tråd_id)
+        self.db.nytt_utkast(tråd_id, t.siste.id, self.nå(), instruks or None)
+        self.rader[tråd_id] = self.db.rad(tråd_id)
+        self.planlegg(t)
+        self.tegn_tabell()
+
     def etter_ny_melding(self, tråd_id: str, valg: str | None) -> None:
         if valg == "s":
             self.prøv_send(tråd_id)
         elif valg == "r":
-            self._hold.discard(tråd_id)
-            self.planlegg(self.tråder[tråd_id])
-            self.tegn_tabell()
+            self.push_screen(InstruksPrompt(), lambda instruks: self.regenerer(tråd_id, instruks))
         else:  # se meldingen: slutten av Tråden nederst i visningen, redigeringen står under
             scroll = self.query_one("#scroll", VerticalScroll)
             scroll.scroll_to(y=max(0, self.query_one("#trad").outer_size.height - scroll.size.height // 2),

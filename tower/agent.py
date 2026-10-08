@@ -30,16 +30,40 @@ class AgentFeil(Exception):
         self.usd = usd
 
 
+# Hemmeligheter agenten aldri får lese. `//` = absolutt; relative mønstre gjelder bare under cwd.
+DENY = ["**/.env*", "**/*secret*", "**/*Secret*", "**/*credential*", "**/appsettings.*.json",
+        "**/*.pem", "**/*.key", "**/*.pfx", "**/*.p12", "**/id_rsa*", "**/id_ed25519*", "**/.npmrc",
+        "**/*.tfstate*", "**/*.kubeconfig", "**/.azure/**", "**/.ssh/**"]
+TAK_FEIL = {"error_max_turns": "tak: for mange runder", "error_max_budget_usd": "tak: budsjett brukt opp"}
+
+
+@dataclass(frozen=True)
+class Verktøy:
+    """Lesetilgang for agenten: `Read,Grep,Glob` på `kataloger`, med deny-liste og tak."""
+
+    kataloger: tuple[Path, ...]
+    maks_runder: int = 12
+    timeout: float = 120
+    maks_usd: float = 0.25
+
+    def argv(self) -> list[str]:
+        settings = {"permissions": {"deny": [f"Read(//{m})" for m in DENY]}}
+        return ["--max-turns", str(self.maks_runder), "--max-budget-usd", f"{self.maks_usd:g}",
+                *(a for k in self.kataloger for a in ("--add-dir", str(k))),
+                "--settings", json.dumps(settings), "--tools", "Read,Grep,Glob"]
+
+
 class Runner(Protocol):
-    async def kjør(self, instruks: str, schema: dict, prompt: str) -> Resultat: ...
+    async def kjør(self, instruks: str, schema: dict, prompt: str, verktøy: Verktøy | None = None) -> Resultat: ...
 
 
-async def med_nytt_forsøk(runner: Runner, instruks: str, schema: dict, prompt: str, forsøk: int = 2) -> Resultat:
+async def med_nytt_forsøk(runner: Runner, instruks: str, schema: dict, prompt: str, forsøk: int = 2,
+                          verktøy: Verktøy | None = None) -> Resultat:
     """Kjører med ett automatisk nytt forsøk. Kosten summeres; siste `AgentFeil` kastes med samlet kost."""
     usd = 0.0
     for i in range(forsøk):
         try:
-            r = await runner.kjør(instruks, schema, prompt)
+            r = await runner.kjør(instruks, schema, prompt, **({"verktøy": verktøy} if verktøy else {}))
         except AgentFeil as e:
             usd += e.usd
             if i == forsøk - 1:
@@ -61,22 +85,23 @@ class ClaudeRunner:
         self.timeout = timeout
         self.claude = claude
 
-    def argv(self, instruks: str, schema: dict) -> list[str]:
+    def argv(self, instruks: str, schema: dict, verktøy: Verktøy | None = None) -> list[str]:
         # Prompten går på stdin: --tools er variadisk og ville slukt et posisjonelt argument.
         return [self.claude, "-p", "--model", self.modell, "--output-format", "json",
                 "--json-schema", json.dumps(schema), "--system-prompt", instruks,
-                *ISOLASJON, "--max-turns", "3", "--tools", ""]
+                *ISOLASJON, *(verktøy.argv() if verktøy else ["--max-turns", "3", "--tools", ""])]
 
-    async def kjør(self, instruks: str, schema: dict, prompt: str) -> Resultat:
+    async def kjør(self, instruks: str, schema: dict, prompt: str, verktøy: Verktøy | None = None) -> Resultat:
         self.cwd.mkdir(parents=True, exist_ok=True)
+        timeout = verktøy.timeout if verktøy else self.timeout
         p = await asyncio.create_subprocess_exec(
-            *self.argv(instruks, schema), cwd=self.cwd, env=ren_env(),
+            *self.argv(instruks, schema, verktøy), cwd=self.cwd, env=ren_env(),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
             try:
-                ut, feil = await asyncio.wait_for(p.communicate(prompt.encode()), self.timeout)
+                ut, feil = await asyncio.wait_for(p.communicate(prompt.encode()), timeout)
             except TimeoutError:
-                raise AgentFeil(f"timeout etter {self.timeout:g} s") from None
+                raise AgentFeil(f"timeout etter {timeout:g} s") from None
         finally:
             if p.returncode is None:  # timeout eller avbrutt: barnet skal aldri overleve kallet
                 p.kill()
@@ -91,6 +116,8 @@ def tolk(ut: bytes, feil: bytes, kode: int | None) -> Resultat:
         tekst = (feil or ut).decode(errors="replace").strip()
         raise AgentFeil(tekst[-300:] or f"claude avsluttet med {kode}") from None
     usd = float(r.get("total_cost_usd") or 0)
+    if r.get("subtype") in TAK_FEIL:
+        raise AgentFeil(TAK_FEIL[r["subtype"]], usd)
     if r.get("subtype") != "success" or r.get("is_error") or r.get("structured_output") is None:
         # API-feil (f.eks. avvist schema) kommer som subtype "success" med is_error og feilen i `result`.
         grunn = r.get("result") if r.get("subtype") == "success" else r.get("subtype")

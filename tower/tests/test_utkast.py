@@ -25,7 +25,7 @@ async def test_skriv_utkast_med_nytt_forsøk():
                 raise AgentFeil("timeout", 0.002)
             return Resultat({"tekst": " Hei [[x]]\n", "sjekk": ["x"]}, 0.01)
 
-    assert await skriv_utkast(R(), tråd(False), "# stil") == ("Hei [[x]]", ("x",), pytest.approx(0.012))
+    assert tuple(await skriv_utkast(R(), tråd(False), "# stil")) == ("Hei [[x]]", ("x",), pytest.approx(0.012), (), 0)
     assert kall[0].startswith("<kunnskapsbase>\n# stil")
 
 

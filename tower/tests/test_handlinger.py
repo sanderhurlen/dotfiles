@@ -292,6 +292,8 @@ async def test_ny_melding_under_redigering_regenerer(config):
         await pilot.press("e")
         await pilot.pause()
         await pilot.press("r")
+        await pilot.pause()
+        await pilot.press("enter")  # instruks-prompten, tom = prøv igjen
         await a.agenter.ferdig()
         await pilot.pause()
         assert [(v.status, v.redigert is not None) for v in a.db.versjoner(NORDLYS)] == [
