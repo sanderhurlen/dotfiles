@@ -28,17 +28,19 @@ def config(rot: Path) -> Config:
 
 
 class FalskRunner:
-    """Kannet svar per kall i stedet for `claude -p`. `svar(prompt)` (triage) og `utkast(prompt)` gir dict
-    eller kaster AgentFeil. Agenten velges ut fra schemaet.
+    """Kannet svar per kall i stedet for `claude -p`. `svar(prompt)` (triage), `utkast(prompt)` og
+    `kurator(prompt)` gir dict eller kaster AgentFeil. Agenten velges ut fra schemaet.
 
     Med `porter=True` blokkerer hvert kall til testen slipper det med `slipp()`; `porter="utkast"` bare utkast.
     """
 
-    def __init__(self, svar=None, porter: bool | str = False, utkast=None) -> None:
+    def __init__(self, svar=None, porter: bool | str = False, utkast=None, kurator=None) -> None:
         self.svar = svar or (lambda prompt: {"kategori": "svar", "haster": False, "sammendrag": "s",
                                              "begrunnelse": "b"})
         self.utkast = utkast or (lambda prompt: {"tekst": "Hei\n\nDet passer.\n\n--\nSander\nVisense",
                                                  "sjekk": []})
+        self.kurator = kurator or (lambda prompt: {"endringer": []})
+        self.kurator_kall: list[str] = []
         self.porter = porter
         self.kall: list[str] = []  # triage-prompter
         self.utkast_kall: list[str] = []
@@ -58,6 +60,10 @@ class FalskRunner:
 
         from tower.agent import Resultat
 
+        if "endringer" in schema.get("properties", {}):
+            self.kurator_kall.append(prompt)
+            await asyncio.sleep(0)
+            return Resultat(self.kurator(prompt), 0.02)
         er_utkast = "sjekk" in schema.get("properties", {})
         (self.utkast_kall if er_utkast else self.kall).append(prompt)
         if er_utkast:

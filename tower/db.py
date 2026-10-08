@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from tower.kanal import Tråd
+from tower.kurator import KuratorJobb
 from tower.triage import Triage
 from tower.utkast import ÅPNE, FEILET, FORKASTET, GENERERER, KLART, SENDT, Research, Utkast
 
@@ -42,6 +43,21 @@ CREATE TABLE IF NOT EXISTS utkast (
     endret TEXT NOT NULL,
     PRIMARY KEY (trad, versjon)
 );
+-- Kurator-kø. Én jobb per Melding jeg svarte på: send i tower og `besvart` fra poll blir samme jobb.
+CREATE TABLE IF NOT EXISTS kurator (
+    id INTEGER PRIMARY KEY,
+    trad TEXT NOT NULL,
+    svar_pa TEXT NOT NULL,
+    sendt TEXT NOT NULL,
+    sendt_versjon INTEGER,  -- NULL: besvart utenfra, ingen diff
+    fra_versjon INTEGER NOT NULL,
+    til_versjon INTEGER NOT NULL,
+    status TEXT NOT NULL,  -- venter | feilet | ferdig
+    feil TEXT,
+    opprettet TEXT NOT NULL,
+    endret TEXT NOT NULL,
+    UNIQUE (trad, svar_pa)
+);
 """
 # Lagt til etter tracer-sliken; eldre tower.db får dem ved åpning.
 NYE_KOLONNER = {
@@ -57,6 +73,9 @@ KOLONNER = ("id, kanal, status, siste_melding_id, kategori, haster, sammendrag, 
 
 # Trådstatus. `triagert` er «venter på meg». `avvist` og `utsatt` varer til ny Melding (utsatt også til tiden).
 NY, GAMMEL, BESVART, TRIAGERT, AVVIST, UTSATT = "ny", "gammel", "besvart", "triagert", "avvist", "utsatt"
+# Kurator-jobber
+VENTER, FERDIG = "venter", "ferdig"
+K_KOLONNER = "id, trad, svar_pa, sendt, sendt_versjon, fra_versjon, til_versjon, status, feil"
 
 
 @dataclass(frozen=True)
@@ -157,12 +176,18 @@ class Db:
         return {r[0]: _rad(r, versjoner.get(r[0], [])) for r in self.con.execute(f"SELECT {KOLONNER} FROM trad")}
 
     def registrer(self, tråd: Tråd, nå: datetime, dager: int) -> Rad:
-        """Oppdaterer status for en hentet Tråd og returnerer raden."""
+        """Oppdaterer status for en hentet Tråd og returnerer raden.
+
+        Besvart utenfra (ikke første gang Tråden sees) køer en Kurator-jobb uten diff; sendte jeg fra tower,
+        finnes jobben allerede.
+        """
         forrige = self.rad(tråd.id)
         status = ny_status(forrige, tråd, nå, dager)
         if status is None:
             return forrige
         with self.con:
+            if status == BESVART and forrige and forrige.status != BESVART:
+                self._ny_kurator(tråd.id, forrige.siste_melding_id, tråd.siste.tekst, None, nå)
             self.con.execute(
                 "INSERT INTO trad (id, kanal, status, siste_melding_id, endret) VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET status = excluded.status, utsatt_til = NULL, "
@@ -304,6 +329,37 @@ class Db:
         r = self.con.execute("SELECT SUM(usd) FROM kjoring WHERE dato = ?",
                              (nå.astimezone().date().isoformat(),)).fetchone()
         return r[0] or 0.0
+
+    # Kurator-kø
+
+    def _ny_kurator(self, tråd_id: str, svar_på: str, sendt: str, versjon: int | None, nå: datetime) -> None:
+        fra = self.con.execute("SELECT COALESCE(MAX(til_versjon), 0) FROM kurator WHERE trad = ?",
+                               (tråd_id,)).fetchone()[0]
+        til = self.con.execute("SELECT COALESCE(MAX(versjon), 0) FROM utkast WHERE trad = ?", (tråd_id,)).fetchone()[0]
+        self.con.execute(
+            "INSERT OR IGNORE INTO kurator (trad, svar_pa, sendt, sendt_versjon, fra_versjon, til_versjon, status, "
+            "opprettet, endret) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (tråd_id, svar_på, sendt, versjon, fra, max(til, fra), VENTER, nå.isoformat(), nå.isoformat()))
+
+    def kurator_etter_sending(self, u: Utkast, svar_på: str, nå: datetime) -> None:
+        """Køer Kuratoren for en sendt versjon. `svar_på` er siste Melding jeg hadde sett da jeg sendte."""
+        with self.con:
+            self._ny_kurator(u.tråd_id, svar_på, u.gjeldende, u.versjon, nå)
+
+    def kurator_jobber(self, *status: str) -> list[KuratorJobb]:
+        return [KuratorJobb(*r) for r in self.con.execute(
+            f"SELECT {K_KOLONNER} FROM kurator WHERE status IN ({', '.join('?' * len(status))}) ORDER BY id",
+            status)]
+
+    def kurator_ferdig(self, jobb: KuratorJobb, nå: datetime) -> None:
+        with self.con:
+            self.con.execute("UPDATE kurator SET status = ?, feil = NULL, endret = ? WHERE id = ?",
+                             (FERDIG, nå.isoformat(), jobb.id))
+
+    def kurator_feil(self, jobb: KuratorJobb, feil: str, nå: datetime) -> None:
+        with self.con:
+            self.con.execute("UPDATE kurator SET status = ?, feil = ?, endret = ? WHERE id = ?",
+                             (FEILET, feil, nå.isoformat(), jobb.id))
 
     def lukk(self) -> None:
         self.con.close()

@@ -21,10 +21,11 @@ from textual.widgets import DataTable, Footer, Input, Static
 
 from tower.agent import AgentFeil, Agenter, ClaudeRunner, Jobb, Runner
 from tower.config import Config
-from tower.db import AVVIST, BESVART, GAMMEL, UTSATT, Db, Rad
-from tower.handlinger import UTSETT_VALG, editor_argv, første_plassholder, utsett_til
+from tower.db import AVVIST, BESVART, FEILET as K_FEILET, GAMMEL, UTSATT, VENTER, Db, Rad
+from tower.handlinger import UTSETT_VALG, editor_argv, første_plassholder, katalog_argv, utsett_til
 from tower.kanal import Kanal, Tråd
 from tower.kunnskapsbase import oppslag
+from tower.kurator import KuratorJobb, commit_manuelt, kurater, sikre_repo, siste_commit, skriv_og_commit
 from tower.triage import triager
 from tower.utkast import FEILET, FORKASTET, GENERERER, KLART, PLASSHOLDER, SENDT, UTDATERT, Utkast, skriv_utkast
 
@@ -258,6 +259,7 @@ class Tower(App):
         Binding("r", "regenerer", "Regenerer"),
         Binding("a", "avvis", "Avvis"),
         Binding("u", "utsett", "Utsett"),
+        Binding("k", "kunnskapsbase", "Kunnskapsbase"),
         Binding("q", "quit", "Avslutt"),
     ]
 
@@ -281,6 +283,10 @@ class Tower(App):
         self.agenter = Agenter(MAKS_AGENTER, endret=self.agenter_endret)
         self._triage_for: dict[str, str] = {}  # Tråd-id → Melding-id for køet/kjørende triage
         self._utkast_for: dict[str, int] = {}  # Tråd-id → versjon for køet/kjørende utkast
+        self.kurator = Agenter(1, endret=self.agenter_endret)  # egen kø, én om gangen
+        self.kurator_feilet: list[KuratorJobb] = db.kurator_jobber(K_FEILET)
+        self._kurator_igjen = True  # feilede jobber får ett nytt forsøk per oppstart
+        self.kb_siste: tuple[str, datetime] | None = None  # siste kurator-commit
         self._tikk = 0
         self.kost = db.kost(nå())
 
@@ -304,6 +310,10 @@ class Tower(App):
         dt.add_column("Utkast", key="u", width=10)
         dt.add_column("", key="alder", width=3)
         dt.focus()
+        try:
+            self.kb_siste = siste_commit(self.config.kunnskapsbase)
+        except (OSError, subprocess.CalledProcessError):
+            pass
         self.oppdater_status()
         self.set_interval(0.12, self.tikk)
         if self.auto_poll:
@@ -339,6 +349,7 @@ class Tower(App):
                 endret = True
             if endret:
                 self.tegn_tabell()
+            self.planlegg_kurator()
             self.oppdater_status()
         finally:
             self._poller = False
@@ -424,6 +435,45 @@ class Tower(App):
             self.planlegg(self.tråder.get(t.id, t))  # svar → utkast
         self.tegn_tabell()
 
+    def planlegg_kurator(self) -> None:
+        """Køer ventende Kurator-jobber for Tråder vi kjenner (etter omstart: når første poll har hentet dem)."""
+        status = (VENTER, K_FEILET) if self._kurator_igjen else (VENTER,)
+        jobber = [j for j in self.db.kurator_jobber(*status) if j.tråd_id in self.tråder]
+        if self._kurator_igjen and self.tråder:
+            self._kurator_igjen = False
+        for j in jobber:
+            nøkkel = ("kurator", str(j.id))
+            if not self.kurator.venter(nøkkel):
+                t = self.tråder[j.tråd_id]
+                self.kurator.legg_i_kø(Jobb(nøkkel, f"kurator {motpart(t).split()[0]}",
+                                            lambda j=j: self.kjør_kurator(j)))
+
+    async def kjør_kurator(self, jobb: KuratorJobb) -> None:
+        """Mine endringer committes først, så skriver Kuratoren og committer. Sending påvirkes aldri."""
+        t = self.tråder[jobb.tråd_id]
+        rot, meg = self.config.kunnskapsbase, self.config.meg
+        usd = 0.0
+        try:
+            await asyncio.to_thread(commit_manuelt, rot, meg)
+            endringer, forkastet, usd = await kurater(self.runner, t, jobb, self.db.versjoner(t.id), rot, meg,
+                                                      self.nå())
+            await asyncio.to_thread(skriv_og_commit, rot, endringer, emne_kort(t), t.id)
+        except (AgentFeil, OSError, subprocess.CalledProcessError) as e:
+            usd += getattr(e, "usd", 0.0)
+            feil = (e.stderr or "").strip()[-200:] or str(e) if isinstance(e, subprocess.CalledProcessError) else str(e)
+            self.db.logg_kjøring("kurator", t.id, usd, self.nå(), feil=feil)
+            self.db.kurator_feil(jobb, feil, self.nå())
+        else:
+            self.db.logg_kjøring("kurator", t.id, usd, self.nå())
+            self.db.kurator_ferdig(jobb, self.nå())
+            if forkastet:
+                self.notify(f"Kuratoren: {forkastet} endring{'er' if forkastet > 1 else ''} med ugyldig sti forkastet",
+                            severity="warning")
+            self.kb_siste = await asyncio.to_thread(siste_commit, rot)
+        self.kost = self.db.kost(self.nå())
+        self.kurator_feilet = self.db.kurator_jobber(K_FEILET)
+        self.oppdater_status()
+
     def jobb_status(self, tråd_id: str, type_: str = "triage") -> str | None:
         nøkkel = (type_, tråd_id)
         if nøkkel in self.agenter.kjørende:
@@ -445,14 +495,15 @@ class Tower(App):
 
     def tikk(self) -> None:
         self._tikk += 1
-        if self.agenter.kjørende:
+        if self.agenter.kjørende or self.kurator.kjørende:
             self.oppdater_status()
             if self.jobb_status(self.valgt_id() or "", "utkast") == "kjører":
                 self.vis_utkast()
 
     async def on_unmount(self) -> None:
-        self.agenter.endret = lambda: None  # widgetene er borte
+        self.agenter.endret = self.kurator.endret = lambda: None  # widgetene er borte
         await self.agenter.stopp()
+        await self.kurator.stopp()
 
     def sortert(self) -> list[Tråd]:
         return sorted(self.tråder.values(), key=lambda t: sorteringsnøkkel(t, self.rader[t.id]))
@@ -576,6 +627,7 @@ class Tower(App):
                 self.tegn_tabell()
                 return
             self.db.marker_sendt(u, self.nå())
+            self.db.kurator_etter_sending(u, self.rader[t.id].siste_melding_id, self.nå())
             self._hold.discard(t.id)
             self.rader[t.id] = self.db.rad(t.id)
             await self.poll_nå()  # mitt svar ligger i Tråden nå → besvart
@@ -681,6 +733,32 @@ class Tower(App):
             scroll.scroll_to(y=max(0, self.query_one("#trad").outer_size.height - scroll.size.height // 2),
                              animate=False)
 
+    def action_kunnskapsbase(self) -> None:
+        """Kunnskapsbasen i $EDITOR. Det jeg endrer committes som `manuelt: endringer` etterpå."""
+        rot = self.config.kunnskapsbase
+        try:
+            sikre_repo(rot)
+        except (OSError, subprocess.CalledProcessError) as e:
+            self.notify(f"Kunnskapsbasen: {e}", severity="error")
+            return
+        if (kode := self.i_terminal(katalog_argv(rot))) is None:
+            return
+        if kode != 0:
+            self.notify(f"Editoren avsluttet med {kode}", severity="error")
+        try:
+            commit_manuelt(rot, self.config.meg)
+        except (OSError, subprocess.CalledProcessError) as e:
+            self.notify(f"Kunne ikke committe Kunnskapsbasen: {e}", severity="error")
+
+    def i_terminal(self, argv: list[str]) -> int | None:
+        """Kjører `argv` med TUI-en suspendert. None hvis den ikke kunne startes."""
+        try:
+            with self.suspend():
+                return subprocess.call(argv)
+        except (OSError, SuspendNotSupported) as e:
+            self.notify(f"Kunne ikke åpne editor: {e}", severity="error")
+            return None
+
     def rediger_i_editor(self, tekst: str) -> str | None:
         """$EDITOR via suspend, markøren på første plassholder. None hvis editoren feilet."""
         linje, kol = første_plassholder(tekst)
@@ -702,17 +780,24 @@ class Tower(App):
         deler = [f"[b red]✗ {k}:[/] {escape(v)}" for k, v in self.hentfeil.items()]
         if self.agenter.feil:
             deler.append(f"[b red]✗ {escape(self.agenter.feil)}[/]")
-        kjører = [j.etikett for j, _ in self.agenter.kjørende.values()]
+        if self.kurator_feilet:
+            deler.append(f"[b red]✗ kurator:[/] {escape(self.kurator_feilet[-1].feil or '')}")
+        kjører = [j.etikett for a in (self.agenter, self.kurator) for j, _ in a.kjørende.values()]
         if kjører:
-            kø = f"  [dim]+{len(self.agenter.kø)} i kø[/]" if self.agenter.kø else ""
+            n = len(self.agenter.kø) + len(self.kurator.kø)
+            kø = f"  [dim]+{n} i kø[/]" if n else ""
             deler.append(f"[magenta]{SPINNER[self._tikk % len(SPINNER)]}[/] {escape(' · '.join(kjører))}{kø}")
         elif not deler:
             deler.append("[dim]agenter i ro[/]")
         aktive = sum(1 for r in self.rader.values() if r.status not in FERDIG)
         klare = sum(1 for r in self.rader.values() if r.status not in FERDIG and r.utkast and r.utkast.status == KLART)
+        kb = ""
+        if self.kb_siste:
+            emne, tid = self.kb_siste
+            kb = f"   [dim]│  kb: {escape(emne.removeprefix('kurator: ')[:30])} {alder(tid, self.nå())}[/]"
         self.query_one("#status", Static).update(
             f"{'  '.join(deler)}   [dim]│[/]  {aktive} tråder venter   [dim]│[/]  {klare} utkast klare"
-            f"   [dim]│[/]  ${self.kost:.3f} i dag")
+            f"   [dim]│[/]  ${self.kost:.3f} i dag{kb}")
 
 
 def main(argv: list[str] | None = None) -> None:

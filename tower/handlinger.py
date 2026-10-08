@@ -46,3 +46,8 @@ def editor_argv(sti: Path, linje: int, kol: int, editor: str | None = None) -> l
     if navn in ("emacs", "emacsclient", "micro"):
         return [*argv, f"+{linje}:{kol}", str(sti)]
     return [*argv, str(sti)]
+
+
+def katalog_argv(sti: Path, editor: str | None = None) -> list[str]:
+    """`$VISUAL`/`$EDITOR` på en katalog (Kunnskapsbasen)."""
+    return [*shlex.split(editor or os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"), str(sti)]
