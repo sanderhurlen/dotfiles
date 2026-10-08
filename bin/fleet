@@ -61,6 +61,7 @@ globals().update({k: getattr(wf, k) for k in from_wf})
 A, ts, ago, rest, me = wp.A, wp.ts, wp.ago, wr.rest, wr.me
 
 STATES = ("Doing", "To Do")
+OLD = 45  # days: work items created before this only show as one row that opens their query
 REFRESH = 15  # seconds between data refreshes
 SKIP = "--dangerously-skip-permissions"  # every agent fleet starts, and every one dispatched from agent view
 AGENTS = f"claude agents {SKIP}"
@@ -163,12 +164,26 @@ def unfold(m):
     m.done_children = sum(k.done for k in kids)
 
 
+class Old:
+    """The one row for my To Do/Doing work items older than OLD days: enter opens their query."""
+    def __init__(self, n):
+        self.n, self.id, self.key, self.title = n, None, "fleet-old", f"{n} gamle work items tildelt meg"
+        self.url = f"{A().org}/{urllib.parse.quote(A().project)}/_queries/query/?wiql=" \
+            + urllib.parse.quote(wiql(f"[System.CreatedDate] < @Today - {OLD}"))
+
+
+def wiql(when):
+    return ("SELECT [System.Id], [System.WorkItemType], [System.Title], [System.State], [System.CreatedDate], "
+            "[System.TeamProject] FROM WorkItems WHERE [System.AssignedTo] = @Me AND [System.State] IN ("
+            + ", ".join(f"'{s}'" for s in STATES) + f") AND {when} ORDER BY [System.CreatedDate] DESC")
+
+
 def work():
-    """My work items in To Do/Doing across the org: bugs first, then Doing, then by id. Tasks
-    under a map or spec only show as its children; the parent is listed even if not mine."""
-    q = ("SELECT [System.Id] FROM WorkItems WHERE [System.AssignedTo] = @Me AND [System.State] IN ("
-         + ", ".join(f"'{s}'" for s in STATES) + ") ORDER BY [System.Id]")
-    ids = [w["id"] for w in rest("wit/wiql", {"query": q}, scope="org")["workItems"]]
+    """(items, Old): my work items in To Do/Doing across the org created the last OLD days: bugs
+    first, then Doing, then by id. Tasks under a map or spec only show as its children; the parent
+    is listed even if not mine."""
+    q = lambda when: [w["id"] for w in rest("wit/wiql", {"query": wiql(when)}, scope="org")["workItems"]]
+    ids, old = q(f"[System.CreatedDate] >= @Today - {OLD}"), Old(len(q(f"[System.CreatedDate] < @Today - {OLD}")))
     wf._cache.clear()
     its = wf.many(ids)
     wf.fetch([p for t in its for p in t.links(wf.PARENT)])
@@ -183,7 +198,7 @@ def work():
     for m in folds:
         unfold(m)
     return sorted(items, key=lambda w: (w.type.lower() != "bug",
-                                        STATES.index(w.state) if w.state in STATES else 9, w.id))
+                                        STATES.index(w.state) if w.state in STATES else 9, w.id)), old
 
 
 class Review:
@@ -333,7 +348,8 @@ def stop(o):
 
 
 class Snapshot:
-    def __init__(self, items=(), prs=(), agents_=None, at=0.0, error="", mine_=()):
+    def __init__(self, items=(), prs=(), agents_=None, at=0.0, error="", mine_=(), old=None):
+        self.old = old  # Old, or None before the first fetch
         self.items, self.prs, self.agents, self.at, self.error = list(items), list(prs), agents_ or {}, at, error
         self.mine = list(mine_)  # Mine
         self.orphans = []  # Orphan
@@ -346,7 +362,8 @@ def snapshot(everyone, clean=False):
     raw = sessions()
     try:
         prs = active()
-        s = Snapshot(work(), reviews(prs, everyone), agents(raw), time.time(), mine_=mine(prs))
+        items, old = work()
+        s = Snapshot(items, reviews(prs, everyone), agents(raw), time.time(), mine_=mine(prs), old=old)
         others = reviews(prs, True)
     except RuntimeError as e:
         return Snapshot(at=time.time(), error=str(e))
@@ -1019,6 +1036,8 @@ def lines(snap, everyone, open_=()):
                 out.append(([(" " * pad + "└ ingen åpne tickets", "dim")], None))
     if not snap.items:
         out.append(([("  ingen", "dim")], None))
+    if snap.old and snap.old.n:
+        out.append(([(f"… {snap.old.title} (eldre enn {OLD} dager)", "dim"), ("  → åpne query", "dim")], snap.old))
     out.append(([], None))
     who = "alle andres" if everyone else "der jeg er reviewer"
     out.append(([(f"PRer uten min godkjenning · {who} ({len(snap.prs)})", "bold")], None))
@@ -1092,6 +1111,7 @@ def write_state(snap, everyone, open_=(), cur=None, msg=""):
         "updated": now, "dataAt": snap.at, "error": snap.error or None, "message": msg or None,
         "allPrs": everyone, "selected": cur.key if cur else None, "unfoldedMaps": sorted(open_),
         "workItems": [work_json(snap, w) for w in snap.items],
+        "oldWorkItems": {"count": snap.old.n, "query": snap.old.url} if snap.old else None,
         "pullRequests": [{"id": r.id, "title": r.title, "project": r.project, "repo": r.repo,
                           "author": r.who, "source": r.source, "target": r.target, "url": r.url,
                           "imReviewer": r.asked, "myVote": r.vote, "agent": r.key,
@@ -1368,6 +1388,9 @@ def tui(scr, a):
                 pop = opt[2]()
             else:
                 act(opt[2])
+        elif isinstance(cur, Old):
+            if k in (10, 13, curses.KEY_ENTER):
+                subprocess.run(["open", cur.url])
         elif k == ord("m"):
             pop = menu(cur)
         elif isinstance(cur, (Cleanup, Orphan)) and k in (10, 13, curses.KEY_ENTER, ord("v")):
@@ -1461,7 +1484,7 @@ def cmd_prune(a):
         return run_action(end, o)
     try:
         prs = active()
-        flat = work()
+        flat = work()[0]
         flat += [t for m in flat for t in m.children]
         keys = {x.key for x in flat + reviews(prs, True) + mine(prs)}
     except RuntimeError as e:
