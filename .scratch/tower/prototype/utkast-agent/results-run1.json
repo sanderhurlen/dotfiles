@@ -1,0 +1,1564 @@
+{
+ "modeller": [
+  "haiku",
+  "sonnet"
+ ],
+ "res": {
+  "mail:nordlys-erp": {
+   "triage": {
+    "haiku": {
+     "svar": {
+      "kategori": "svar",
+      "haster": false,
+      "sammendrag": "Status ERP-integrasjon Nordlys – konkret dato før styremøte om 2 uker",
+      "begrunnelse": "Direkte kundehenvendelse som krever statusoppdatering og informasjon om avhengigheter (testtilgang)."
+     },
+     "sek": 9.8,
+     "usd": 0.0061,
+     "tokens": {
+      "input_tokens": 2017,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 825,
+      "output_tokens_details": {
+       "thinking_tokens": 653
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 0,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2017,
+        "output_tokens": 825,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    },
+    "sonnet": {
+     "svar": {
+      "kategori": "svar",
+      "haster": false,
+      "sammendrag": "Kari spør om konkret dato for ERP-integrasjon og hva vi venter på",
+      "begrunnelse": "Kari spør Sander direkte om dato og avhengigheter før styremøte om to uker; svar er ønskelig, men ikke akutt."
+     },
+     "sek": 3.6,
+     "usd": 0.0102,
+     "tokens": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 2049,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 202,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 2049,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 202,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 2049,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 2049
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    }
+   },
+   "utkast": {
+    "haiku": {
+     "svar": {
+      "tekst": "Hei Kari,\n\nPlanlagt levering er uke 46. Vi venter på testtilgang til deres ERP-miljø – bestilt 20. september, men ikke mottatt ennå. Kan dere sjekke status på det?\n\nMvh\nSander",
+      "sjekk": []
+     },
+     "sek": 11.3,
+     "usd": 0.0064,
+     "tokens": {
+      "input_tokens": 2030,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 878,
+      "output_tokens_details": {
+       "thinking_tokens": 732
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 0,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2030,
+        "output_tokens": 878,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    },
+    "sonnet": {
+     "svar": {
+      "tekst": "Hei Kari,\n\nPlanlagt levering er uke 46. Den forutsetter at vi får testtilgang til ERP-miljøet deres. Vi bestilte den 20. september og har ikke fått den ennå, så det er det vi venter på fra dere. Kan du hjelpe oss å få den på plass?\n\nProsjektet ligger ellers godt an: ca. 55 % fremdrift, og vi har brukt ca. 60 % av budsjettet.\n\nMvh Sander",
+      "sjekk": [
+       "Bekreft at uke 46 fortsatt holder, gitt at testtilgangen fortsatt mangler (kan flytte seg om den ikke kommer snart).",
+       "Vurder om du vil dele fremdrift (55 %) og budsjettforbruk (ca. 60 %) med kunden, eller fjerne det siste avsnittet.",
+       "Ev. legg til hvem hos Nordlys testtilgangen er bestilt hos, eller en frist for når den må være på plass."
+      ]
+     },
+     "sek": 4.8,
+     "usd": 0.0124,
+     "tokens": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 2091,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 404,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 2091,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 404,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 2091,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 2091
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    }
+   }
+  },
+  "mail:harbor-outage": {
+   "triage": {
+    "haiku": {
+     "svar": {
+      "kategori": "svar",
+      "haster": true,
+      "sammendrag": "Harbor Logistics: /v2/shipments API returnerer 500 siden 07:00",
+      "begrunnelse": "Kritisk driftsstans som påvirker kundens warehouse-operasjoner i dag."
+     },
+     "sek": 8.4,
+     "usd": 0.0053,
+     "tokens": {
+      "input_tokens": 1978,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 665,
+      "output_tokens_details": {
+       "thinking_tokens": 510
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 0,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 1978,
+        "output_tokens": 665,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    },
+    "sonnet": {
+     "svar": {
+      "kategori": "svar",
+      "haster": true,
+      "sammendrag": "Harbor: /v2/shipments gir 500 siden 07:00, lager stopper. Trenger ETA nå.",
+      "begrunnelse": "Driftsstans hos kunde på /v2-API, Sander er i kopi og saken haster i dag; støtte må også opprette saksnummer."
+     },
+     "sek": 3.6,
+     "usd": 0.0069,
+     "tokens": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 1150,
+      "cache_read_input_tokens": 866,
+      "output_tokens": 214,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 1150,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 214,
+        "cache_read_input_tokens": 866,
+        "cache_creation_input_tokens": 1150,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 1150
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    }
+   },
+   "utkast": {
+    "haiku": {
+     "svar": {
+      "tekst": "Hi James,\n\nThis is critical - we're on it now. I'm investigating the 500 errors on /v2/shipments immediately.\n\nI'll update you as soon as I have findings and a timeline.\n\nMvh\nSander",
+      "sjekk": []
+     },
+     "sek": 34.1,
+     "usd": 0.0174,
+     "tokens": {
+      "input_tokens": 1991,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 3079,
+      "output_tokens_details": {
+       "thinking_tokens": 2912
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 0,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 1991,
+        "output_tokens": 3079,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    },
+    "sonnet": {
+     "svar": {
+      "tekst": "Hi James,\n\nWe're looking into it now. I can't confirm the cause or give an ETA yet, but I'll update you as soon as I know more, expected by [[time of next update]].\n\nSupport will register this under a case number, which you'll receive from support@visense.no: [[case number]].\n\nCould you send an example request with timestamp and the response body (and request ID if you get one) for a failing /v2/shipments call? That will speed things up.\n\nMvh Sander",
+      "sjekk": [
+       "Fyll inn tidspunkt for neste oppdatering",
+       "Saksnummer fra support@visense.no må opprettes/fylles inn",
+       "Verifiser om feilen er kjent/bekreftet hos oss før sending; svaret hevder ingen årsak eller ETA",
+       "Svaret er på engelsk fordi James skrev engelsk"
+      ]
+     },
+     "sek": 5.0,
+     "usd": 0.0082,
+     "tokens": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 1150,
+      "cache_read_input_tokens": 908,
+      "output_tokens": 337,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 1150,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 337,
+        "cache_read_input_tokens": 908,
+        "cache_creation_input_tokens": 1150,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 1150
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    }
+   }
+  },
+  "teams:ola-pr": {
+   "triage": {
+    "haiku": {
+     "svar": {
+      "kategori": "svar",
+      "haster": false,
+      "sammendrag": "Ola trenger hjelp til PR rapport-eksport (testing står fast)",
+      "begrunnelse": "Direkte spørsmål om code review og teknisk assistanse på en PR."
+     },
+     "sek": 8.8,
+     "usd": 0.0053,
+     "tokens": {
+      "input_tokens": 1906,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 687,
+      "output_tokens_details": {
+       "thinking_tokens": 538
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 0,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 1906,
+        "output_tokens": 687,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    },
+    "sonnet": {
+     "svar": {
+      "kategori": "svar",
+      "haster": false,
+      "sammendrag": "Ola ber om 5 min i dag til å se på PR for rapport-eksport, står fast på tester",
+      "begrunnelse": "Ola spør Sander direkte om hjelp, men ingenting står på spill i dag."
+     },
+     "sek": 3.8,
+     "usd": 0.0063,
+     "tokens": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 1049,
+      "cache_read_input_tokens": 866,
+      "output_tokens": 189,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 1049,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 189,
+        "cache_read_input_tokens": 866,
+        "cache_creation_input_tokens": 1049,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 1049
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    }
+   },
+   "utkast": {
+    "haiku": {
+     "svar": {
+      "tekst": "link? kikker på det",
+      "sjekk": []
+     },
+     "sek": 26.4,
+     "usd": 0.0127,
+     "tokens": {
+      "input_tokens": 1919,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 2151,
+      "output_tokens_details": {
+       "thinking_tokens": 2066
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 0,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 1919,
+        "output_tokens": 2151,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    },
+    "sonnet": {
+     "svar": {
+      "tekst": "hei! ja, kan ta det [[tidspunkt i dag som passer]]. send lenke til PR-en hvis du ikke har gjort det",
+      "sjekk": [
+       "Fyll inn tidspunkt i dag Sander kan se på PR-en"
+      ]
+     },
+     "sek": 3.5,
+     "usd": 0.0059,
+     "tokens": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 1049,
+      "cache_read_input_tokens": 908,
+      "output_tokens": 153,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 1049,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 153,
+        "cache_read_input_tokens": 908,
+        "cache_creation_input_tokens": 1049,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 1049
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    }
+   }
+  },
+  "mail:ceo-status": {
+   "triage": {
+    "haiku": {
+     "svar": {
+      "kategori": "svar",
+      "haster": true,
+      "sammendrag": "Nordlys-status (risiko, budsjett) til styremøte fredag - frist torsdag",
+      "begrunnelse": "Statusrapport til styremøte med kort frist"
+     },
+     "sek": 26.4,
+     "usd": 0.0147,
+     "tokens": {
+      "input_tokens": 1972,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 2548,
+      "output_tokens_details": {
+       "thinking_tokens": 2191
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 0,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 1972,
+        "output_tokens": 2548,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    },
+    "sonnet": {
+     "svar": {
+      "kategori": "svar",
+      "haster": false,
+      "sammendrag": "Ingrid vil ha 3-4 kulepunkter om Nordlys-status (risiko, budsjett) innen torsdag.",
+      "begrunnelse": "Ingrid ber Sander direkte om en statusoppdatering med frist torsdag, altså ikke i dag."
+     },
+     "sek": 5.1,
+     "usd": 0.0068,
+     "tokens": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 1132,
+      "cache_read_input_tokens": 866,
+      "output_tokens": 209,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 1132,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 209,
+        "cache_read_input_tokens": 866,
+        "cache_creation_input_tokens": 1132,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 1132
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    }
+   },
+   "utkast": {
+    "haiku": {
+     "svar": {
+      "tekst": "Hei Ingrid,\n\nHer er status Nordlys:\n\nFremdrift 55 %, planlagt levering uke 46\n\nBudsjett: ligger over budget (brukt 60 % ved 55 % fremdrift)\n\nRisiko: venter på testtilgang til ERP-miljøet (bestilt 20. sept, ikke mottatt), [[påvirker uke 46-leveringen?]]\n\nMvh Sander",
+      "sjekk": [
+       "Påvirker testtilgang-forsinkelsen uke 46-leveringen?"
+      ]
+     },
+     "sek": 52.8,
+     "usd": 0.0286,
+     "tokens": {
+      "input_tokens": 1985,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 5320,
+      "output_tokens_details": {
+       "thinking_tokens": 5112
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 0,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 1985,
+        "output_tokens": 5320,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    },
+    "sonnet": {
+     "svar": {
+      "tekst": "Hei Ingrid,\n\nher er status på Nordlys:\n\n- Fremdrift: ca. 55 %. Planlagt levering av ERP-integrasjonen er uke 46.\n- Budsjett: brukt ca. 60 % ved 55 % fremdrift, så vi ligger litt over plan, men [[vurdering av om vi holder totalbudsjettet]].\n- Hovedrisiko: vi venter fortsatt på testtilgang til ERP-miljøet hos Nordlys Energi. Bestilt 20. sept, ikke mottatt. Uten den kan leveransen i uke 46 skli.\n- Tiltak: [[hva vi gjør for å få tilgang, f.eks. purring på Kari Nordby]].\n\nMvh Sander",
+      "sjekk": [
+       "Vurdering av om vi holder totalbudsjettet (kunnskapsbasen gir bare 60 % brukt ved 55 % fremdrift)",
+       "Tiltak/oppfølging for å få testtilgang (f.eks. purring til Kari Nordby) – ikke avtalt i tråden",
+       "Bekreft at uke 46 fortsatt er realistisk, eller angi hvor mye den kan skli"
+      ]
+     },
+     "sek": 5.2,
+     "usd": 0.0095,
+     "tokens": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 1132,
+      "cache_read_input_tokens": 908,
+      "output_tokens": 478,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 1132,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 478,
+        "cache_read_input_tokens": 908,
+        "cache_creation_input_tokens": 1132,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 1132
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    }
+   }
+  },
+  "mail:azure-newsletter": {
+   "triage": {
+    "haiku": {
+     "svar": {
+      "kategori": "info",
+      "haster": false,
+      "sammendrag": "Azure-nyhetsbrev: nye regioner, prisendringer Blob archive fra 1.1., klassiske plans avslutter 2027",
+      "begrunnelse": "Automatisk nyhetsbrev som krever ingen handling fra Sander; long timeline på de nevnte endringene."
+     },
+     "sek": 9.1,
+     "usd": 0.0056,
+     "tokens": {
+      "input_tokens": 1950,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 730,
+      "output_tokens_details": {
+       "thinking_tokens": 558
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 0,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 1950,
+        "output_tokens": 730,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    },
+    "sonnet": {
+     "svar": {
+      "kategori": "info",
+      "haster": false,
+      "sammendrag": "Azure-nyhetsbrev oktober: nye regioner, prisendring Blob archive, App Service classic utfases",
+      "begrunnelse": "Automatisk nyhetsbrev som ikke krever handling eller svar fra Sander."
+     },
+     "sek": 3.5,
+     "usd": 0.0066,
+     "tokens": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 1119,
+      "cache_read_input_tokens": 866,
+      "output_tokens": 195,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 1119,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 195,
+        "cache_read_input_tokens": 866,
+        "cache_creation_input_tokens": 1119,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 1119
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    }
+   }
+  },
+  "mail:fyi-cc": {
+   "triage": {
+    "haiku": {
+     "svar": {
+      "kategori": "info",
+      "haster": false,
+      "sammendrag": "Møtereferat oppstartsmøte Nordlys (orientering)",
+      "begrunnelse": "Sander er kun i kopi for orientering. Marte ber Kari om tilbakemelding hvis noe mangler, ikke Sander."
+     },
+     "sek": 8.3,
+     "usd": 0.0053,
+     "tokens": {
+      "input_tokens": 1966,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 672,
+      "output_tokens_details": {
+       "thinking_tokens": 506
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 0,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 1966,
+        "output_tokens": 672,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    },
+    "sonnet": {
+     "svar": {
+      "kategori": "info",
+      "haster": false,
+      "sammendrag": "Marte sendte referat fra oppstartsmøtet til Kari; Sander er kun i kopi.",
+      "begrunnelse": "Sander er bare i kopi for orientering og ingen spør ham om noe."
+     },
+     "sek": 3.1,
+     "usd": 0.0065,
+     "tokens": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 1120,
+      "cache_read_input_tokens": 866,
+      "output_tokens": 185,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 1120,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 185,
+        "cache_read_input_tokens": 866,
+        "cache_creation_input_tokens": 1120,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 1120
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    }
+   }
+  },
+  "teams:deploy-chat": {
+   "triage": {
+    "haiku": {
+     "svar": {
+      "kategori": "svar",
+      "haster": true,
+      "sammendrag": "Approve/reject release 4.2 and confirm DB migration safety before 14:00",
+      "begrunnelse": "Tom requests explicit go/no-go decision by 14:00 today; release slips to next week if missed."
+     },
+     "sek": 10.6,
+     "usd": 0.0062,
+     "tokens": {
+      "input_tokens": 1983,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 839,
+      "output_tokens_details": {
+       "thinking_tokens": 680
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 0,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 1983,
+        "output_tokens": 839,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    },
+    "sonnet": {
+     "svar": {
+      "kategori": "svar",
+      "haster": true,
+      "sammendrag": "Tom trenger go/no-go for release 4.2 før 14:00 i dag, inkl. DB-migrering",
+      "begrunnelse": "Tom spør Sander direkte om go/no-go med frist i dag kl. 14:00, ellers utsettes releasen en uke."
+     },
+     "sek": 3.2,
+     "usd": 0.0068,
+     "tokens": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 1144,
+      "cache_read_input_tokens": 866,
+      "output_tokens": 208,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 1144,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 208,
+        "cache_read_input_tokens": 866,
+        "cache_creation_input_tokens": 1144,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 1144
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    }
+   },
+   "utkast": {
+    "haiku": {
+     "svar": {
+      "tekst": "on it now. checking db migration safety - will confirm before 14",
+      "sjekk": [
+       "Verifiser at DB migration er trygg for business hours"
+      ]
+     },
+     "sek": 32.5,
+     "usd": 0.0164,
+     "tokens": {
+      "input_tokens": 1996,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 2881,
+      "output_tokens_details": {
+       "thinking_tokens": 2777
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 0,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 1996,
+        "output_tokens": 2881,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    },
+    "sonnet": {
+     "svar": {
+      "tekst": "will confirm before 14:00. haven't checked the migration yet, so can't say if it's safe to run during business hours. [[go/no-go og om DB-migrasjonen er trygg å kjøre i arbeidstid]]",
+      "sjekk": [
+       "Gå gjennom 4.2 i staging og DB-migrasjonen før du sender",
+       "Fyll inn faktisk go/no-go og vurdering av om migrasjonen er trygg i arbeidstid (låsing, varighet, rollback)",
+       "Må avklares før kl. 14:00 i dag"
+      ]
+     },
+     "sek": 4.4,
+     "usd": 0.0073,
+     "tokens": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 1144,
+      "cache_read_input_tokens": 908,
+      "output_tokens": 253,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 1144,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 253,
+        "cache_read_input_tokens": 908,
+        "cache_creation_input_tokens": 1144,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 1144
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    }
+   }
+  },
+  "mail:pris-kontrakt": {
+   "triage": {
+    "haiku": {
+     "svar": {
+      "kategori": "svar",
+      "haster": false,
+      "sammendrag": "Fjellbygg spør om pris og vilkår for døgn-support fra 1. nov",
+      "begrunnelse": "Direkte kundehenvendelse med konkrete kommersielle spørsmål som krever svar."
+     },
+     "sek": 7.7,
+     "usd": 0.005,
+     "tokens": {
+      "input_tokens": 1989,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 602,
+      "output_tokens_details": {
+       "thinking_tokens": 440
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 0,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 1989,
+        "output_tokens": 602,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    },
+    "sonnet": {
+     "svar": {
+      "kategori": "svar",
+      "haster": false,
+      "sammendrag": "Per Aas (Fjellbygg) vil ha pris, bindingstid og start 1. nov for døgnsupport.",
+      "begrunnelse": "Kunden spør Sander direkte om pris og vilkår, men ingenting står på spill i dag."
+     },
+     "sek": 4.7,
+     "usd": 0.0068,
+     "tokens": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 1156,
+      "cache_read_input_tokens": 866,
+      "output_tokens": 200,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 1156,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 200,
+        "cache_read_input_tokens": 866,
+        "cache_creation_input_tokens": 1156,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 1156
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    }
+   },
+   "utkast": {
+    "haiku": {
+     "svar": {
+      "tekst": "Hei Per,\n\nJeg sjekker prisene og vilkårene for utvidet døgnstøtte, og kommer tilbake til deg.\n\nMvh Sander",
+      "sjekk": [
+       "Pris per måned for 24/7 support",
+       "Bindingstid",
+       "Mulighet for oppstart 1. november"
+      ]
+     },
+     "sek": 15.1,
+     "usd": 0.0083,
+     "tokens": {
+      "input_tokens": 2002,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 1259,
+      "output_tokens_details": {
+       "thinking_tokens": 1108
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 0,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2002,
+        "output_tokens": 1259,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    },
+    "sonnet": {
+     "svar": {
+      "tekst": "Hei Per,\n\nPris for døgnkontinuerlig support er [[pris per måned]], og bindingstiden er [[bindingstid]]. Oppstart 1. november [[bekreft om 1. november er mulig]].\n\nMvh Sander",
+      "sjekk": [
+       "Pris per måned for support døgnet rundt (finnes ikke i kunnskapsbasen)",
+       "Bindingstid for utvidet avtale",
+       "Bekreft om oppstart 1. november er mulig",
+       "Fjellbygg AS er ikke nevnt i kunnskapsbasen: sjekk eksisterende supportavtale og vilkår"
+      ]
+     },
+     "sek": 4.0,
+     "usd": 0.0076,
+     "tokens": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 1156,
+      "cache_read_input_tokens": 908,
+      "output_tokens": 280,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 1156,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 280,
+        "cache_read_input_tokens": 908,
+        "cache_creation_input_tokens": 1156,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 1156
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    }
+   }
+  },
+  "teams:ingrid-ring": {
+   "triage": {
+    "haiku": {
+     "svar": {
+      "kategori": "svar",
+      "haster": false,
+      "sammendrag": "Ingrid Solheim ber deg ringe henne",
+      "begrunnelse": "Direktespørsmål krever handling fra Sander, men ingen urgency angitt."
+     },
+     "sek": 7.1,
+     "usd": 0.0044,
+     "tokens": {
+      "input_tokens": 1889,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 507,
+      "output_tokens_details": {
+       "thinking_tokens": 360
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 0,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 1889,
+        "output_tokens": 507,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    },
+    "sonnet": {
+     "svar": {
+      "kategori": "svar",
+      "haster": false,
+      "sammendrag": "Ingrid Solheim ber deg ringe henne når du har tid.",
+      "begrunnelse": "Ingrid ber direkte om en telefonsamtale, men det oppgis ingen frist eller hast."
+     },
+     "sek": 3.6,
+     "usd": 0.0062,
+     "tokens": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 1031,
+      "cache_read_input_tokens": 866,
+      "output_tokens": 185,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 1031,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 185,
+        "cache_read_input_tokens": 866,
+        "cache_creation_input_tokens": 1031,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 1031
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    }
+   },
+   "utkast": {
+    "haiku": {
+     "svar": {
+      "tekst": "ok, ringer deg",
+      "sjekk": []
+     },
+     "sek": 14.6,
+     "usd": 0.0076,
+     "tokens": {
+      "input_tokens": 1902,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 1131,
+      "output_tokens_details": {
+       "thinking_tokens": 1050
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 0,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 1902,
+        "output_tokens": 1131,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    },
+    "sonnet": {
+     "svar": {
+      "tekst": "ringer deg om litt, [[tidspunkt]]",
+      "sjekk": [
+       "Fyll inn når du kan ringe, eller endre til at du ringer nå. Tråden sier ikke hva det gjelder."
+      ]
+     },
+     "sek": 3.7,
+     "usd": 0.0057,
+     "tokens": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 1031,
+      "cache_read_input_tokens": 908,
+      "output_tokens": 140,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 1031,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 140,
+        "cache_read_input_tokens": 908,
+        "cache_creation_input_tokens": 1031,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 1031
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    }
+   }
+  },
+  "mail:takk-passer": {
+   "triage": {
+    "haiku": {
+     "svar": {
+      "kategori": "info",
+      "haster": false,
+      "sammendrag": "Nordlys workshop 15.10 kl 09-12 bekreftet av Kari.",
+      "begrunnelse": "Kari har bekreftet avtalen – ingen handling nødvendig fra Sander."
+     },
+     "sek": 8.5,
+     "usd": 0.0054,
+     "tokens": {
+      "input_tokens": 1997,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 677,
+      "output_tokens_details": {
+       "thinking_tokens": 520
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 0,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 1997,
+        "output_tokens": 677,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 0
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    },
+    "sonnet": {
+     "svar": {
+      "kategori": "info",
+      "haster": false,
+      "sammendrag": "Kari bekreftet workshop 15. oktober kl 09-12 hos Nordlys.",
+      "begrunnelse": "Kari bekrefter avtalen med «det passer fint», så det kreves ingen handling eller svar."
+     },
+     "sek": 7.3,
+     "usd": 0.0067,
+     "tokens": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 1153,
+      "cache_read_input_tokens": 866,
+      "output_tokens": 191,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "server_tool_use": {
+       "web_search_requests": 0,
+       "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+       "ephemeral_1h_input_tokens": 1153,
+       "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 191,
+        "cache_read_input_tokens": 866,
+        "cache_creation_input_tokens": 1153,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 1153
+        },
+        "type": "message"
+       }
+      ],
+      "speed": "standard",
+      "fallback_credit": null
+     }
+    }
+   }
+  }
+ }
+}

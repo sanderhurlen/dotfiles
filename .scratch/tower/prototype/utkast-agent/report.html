@@ -1,0 +1,123 @@
+<!doctype html><meta charset=utf-8><title>Utkast-agent prototype</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--card:#f5f5f2;--line:#ddd;--hl:#e8f0ff}
+@media (prefers-color-scheme:dark){:root{--bg:#16161a;--fg:#e6e6e6;--mut:#999;--card:#222228;--line:#333;--hl:#1e2a40}}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui;max-width:1200px;margin:auto;padding:16px}
+h2 small{color:var(--mut);font-weight:normal;font-size:13px} table{width:100%;border-collapse:collapse;table-layout:fixed}
+td,th{border:1px solid var(--line);padding:8px;vertical-align:top;text-align:left} th:first-child{width:70px}
+pre{white-space:pre-wrap;font:14px/1.45 ui-monospace,monospace;margin:0} .meta{color:var(--mut);font-size:12px;margin-top:4px}
+.msg{background:var(--card);padding:8px;margin:6px 0;border-radius:6px} .msg.meg{background:var(--hl)}
+.feil{color:#c33} .hast{color:#d60} .sjekk{color:#b70;font-size:13px} section{margin-bottom:32px}
+</style>
+<h1>PROTOTYPE · triage + utkast</h1><p>Kost (estimat): sonnet $0.128</p>
+<section><h2>Status på ERP-integrasjonen <small>mail · forventet: svar</small></h2>
+<details><summary>Tråd (1 meldinger)</summary><div class='msg'><div class=meta>2026-10-06 14:12 · Kari Nordby &lt;kari.nordby@nordlys-energi.no&gt;</div><pre>Hei Sander,
+
+Vi har styremøte om to uker og jeg blir sikkert spurt om når integrasjonen mot ERP-systemet vårt er klar til bruk. Sist vi snakket nevnte du høsten, men har dere en mer konkret dato nå? Og er det noe dere venter på fra oss?
+
+Mvh
+Kari Nordby
+IT-leder, Nordlys Energi AS</pre></div></details>
+<table><tr><th></th><th>sonnet</th></tr>
+<tr><th>Triage</th><td><b>svar</b><br>Kari spør om konkret dato for ERP-integrasjon og hva vi venter på<br><i>Kunden spør Sander direkte om leveringsdato (uke 46) og hva vi venter på (testtilgang bestilt 20. sept), men fristen er styremøte om to uker.</i><div class=meta>4.3s · $0.0071</div></td></tr>
+<tr><th>Utkast</th><td><pre>Hei Kari,
+
+Planlagt levering er uke 46. Vi venter fortsatt på testtilgang til ERP-miljøet deres. Den ble bestilt 20. september, og vi har ikke mottatt den. Kan du følge opp den internt? Uten tilgangen kan vi ikke teste ferdig mot systemet deres, og da er uke 46 usikker.
+
+--
+Sander
+Visense</pre><ul class=sjekk><li>Bekreft at uke 46 fortsatt er riktig å love utad, gitt at testtilgangen mangler</li><li>Eventuelt legg til hvem hos Nordlys som har bestilt/skal levere testtilgangen, hvis kjent</li></ul><div class=meta>7.3s · $0.0135</div></td></tr>
+</table></section><section><h2>URGENT: API returning 500 errors since 07:00 <small>mail · forventet: svar · haster</small></h2>
+<details><summary>Tråd (1 meldinger)</summary><div class='msg'><div class=meta>2026-10-07 08:41 · James Whitfield &lt;j.whitfield@harborlogistics.com&gt;</div><pre>Hi team,
+
+Since about 07:00 CET every call to /v2/shipments returns HTTP 500. Our warehouse can&#x27;t print labels and trucks are queuing. Is this a known issue? We need an ETA asap.
+
+James Whitfield
+Head of Operations, Harbor Logistics</pre></div></details>
+<table><tr><th></th><th>sonnet</th></tr>
+<tr><th>Triage</th><td><b>svar</b> · <b class=hast>haster</b><br>Harbor: /v2/shipments gir 500 siden 07:00, lagerstans. Trenger ETA nå.<br><i>Kunde på /v2 har driftsstans (etiketter, lastebiler i kø), og Sander som teknisk ansvarlig må svare med status/ETA.</i><div class=meta>3.8s · $0.007</div></td></tr>
+<tr><th>Utkast</th><td><pre>Hi James,
+
+Thanks for flagging. We&#x27;re looking into the 500 errors on /v2/shipments now. I can&#x27;t confirm a cause or ETA yet, but I&#x27;ll update you as soon as we know more: next update by [[tidspunkt for neste oppdatering]].
+
+Support will register this and send you a case number shortly: [[saksnummer fra support@visense.no]].
+
+--
+Sander
+Visense</pre><ul class=sjekk><li>Bekreft at dere faktisk undersøker feilen og at det er riktig å love oppdatering</li><li>Fyll inn tidspunkt for neste oppdatering</li><li>Fyll inn saksnummer fra support@visense.no (Harbor-henvendelser skal ha saksnummer)</li><li>Legg til årsak/ETA hvis det blir kjent før sending</li></ul><div class=meta>4.2s · $0.0124</div></td></tr>
+</table></section><section><h2>Ola Berg <small>teams · forventet: svar</small></h2>
+<details><summary>Tråd (1 meldinger)</summary><div class='msg'><div class=meta>2026-10-07 09:55 · Ola Berg</div><pre>heia! har du 5 min i dag til å se på PR-en min for rapport-eksporten? står litt fast på testene</pre></div></details>
+<table><tr><th></th><th>sonnet</th></tr>
+<tr><th>Triage</th><td><b>svar</b><br>Ola ber deg se på PR-en for rapport-eksporten i dag, står fast på testene<br><i>Ola spør Sander direkte om hjelp med PR, men ingen driftsstans eller hard frist står på spill.</i><div class=meta>3.2s · $0.0064</div></td></tr>
+<tr><th>Utkast</th><td><pre>hei! ja, kan se på den i dag. passer det kl [[tidspunkt]]? send lenke til PR-en, og si hvilke tester som feiler</pre><ul class=sjekk><li>Fyll inn tidspunkt i dag for når du kan se på PR-en</li></ul><div class=meta>3.5s · $0.006</div></td></tr>
+</table></section><section><h2>Kort status Nordlys før styremøtet <small>mail · forventet: svar</small></h2>
+<details><summary>Tråd (1 meldinger)</summary><div class='msg'><div class=meta>2026-10-07 07:30 · Ingrid Solheim &lt;ingrid@visense.no&gt;</div><pre>Hei Sander, kan du sende meg 3-4 kulepunkter om status på Nordlys-prosjektet innen torsdag? Skal ha det med i styrepresentasjonen fredag. Særlig risiko og om vi holder budsjett.
+
+Ingrid</pre></div></details>
+<table><tr><th></th><th>sonnet</th></tr>
+<tr><th>Triage</th><td><b>svar</b><br>Ingrid vil ha 3-4 kulepunkter om Nordlys (risiko, budsjett) innen torsdag.<br><i>Ingrid ber Sander direkte om statuspunkter med frist torsdag, altså ikke i dag.</i><div class=meta>4.0s · $0.0068</div></td></tr>
+<tr><th>Utkast</th><td><pre>Hei Ingrid,
+
+her er status på Nordlys:
+
+- Omfang: ERP-integrasjon for Nordlys Energi AS, planlagt levering uke 46.
+- Fremdrift: ca. 55 %.
+- Budsjett: brukt ca. 60 % ved 55 % fremdrift, litt over plan.
+- Risiko: Vi venter fortsatt på testtilgang til ERP-miljøet deres, bestilt 20. sept og ikke mottatt. Uten den er uke 46 i fare. [[Sanders vurdering av om uke 46 holder, og eventuell eskalering mot Kari Nordby]]
+
+--
+Sander
+Visense</pre><ul class=sjekk><li>Bekreft at 55 % fremdrift og 60 % budsjettforbruk fortsatt stemmer per i dag</li><li>Fyll inn vurdering av om uke 46 holder og om du eskalerer mot Kari Nordby</li><li>Vurder om budsjettet ser ut til å holde ved slutt (prognose), den finnes ikke i kunnskapsbasen</li></ul><div class=meta>5.4s · $0.0091</div></td></tr>
+</table></section><section><h2>Azure updates: October 2026 <small>mail · forventet: info</small></h2>
+<details><summary>Tråd (1 meldinger)</summary><div class='msg'><div class=meta>2026-10-05 18:00 · Microsoft Azure &lt;azure-noreply@microsoft.com&gt;</div><pre>This month in Azure: General availability of new regions, price changes for Blob archive tier from 1 January, and retirement of classic App Service plans in 2027. Read more on the Azure blog. You are receiving this email because you subscribed to Azure updates.</pre></div></details>
+<table><tr><th></th><th>sonnet</th></tr>
+<tr><th>Triage</th><td><b>info</b><br>Azure-nyhetsbrev oktober: nye regioner, prisendring Blob archive, App Service classic utfases 2027<br><i>Automatisk nyhetsbrev som ikke krever handling eller svar fra Sander.</i><div class=meta>3.2s · $0.0067</div></td></tr>
+
+</table></section><section><h2>Re: Møtereferat oppstartsmøte <small>mail · forventet: info</small></h2>
+<details><summary>Tråd (1 meldinger)</summary><div class='msg'><div class=meta>2026-10-06 16:20 · Marte Lie &lt;marte@visense.no&gt;</div><pre>Hei Kari,
+
+Vedlagt referat fra oppstartsmøtet. Sander er i kopi for orientering. Gi beskjed om noe mangler.
+
+Hilsen Marte</pre></div></details>
+<table><tr><th></th><th>sonnet</th></tr>
+<tr><th>Triage</th><td><b>info</b><br>Marte sendte referat fra oppstartsmøtet til Kari; Sander er i kopi.<br><i>Sander er bare i kopi for orientering, og ingen spør ham om noe.</i><div class=meta>3.2s · $0.0065</div></td></tr>
+
+</table></section><section><h2>Release 4.2 <small>teams · forventet: svar · haster</small></h2>
+<details><summary>Tråd (3 meldinger)</summary><div class='msg'><div class=meta>2026-10-07 10:02 · Priya Nair</div><pre>Release 4.2 is ready in staging, all tests green.</pre></div><div class='msg meg'><div class=meta>2026-10-07 10:05 · Sander Hurlen</div><pre>nice, I&#x27;ll take a look after lunch</pre></div><div class='msg'><div class=meta>2026-10-07 11:40 · Tom Hansen</div><pre>@Sander we need a go/no-go before 14:00 today, otherwise it slips to next week. Can you confirm the DB migration is safe to run during business hours?</pre></div></details>
+<table><tr><th></th><th>sonnet</th></tr>
+<tr><th>Triage</th><td><b>svar</b> · <b class=hast>haster</b><br>Tom trenger go/no-go på release 4.2 og DB-migrering innen kl. 14 i dag.<br><i>Tom spør Sander direkte om go/no-go med frist i dag kl. 14, ellers utsettes releasen en uke.</i><div class=meta>5.7s · $0.0068</div></td></tr>
+<tr><th>Utkast</th><td><pre>I&#x27;ll check the migration after lunch and confirm before 14:00. Right now I can&#x27;t say whether it&#x27;s safe to run during business hours: [[go/no-go for the DB migration during business hours]]</pre><ul class=sjekk><li>Fyll inn faktisk vurdering: er DB-migreringen trygg å kjøre i arbeidstiden (go/no-go)? Sjekk migreringen i staging først.</li><li>Bekreft at du rekker å svare før kl. 14:00.</li></ul><div class=meta>4.1s · $0.0071</div></td></tr>
+</table></section><section><h2>Spørsmål om pris for utvidet support <small>mail · forventet: svar</small></h2>
+<details><summary>Tråd (1 meldinger)</summary><div class='msg'><div class=meta>2026-10-06 11:03 · Per Aas &lt;per.aas@fjellbygg.no&gt;</div><pre>Hei,
+
+Vi vurderer å utvide supportavtalen til å gjelde døgnet rundt. Hva vil det koste per måned, og hvor lang bindingstid blir det? Kan vi i så fall starte fra 1. november?
+
+Med vennlig hilsen
+Per Aas
+Daglig leder, Fjellbygg AS</pre></div></details>
+<table><tr><th></th><th>sonnet</th></tr>
+<tr><th>Triage</th><td><b>svar</b><br>Per Aas (Fjellbygg) vil ha pris, bindingstid og start 1. nov for døgnsupport<br><i>Kunden spør Sander direkte om pris og vilkår, men ingenting står på spill i dag.</i><div class=meta>3.5s · $0.0068</div></td></tr>
+<tr><th>Utkast</th><td><pre>Hei Per,
+
+Månedspris for support døgnet rundt er [[pris per måned]], og bindingstiden er [[bindingstid]]. Oppstart 1. november [[bekreft om 1. november er mulig]].
+
+--
+Sander
+Visense</pre><ul class=sjekk><li>Pris per måned for døgnrundt-support</li><li>Bindingstid</li><li>Bekreft om oppstart 1. november er mulig</li></ul><div class=meta>4.8s · $0.0069</div></td></tr>
+</table></section><section><h2>Ingrid Solheim <small>teams · forventet: svar</small></h2>
+<details><summary>Tråd (1 meldinger)</summary><div class='msg'><div class=meta>2026-10-07 12:15 · Ingrid Solheim</div><pre>Ring meg når du har et øyeblikk</pre></div></details>
+<table><tr><th></th><th>sonnet</th></tr>
+<tr><th>Triage</th><td><b>svar</b><br>Ingrid Solheim ber deg ringe henne når du har tid<br><i>Ingrid ber direkte om en telefonoppringning, men nevner ingen frist eller hast.</i><div class=meta>5.1s · $0.0061</div></td></tr>
+<tr><th>Utkast</th><td><pre>kan ikke ringe nå, skriv gjerne her hva det gjelder, så svarer jeg så fort jeg kan</pre><div class=meta>3.3s · $0.0056</div></td></tr>
+</table></section><section><h2>Re: Workshop 15. oktober <small>mail · forventet: info</small></h2>
+<details><summary>Tråd (2 meldinger)</summary><div class='msg meg'><div class=meta>2026-10-06 09:00 · Sander Hurlen &lt;sander@visense.no&gt;</div><pre>Hei Kari,
+
+Forslag: workshop 15. oktober kl 09-12 hos dere. Passer det?
+
+Mvh Sander</pre></div><div class='msg'><div class=meta>2026-10-06 13:45 · Kari Nordby &lt;kari.nordby@nordlys-energi.no&gt;</div><pre>Takk, det passer fint. Vi ses!
+
+Kari</pre></div></details>
+<table><tr><th></th><th>sonnet</th></tr>
+<tr><th>Triage</th><td><b>info</b><br>Kari bekrefter workshop 15. oktober kl 09-12 hos Nordlys.<br><i>Kari bekrefter bare at tidspunktet passer, så det krever ingen handling fra Sander.</i><div class=meta>4.4s · $0.0067</div></td></tr>
+
+</table></section>

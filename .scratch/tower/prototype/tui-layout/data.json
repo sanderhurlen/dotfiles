@@ -1,0 +1,319 @@
+[
+ {
+  "id": "mail:nordlys-erp",
+  "kanal": "mail",
+  "emne": "Status på ERP-integrasjonen",
+  "meldinger": [
+   {
+    "fra": "Kari Nordby <kari.nordby@nordlys-energi.no>",
+    "til": "sander@visense.no",
+    "cc": "",
+    "tid": "2026-10-06 14:12",
+    "fra_meg": false,
+    "tekst": "Hei Sander,\n\nVi har styremøte om to uker og jeg blir sikkert spurt om når integrasjonen mot ERP-systemet vårt er klar til bruk. Sist vi snakket nevnte du høsten, men har dere en mer konkret dato nå? Og er det noe dere venter på fra oss?\n\nMvh\nKari Nordby\nIT-leder, Nordlys Energi AS"
+   }
+  ],
+  "triage": {
+   "kategori": "svar",
+   "haster": false,
+   "sammendrag": "Kari spør om konkret dato for ERP-integrasjon og hva vi venter på",
+   "begrunnelse": "Kunden spør Sander direkte om leveringsdato (uke 46) og hva vi venter på (testtilgang bestilt 20. sept), men fristen er styremøte om to uker."
+  },
+  "triage_sek": 4.3,
+  "triage_usd": 0.0071,
+  "utkast": {
+   "tekst": "Hei Kari,\n\nPlanlagt levering er uke 46. Vi venter fortsatt på testtilgang til ERP-miljøet deres. Den ble bestilt 20. september, og vi har ikke mottatt den. Kan du følge opp den internt? Uten tilgangen kan vi ikke teste ferdig mot systemet deres, og da er uke 46 usikker.\n\n--\nSander\nVisense",
+   "sjekk": [
+    "Bekreft at uke 46 fortsatt er riktig å love utad, gitt at testtilgangen mangler",
+    "Eventuelt legg til hvem hos Nordlys som har bestilt/skal levere testtilgangen, hvis kjent"
+   ]
+  },
+  "utkast_sek": 7.3,
+  "utkast_usd": 0.0135
+ },
+ {
+  "id": "mail:harbor-outage",
+  "kanal": "mail",
+  "emne": "URGENT: API returning 500 errors since 07:00",
+  "meldinger": [
+   {
+    "fra": "James Whitfield <j.whitfield@harborlogistics.com>",
+    "til": "support@visense.no",
+    "cc": "sander@visense.no",
+    "tid": "2026-10-07 08:41",
+    "fra_meg": false,
+    "tekst": "Hi team,\n\nSince about 07:00 CET every call to /v2/shipments returns HTTP 500. Our warehouse can't print labels and trucks are queuing. Is this a known issue? We need an ETA asap.\n\nJames Whitfield\nHead of Operations, Harbor Logistics"
+   }
+  ],
+  "triage": {
+   "kategori": "svar",
+   "haster": true,
+   "sammendrag": "Harbor: /v2/shipments gir 500 siden 07:00, lagerstans. Trenger ETA nå.",
+   "begrunnelse": "Kunde på /v2 har driftsstans (etiketter, lastebiler i kø), og Sander som teknisk ansvarlig må svare med status/ETA."
+  },
+  "triage_sek": 3.8,
+  "triage_usd": 0.007,
+  "utkast": {
+   "tekst": "Hi James,\n\nThanks for flagging. We're looking into the 500 errors on /v2/shipments now. I can't confirm a cause or ETA yet, but I'll update you as soon as we know more: next update by [[tidspunkt for neste oppdatering]].\n\nSupport will register this and send you a case number shortly: [[saksnummer fra support@visense.no]].\n\n--\nSander\nVisense",
+   "sjekk": [
+    "Bekreft at dere faktisk undersøker feilen og at det er riktig å love oppdatering",
+    "Fyll inn tidspunkt for neste oppdatering",
+    "Fyll inn saksnummer fra support@visense.no (Harbor-henvendelser skal ha saksnummer)",
+    "Legg til årsak/ETA hvis det blir kjent før sending"
+   ]
+  },
+  "utkast_sek": 4.2,
+  "utkast_usd": 0.0124
+ },
+ {
+  "id": "teams:ola-pr",
+  "kanal": "teams",
+  "emne": "Ola Berg",
+  "meldinger": [
+   {
+    "fra": "Ola Berg",
+    "til": "",
+    "cc": "",
+    "tid": "2026-10-07 09:55",
+    "fra_meg": false,
+    "tekst": "heia! har du 5 min i dag til å se på PR-en min for rapport-eksporten? står litt fast på testene"
+   }
+  ],
+  "triage": {
+   "kategori": "svar",
+   "haster": false,
+   "sammendrag": "Ola ber deg se på PR-en for rapport-eksporten i dag, står fast på testene",
+   "begrunnelse": "Ola spør Sander direkte om hjelp med PR, men ingen driftsstans eller hard frist står på spill."
+  },
+  "triage_sek": 3.2,
+  "triage_usd": 0.0064,
+  "utkast": {
+   "tekst": "hei! ja, kan se på den i dag. passer det kl [[tidspunkt]]? send lenke til PR-en, og si hvilke tester som feiler",
+   "sjekk": [
+    "Fyll inn tidspunkt i dag for når du kan se på PR-en"
+   ]
+  },
+  "utkast_sek": 3.5,
+  "utkast_usd": 0.006
+ },
+ {
+  "id": "mail:ceo-status",
+  "kanal": "mail",
+  "emne": "Kort status Nordlys før styremøtet",
+  "meldinger": [
+   {
+    "fra": "Ingrid Solheim <ingrid@visense.no>",
+    "til": "sander@visense.no",
+    "cc": "",
+    "tid": "2026-10-07 07:30",
+    "fra_meg": false,
+    "tekst": "Hei Sander, kan du sende meg 3-4 kulepunkter om status på Nordlys-prosjektet innen torsdag? Skal ha det med i styrepresentasjonen fredag. Særlig risiko og om vi holder budsjett.\n\nIngrid"
+   }
+  ],
+  "triage": {
+   "kategori": "svar",
+   "haster": false,
+   "sammendrag": "Ingrid vil ha 3-4 kulepunkter om Nordlys (risiko, budsjett) innen torsdag.",
+   "begrunnelse": "Ingrid ber Sander direkte om statuspunkter med frist torsdag, altså ikke i dag."
+  },
+  "triage_sek": 4.0,
+  "triage_usd": 0.0068,
+  "utkast": {
+   "tekst": "Hei Ingrid,\n\nher er status på Nordlys:\n\n- Omfang: ERP-integrasjon for Nordlys Energi AS, planlagt levering uke 46.\n- Fremdrift: ca. 55 %.\n- Budsjett: brukt ca. 60 % ved 55 % fremdrift, litt over plan.\n- Risiko: Vi venter fortsatt på testtilgang til ERP-miljøet deres, bestilt 20. sept og ikke mottatt. Uten den er uke 46 i fare. [[Sanders vurdering av om uke 46 holder, og eventuell eskalering mot Kari Nordby]]\n\n--\nSander\nVisense",
+   "sjekk": [
+    "Bekreft at 55 % fremdrift og 60 % budsjettforbruk fortsatt stemmer per i dag",
+    "Fyll inn vurdering av om uke 46 holder og om du eskalerer mot Kari Nordby",
+    "Vurder om budsjettet ser ut til å holde ved slutt (prognose), den finnes ikke i kunnskapsbasen"
+   ]
+  },
+  "utkast_sek": 5.4,
+  "utkast_usd": 0.0091
+ },
+ {
+  "id": "mail:azure-newsletter",
+  "kanal": "mail",
+  "emne": "Azure updates: October 2026",
+  "meldinger": [
+   {
+    "fra": "Microsoft Azure <azure-noreply@microsoft.com>",
+    "til": "sander@visense.no",
+    "cc": "",
+    "tid": "2026-10-05 18:00",
+    "fra_meg": false,
+    "tekst": "This month in Azure: General availability of new regions, price changes for Blob archive tier from 1 January, and retirement of classic App Service plans in 2027. Read more on the Azure blog. You are receiving this email because you subscribed to Azure updates."
+   }
+  ],
+  "triage": {
+   "kategori": "info",
+   "haster": false,
+   "sammendrag": "Azure-nyhetsbrev oktober: nye regioner, prisendring Blob archive, App Service classic utfases 2027",
+   "begrunnelse": "Automatisk nyhetsbrev som ikke krever handling eller svar fra Sander."
+  },
+  "triage_sek": 3.2,
+  "triage_usd": 0.0067
+ },
+ {
+  "id": "mail:fyi-cc",
+  "kanal": "mail",
+  "emne": "Re: Møtereferat oppstartsmøte",
+  "meldinger": [
+   {
+    "fra": "Marte Lie <marte@visense.no>",
+    "til": "kari.nordby@nordlys-energi.no",
+    "cc": "sander@visense.no",
+    "tid": "2026-10-06 16:20",
+    "fra_meg": false,
+    "tekst": "Hei Kari,\n\nVedlagt referat fra oppstartsmøtet. Sander er i kopi for orientering. Gi beskjed om noe mangler.\n\nHilsen Marte"
+   }
+  ],
+  "triage": {
+   "kategori": "info",
+   "haster": false,
+   "sammendrag": "Marte sendte referat fra oppstartsmøtet til Kari; Sander er i kopi.",
+   "begrunnelse": "Sander er bare i kopi for orientering, og ingen spør ham om noe."
+  },
+  "triage_sek": 3.2,
+  "triage_usd": 0.0065
+ },
+ {
+  "id": "teams:deploy-chat",
+  "kanal": "teams",
+  "emne": "Release 4.2",
+  "meldinger": [
+   {
+    "fra": "Priya Nair",
+    "til": "",
+    "cc": "",
+    "tid": "2026-10-07 10:02",
+    "fra_meg": false,
+    "tekst": "Release 4.2 is ready in staging, all tests green."
+   },
+   {
+    "fra": "Sander Hurlen",
+    "til": "",
+    "cc": "",
+    "tid": "2026-10-07 10:05",
+    "fra_meg": true,
+    "tekst": "nice, I'll take a look after lunch"
+   },
+   {
+    "fra": "Tom Hansen",
+    "til": "",
+    "cc": "",
+    "tid": "2026-10-07 11:40",
+    "fra_meg": false,
+    "tekst": "@Sander we need a go/no-go before 14:00 today, otherwise it slips to next week. Can you confirm the DB migration is safe to run during business hours?"
+   }
+  ],
+  "triage": {
+   "kategori": "svar",
+   "haster": true,
+   "sammendrag": "Tom trenger go/no-go på release 4.2 og DB-migrering innen kl. 14 i dag.",
+   "begrunnelse": "Tom spør Sander direkte om go/no-go med frist i dag kl. 14, ellers utsettes releasen en uke."
+  },
+  "triage_sek": 5.7,
+  "triage_usd": 0.0068,
+  "utkast": {
+   "tekst": "I'll check the migration after lunch and confirm before 14:00. Right now I can't say whether it's safe to run during business hours: [[go/no-go for the DB migration during business hours]]",
+   "sjekk": [
+    "Fyll inn faktisk vurdering: er DB-migreringen trygg å kjøre i arbeidstiden (go/no-go)? Sjekk migreringen i staging først.",
+    "Bekreft at du rekker å svare før kl. 14:00."
+   ]
+  },
+  "utkast_sek": 4.1,
+  "utkast_usd": 0.0071
+ },
+ {
+  "id": "mail:pris-kontrakt",
+  "kanal": "mail",
+  "emne": "Spørsmål om pris for utvidet support",
+  "meldinger": [
+   {
+    "fra": "Per Aas <per.aas@fjellbygg.no>",
+    "til": "sander@visense.no",
+    "cc": "",
+    "tid": "2026-10-06 11:03",
+    "fra_meg": false,
+    "tekst": "Hei,\n\nVi vurderer å utvide supportavtalen til å gjelde døgnet rundt. Hva vil det koste per måned, og hvor lang bindingstid blir det? Kan vi i så fall starte fra 1. november?\n\nMed vennlig hilsen\nPer Aas\nDaglig leder, Fjellbygg AS"
+   }
+  ],
+  "triage": {
+   "kategori": "svar",
+   "haster": false,
+   "sammendrag": "Per Aas (Fjellbygg) vil ha pris, bindingstid og start 1. nov for døgnsupport",
+   "begrunnelse": "Kunden spør Sander direkte om pris og vilkår, men ingenting står på spill i dag."
+  },
+  "triage_sek": 3.5,
+  "triage_usd": 0.0068,
+  "utkast": {
+   "tekst": "Hei Per,\n\nMånedspris for support døgnet rundt er [[pris per måned]], og bindingstiden er [[bindingstid]]. Oppstart 1. november [[bekreft om 1. november er mulig]].\n\n--\nSander\nVisense",
+   "sjekk": [
+    "Pris per måned for døgnrundt-support",
+    "Bindingstid",
+    "Bekreft om oppstart 1. november er mulig"
+   ]
+  },
+  "utkast_sek": 4.8,
+  "utkast_usd": 0.0069
+ },
+ {
+  "id": "teams:ingrid-ring",
+  "kanal": "teams",
+  "emne": "Ingrid Solheim",
+  "meldinger": [
+   {
+    "fra": "Ingrid Solheim",
+    "til": "",
+    "cc": "",
+    "tid": "2026-10-07 12:15",
+    "fra_meg": false,
+    "tekst": "Ring meg når du har et øyeblikk"
+   }
+  ],
+  "triage": {
+   "kategori": "svar",
+   "haster": false,
+   "sammendrag": "Ingrid Solheim ber deg ringe henne når du har tid",
+   "begrunnelse": "Ingrid ber direkte om en telefonoppringning, men nevner ingen frist eller hast."
+  },
+  "triage_sek": 5.1,
+  "triage_usd": 0.0061,
+  "utkast": {
+   "tekst": "kan ikke ringe nå, skriv gjerne her hva det gjelder, så svarer jeg så fort jeg kan",
+   "sjekk": []
+  },
+  "utkast_sek": 3.3,
+  "utkast_usd": 0.0056
+ },
+ {
+  "id": "mail:takk-passer",
+  "kanal": "mail",
+  "emne": "Re: Workshop 15. oktober",
+  "meldinger": [
+   {
+    "fra": "Sander Hurlen <sander@visense.no>",
+    "til": "kari.nordby@nordlys-energi.no",
+    "cc": "",
+    "tid": "2026-10-06 09:00",
+    "fra_meg": true,
+    "tekst": "Hei Kari,\n\nForslag: workshop 15. oktober kl 09-12 hos dere. Passer det?\n\nMvh Sander"
+   },
+   {
+    "fra": "Kari Nordby <kari.nordby@nordlys-energi.no>",
+    "til": "sander@visense.no",
+    "cc": "",
+    "tid": "2026-10-06 13:45",
+    "fra_meg": false,
+    "tekst": "Takk, det passer fint. Vi ses!\n\nKari"
+   }
+  ],
+  "triage": {
+   "kategori": "info",
+   "haster": false,
+   "sammendrag": "Kari bekrefter workshop 15. oktober kl 09-12 hos Nordlys.",
+   "begrunnelse": "Kari bekrefter bare at tidspunktet passer, så det krever ingen handling fra Sander."
+  },
+  "triage_sek": 4.4,
+  "triage_usd": 0.0067
+ }
+]

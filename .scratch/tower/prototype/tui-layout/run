@@ -1,0 +1,5 @@
+#!/bin/sh
+# PROTOTYPE — throwaway. Lager venv første gang, kjører tower-prototypen.
+D="$(cd "$(dirname "$0")" && pwd)"
+[ -x "$D/.venv/bin/python" ] || { python3 -m venv "$D/.venv" && "$D/.venv/bin/pip" install -q 'textual==8.2.8'; }
+exec "$D/.venv/bin/python" "$D/app.py" "$@"

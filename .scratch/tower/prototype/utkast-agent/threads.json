@@ -1,0 +1,33 @@
+[
+ {"id":"mail:nordlys-erp","kanal":"mail","emne":"Status på ERP-integrasjonen","forventet":{"kategori":"svar","haster":false},
+  "meldinger":[{"fra":"Kari Nordby <kari.nordby@nordlys-energi.no>","til":"sander@visense.no","cc":"","tid":"2026-10-06 14:12","fra_meg":false,
+   "tekst":"Hei Sander,\n\nVi har styremøte om to uker og jeg blir sikkert spurt om når integrasjonen mot ERP-systemet vårt er klar til bruk. Sist vi snakket nevnte du høsten, men har dere en mer konkret dato nå? Og er det noe dere venter på fra oss?\n\nMvh\nKari Nordby\nIT-leder, Nordlys Energi AS"}]},
+ {"id":"mail:harbor-outage","kanal":"mail","emne":"URGENT: API returning 500 errors since 07:00","forventet":{"kategori":"svar","haster":true},
+  "meldinger":[{"fra":"James Whitfield <j.whitfield@harborlogistics.com>","til":"support@visense.no","cc":"sander@visense.no","tid":"2026-10-07 08:41","fra_meg":false,
+   "tekst":"Hi team,\n\nSince about 07:00 CET every call to /v2/shipments returns HTTP 500. Our warehouse can't print labels and trucks are queuing. Is this a known issue? We need an ETA asap.\n\nJames Whitfield\nHead of Operations, Harbor Logistics"}]},
+ {"id":"teams:ola-pr","kanal":"teams","emne":"Ola Berg","forventet":{"kategori":"svar","haster":false},
+  "meldinger":[{"fra":"Ola Berg","til":"","cc":"","tid":"2026-10-07 09:55","fra_meg":false,"tekst":"heia! har du 5 min i dag til å se på PR-en min for rapport-eksporten? står litt fast på testene"}]},
+ {"id":"mail:ceo-status","kanal":"mail","emne":"Kort status Nordlys før styremøtet","forventet":{"kategori":"svar","haster":false},
+  "meldinger":[{"fra":"Ingrid Solheim <ingrid@visense.no>","til":"sander@visense.no","cc":"","tid":"2026-10-07 07:30","fra_meg":false,
+   "tekst":"Hei Sander, kan du sende meg 3-4 kulepunkter om status på Nordlys-prosjektet innen torsdag? Skal ha det med i styrepresentasjonen fredag. Særlig risiko og om vi holder budsjett.\n\nIngrid"}]},
+ {"id":"mail:azure-newsletter","kanal":"mail","emne":"Azure updates: October 2026","forventet":{"kategori":"info","haster":false},
+  "meldinger":[{"fra":"Microsoft Azure <azure-noreply@microsoft.com>","til":"sander@visense.no","cc":"","tid":"2026-10-05 18:00","fra_meg":false,
+   "tekst":"This month in Azure: General availability of new regions, price changes for Blob archive tier from 1 January, and retirement of classic App Service plans in 2027. Read more on the Azure blog. You are receiving this email because you subscribed to Azure updates."}]},
+ {"id":"mail:fyi-cc","kanal":"mail","emne":"Re: Møtereferat oppstartsmøte","forventet":{"kategori":"info","haster":false},
+  "meldinger":[{"fra":"Marte Lie <marte@visense.no>","til":"kari.nordby@nordlys-energi.no","cc":"sander@visense.no","tid":"2026-10-06 16:20","fra_meg":false,
+   "tekst":"Hei Kari,\n\nVedlagt referat fra oppstartsmøtet. Sander er i kopi for orientering. Gi beskjed om noe mangler.\n\nHilsen Marte"}]},
+ {"id":"teams:deploy-chat","kanal":"teams","emne":"Release 4.2","forventet":{"kategori":"svar","haster":true},
+  "meldinger":[
+   {"fra":"Priya Nair","til":"","cc":"","tid":"2026-10-07 10:02","fra_meg":false,"tekst":"Release 4.2 is ready in staging, all tests green."},
+   {"fra":"Sander Hurlen","til":"","cc":"","tid":"2026-10-07 10:05","fra_meg":true,"tekst":"nice, I'll take a look after lunch"},
+   {"fra":"Tom Hansen","til":"","cc":"","tid":"2026-10-07 11:40","fra_meg":false,"tekst":"@Sander we need a go/no-go before 14:00 today, otherwise it slips to next week. Can you confirm the DB migration is safe to run during business hours?"}]},
+ {"id":"mail:pris-kontrakt","kanal":"mail","emne":"Spørsmål om pris for utvidet support","forventet":{"kategori":"svar","haster":false},
+  "meldinger":[{"fra":"Per Aas <per.aas@fjellbygg.no>","til":"sander@visense.no","cc":"","tid":"2026-10-06 11:03","fra_meg":false,
+   "tekst":"Hei,\n\nVi vurderer å utvide supportavtalen til å gjelde døgnet rundt. Hva vil det koste per måned, og hvor lang bindingstid blir det? Kan vi i så fall starte fra 1. november?\n\nMed vennlig hilsen\nPer Aas\nDaglig leder, Fjellbygg AS"}]},
+ {"id":"teams:ingrid-ring","kanal":"teams","emne":"Ingrid Solheim","forventet":{"kategori":"svar","haster":false},
+  "meldinger":[{"fra":"Ingrid Solheim","til":"","cc":"","tid":"2026-10-07 12:15","fra_meg":false,"tekst":"Ring meg når du har et øyeblikk"}]},
+ {"id":"mail:takk-passer","kanal":"mail","emne":"Re: Workshop 15. oktober","forventet":{"kategori":"info","haster":false},
+  "meldinger":[
+   {"fra":"Sander Hurlen <sander@visense.no>","til":"kari.nordby@nordlys-energi.no","cc":"","tid":"2026-10-06 09:00","fra_meg":true,"tekst":"Hei Kari,\n\nForslag: workshop 15. oktober kl 09-12 hos dere. Passer det?\n\nMvh Sander"},
+   {"fra":"Kari Nordby <kari.nordby@nordlys-energi.no>","til":"sander@visense.no","cc":"","tid":"2026-10-06 13:45","fra_meg":false,"tekst":"Takk, det passer fint. Vi ses!\n\nKari"}]}
+]
