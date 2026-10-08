@@ -14,10 +14,11 @@
 #   wp follow 23536          notify when it waits for approval or finishes (again: stop)
 #   wp fix 23536             background Claude agent fixing the failed run (fleet's launcher)
 #   wp open 23536            open run in browser
+#   wp -g                    grouped per pipeline, the last few runs of each
 #   wp help                  explained (Norwegian)
 #
-# Filters: -A all repos · -p pipeline · -b branch · -m mine · -w waiting · -n N
-# TUI: ↑↓/jk move · space approve · f follow · x fix · enter open · w waiting · a all repos · r refresh · q quit
+# Filters: -A all repos · -p pipeline · -b branch · -m mine · -w waiting · -n N · -g grouped
+# TUI: ↑↓/jk move · space approve · f follow · x fix · enter open · w waiting · a all repos · p grouped · r refresh · q quit
 
 import argparse
 import concurrent.futures
@@ -47,6 +48,7 @@ from_wf = ("bold", "dim", "cyan", "green", "yellow", "red", "TTY")
 globals().update({k: getattr(wf, k) for k in from_wf})
 
 COUNT = 30
+GROUP = 3     # runs per pipeline in the grouped view
 REFRESH = 15  # seconds between TUI refreshes
 POLL = 30     # seconds between the follow watcher's checks
 FORGET = datetime.timedelta(days=2)  # followed runs queued longer ago than this are dropped
@@ -187,8 +189,9 @@ def stages(run):
 
 
 def runs(a):
-    """Runs matching the filters, newest first, with approvals and stages filled in."""
-    q = {"queryOrder": "queueTimeDescending", "$top": a.count * (4 if a.pipeline else 1)}
+    """Runs matching the filters, newest first, with approvals and stages filled in. Grouped:
+    the GROUP newest of each pipeline, pipelines in order of their newest run."""
+    q = {"queryOrder": "queueTimeDescending", "$top": 300 if a.group else a.count * (4 if a.pipeline else 1)}
     if a.repo:
         q.update(repositoryId=repo_id(a.repo), repositoryType="TfsGit")
     if a.branch:
@@ -203,7 +206,13 @@ def runs(a):
     rs = [Run(r) for r in rest("build/builds?" + urllib.parse.urlencode(q))["value"]]
     if a.pipeline:
         rs = [r for r in rs if a.pipeline.lower() in r.pipeline.lower()]
-    rs = rs[:a.count]
+    if a.group:
+        by = {}
+        for r in rs:
+            by.setdefault(r.pipeline, []).append(r)
+        rs = [r for g in by.values() for r in g[:GROUP]]
+    else:
+        rs = rs[:a.count]
     for r in rs:
         r.approvals = waits.get(r.id, [])
     with concurrent.futures.ThreadPoolExecutor(8) as ex:
@@ -459,15 +468,16 @@ def short(name):
     return name
 
 
-def columns(rs):
+def columns(rs, group=False):
     """Fixed-width parts of a row: (icon tone, [(text, tone)]). Shared by ls and the TUI.
-    Followed runs are marked ◉."""
+    Followed runs are marked ◉. Grouped, the pipeline is in the header, not the row."""
     wp_ = max([len(r.pipeline) for r in rs] + [8])
     wb = min(max([len(r.branch) for r in rs] + [6]), 28)
     fs = follows()
     rows = []
     for r in rs:
-        parts = [("◉" if key(r) in fs else " ", "cyan"), (ICON.get(r.state, "?") + " ", TONE.get(r.state)), (f"{r.pipeline:<{wp_}}  ", "bold"),
+        parts = [("◉" if key(r) in fs else " ", "cyan"), (ICON.get(r.state, "?") + " ", TONE.get(r.state)),
+                 ("  ", None) if group else (f"{r.pipeline:<{wp_}}  ", "bold"),
                  (f"{r.number:<12}", "dim"), (f"{r.branch[:wb]:<{wb}}  ", None)]
         for n, s in r.stages if [n for n, _ in r.stages] != ["__default"] else []:
             parts.append((CHIP[s] + short(n) + " ", TONE.get(s, "dim")))
@@ -476,11 +486,25 @@ def columns(rs):
     return rows
 
 
-def listing(rs):
+def lines(rs, group=False):
+    """[(run or None, parts)]: the rows, and grouped a header (run None) before each pipeline."""
+    out, last = [], None
+    for r, parts in zip(rs, columns(rs, group)):
+        if group and r.pipeline != last:
+            n = sum(1 for x in rs if x.pipeline == r.pipeline and x.approvals)
+            out.append((None, [(r.pipeline, "bold")] + ([(f"  ⏸ {n}", "yellow")] if n else [])))
+            last = r.pipeline
+        out.append((r, parts))
+    return out
+
+
+def listing(rs, group=False):
     if not rs:
         return print(dim("ingen runs"))
     paint = {"green": green, "red": red, "yellow": yellow, "cyan": cyan, "dim": dim, "bold": bold}
-    for parts in columns(rs):
+    for i, (r, parts) in enumerate(lines(rs, group)):
+        if r is None and i:
+            print()
         print("".join(paint[t](s) if t else s for s, t in parts))
     n = sum(1 for r in rs if r.approvals)
     print(dim(f"{len(rs)} run(s)" + (f", {n} venter på godkjenning" if n else "")))
@@ -516,15 +540,17 @@ def tui(scr, a):
         h, w = scr.getmaxyx()
         scr.erase()
         scope = a.repo or A().project
-        head = f" wp · {scope}" + (" · venter" if a.waiting else "") + (f" · {a.pipeline}" if a.pipeline else "") \
+        head = f" wp · {scope}" + (" · per pipeline" if a.group else "") + (" · venter" if a.waiting else "") + (f" · {a.pipeline}" if a.pipeline else "") \
                + (f" · {a.branch}" if a.branch else "") + (" · mine" if a.mine else "")
         scr.addnstr(0, 0, head, w - 1, curses.A_BOLD)
         body = h - 3
         sel = max(0, min(sel, len(rs) - 1))
-        top = min(max(top, sel - body + 1), sel)
-        for y, (r, parts) in enumerate(list(zip(rs, columns(rs)))[top:top + body]):
+        shown = lines(rs, a.group)
+        at = next((i for i, (r, _) in enumerate(shown) if rs and r is rs[sel]), 0)
+        top = min(max(top, at - body + 1), max(0, at - 1 if a.group and at and shown[at - 1][0] is None else at))
+        for y, (r, parts) in enumerate(shown[top:top + body]):
             x, row = 0, y + 1
-            hl = curses.A_REVERSE if top + y == sel else 0
+            hl = curses.A_REVERSE if r is not None and top + y == at else 0
             for s, t in parts:
                 if x >= w - 1:
                     break
@@ -534,7 +560,7 @@ def tui(scr, a):
                 scr.addnstr(row, x, " " * (w - 1 - x), w - 1 - x, hl)
         if not rs:
             scr.addnstr(2, 2, "ingen runs", w - 3, pal["dim"])
-        keys = "↑↓ flytt · space godkjenn · f følg · x fiks · enter åpne · w venter · a alle repoer · r oppdater · q avslutt"
+        keys = "↑↓ flytt · space godkjenn · f følg · x fiks · enter åpne · w venter · a alle repoer · p per pipeline · r oppdater · q avslutt"
         scr.addnstr(h - 1, 0, msg or keys, w - 1, (pal["red"] if err else pal["green"]) if msg else pal["dim"])
         scr.refresh()
 
@@ -583,6 +609,10 @@ def tui(scr, a):
             a.waiting = not a.waiting
             sel = top = 0
             load()
+        elif k == ord("p"):
+            a.group = not a.group
+            sel = top = 0
+            load()
         elif k == ord("a") and a.home:
             a.repo = None if a.repo else a.home
             sel = top = 0
@@ -606,7 +636,7 @@ def find(id):
 
 def cmd_ls(a):
     try:
-        listing(runs(a))
+        listing(runs(a), a.group)
     except RuntimeError as e:
         die(str(e))
 
@@ -671,6 +701,7 @@ GUIDE = """\
   wp follow <run>         varsel når den venter på godkjenning eller er ferdig (igjen: slutt)
   wp fix <run> [-n]       Claude-agent i bakgrunnen som fikser den feilede run-en (-n: vis bare kommandoen)
   wp open <run>           åpne i nettleser
+  wp -g                   gruppert per pipeline: de {group} siste runs i hver
   wp help [kommando]      denne teksten, eller flaggene til én kommando
 
 {b}TASTER{r}  {d}(levende liste){r}
@@ -682,6 +713,7 @@ GUIDE = """\
   enter / o       åpne i nettleser
   w               bare runs som venter på godkjenning (av/på)
   a               dette repoet / hele prosjektet
+  p               gruppert per pipeline (av/på)
   r               oppdater nå      q / esc   avslutt
 
 {b}FILTRE{r}
@@ -691,7 +723,8 @@ GUIDE = """\
   -b, --branch B        branch (main, feature/x, refs/pull/123/merge)
   -m, --mine            bare runs du har startet
   -w, --waiting         bare runs som venter på godkjenning
-  -n, --count N         antall runs (default {count})
+  -n, --count N         antall runs (default {count}; gruppert: {group} per pipeline)
+  -g, --group           gruppert per pipeline, overskrift per pipeline (⏸ n: antall som venter)
 
 {b}LINJEN{r}
 
@@ -727,7 +760,7 @@ def cmd_help(a, subs):
     repo = current_repo()
     txt = GUIDE.format(b="\033[1m" if on else "", r="\033[0m" if on else "", d="\033[2m" if on else "",
                        where=A().where, repo=f" {dim(f'(repo: {repo})')}" if repo else "",
-                       refresh=REFRESH, count=COUNT, poll=POLL)
+                       refresh=REFRESH, count=COUNT, poll=POLL, group=GROUP)
     if on and txt.count("\n") > os.get_terminal_size().lines:
         subprocess.run(["less", "-RFX"], input=txt, text=True)
     else:
@@ -744,6 +777,7 @@ def filters(s):
     s.add_argument("-m", "--mine", action="store_true")
     s.add_argument("-w", "--waiting", action="store_true", help="only runs waiting for approval")
     s.add_argument("-n", "--count", type=int, default=COUNT)
+    s.add_argument("-g", "--group", action="store_true", help=f"grouped per pipeline, {GROUP} newest runs each")
 
 
 def main():
