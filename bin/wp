@@ -11,16 +11,18 @@
 #   wp                       live list (TUI); space approves the selected run
 #   wp ls [filters]          same list, printed once
 #   wp approve 23536         approve every pending approval on run 23536
+#   wp follow 23536          notify on every status change until it finishes (again: stop)
 #   wp open 23536            open run in browser
 #   wp help                  explained (Norwegian)
 #
 # Filters: -A all repos · -p pipeline · -b branch · -m mine · -w waiting · -n N
-# TUI: ↑↓/jk move · space approve · enter open · w waiting · a all repos · r refresh · q quit
+# TUI: ↑↓/jk move · space approve · f follow · enter open · w waiting · a all repos · r refresh · q quit
 
 import argparse
 import concurrent.futures
 import curses
 import datetime
+import fcntl
 import importlib.machinery
 import importlib.util
 import json
@@ -44,6 +46,10 @@ globals().update({k: getattr(wf, k) for k in from_wf})
 
 COUNT = 30
 REFRESH = 15  # seconds between TUI refreshes
+POLL = 30     # seconds between the follow watcher's checks
+FORGET = datetime.timedelta(days=2)  # followed runs queued longer ago than this are dropped
+CACHE = os.path.expanduser("~/.cache/wp")
+FOLLOW = os.path.join(CACHE, "follow.json")
 
 
 def die(msg):
@@ -213,6 +219,139 @@ def approve(run, comment=""):
     return run.waiting or ["?"]
 
 
+# ── follow ──────────────────────────────────────────────────────────────────
+# Followed runs live in FOLLOW, keyed org/project/id, with the state last seen. One
+# detached `wp watch` polls them, sends a macOS notification on every change, and
+# drops a run once it finishes or is older than FORGET. It exits when none are left.
+
+
+def key(r):
+    return f"{A().where}/{r.id}"
+
+
+def seen(r):
+    return {"state": r.state, "stages": [list(s) for s in r.stages], "waiting": r.waiting}
+
+
+def follows(change=None):
+    """The followed runs; with `change`, apply it to them under a lock and save."""
+    os.makedirs(CACHE, exist_ok=True)
+    with open(FOLLOW, "a+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.seek(0)
+        try:
+            fs = json.loads(f.read() or "{}")
+        except ValueError:
+            fs = {}
+        if change:
+            change(fs)
+            f.seek(0)
+            f.truncate()
+            json.dump(fs, f, indent=1)
+        return fs
+
+
+def follow(r):
+    """Toggle following run r. Returns True if it is followed now."""
+    k = key(r)
+    on = k not in follows()
+    if on and r.status == "completed" and not r.approvals:
+        raise RuntimeError(f"{r.pipeline} {r.number} er allerede ferdig")
+
+    def change(fs):
+        if on:
+            fs[k] = {"org": A().org, "project": A().project, "id": r.id, "pipeline": r.pipeline,
+                     "number": r.number, "url": r.url, "queued": r.queued.isoformat(), **seen(r)}
+        else:
+            fs.pop(k, None)
+
+    follows(change)
+    if on:
+        log = open(os.path.join(CACHE, "watch.log"), "a")
+        subprocess.Popen([sys.executable, os.path.realpath(__file__), "watch"], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+    return on
+
+
+SAY = {"succeeded": "✓ fullført", "failed": "✗ feilet", "canceled": "⊘ avbrutt",
+       "partiallySucceeded": "! delvis fullført", "inProgress": "● kjører", "notStarted": "○ i kø",
+       "cancelling": "⊘ avbrytes", "waiting": "⏸ venter på godkjenning", "completed": "· ferdig"}
+
+
+def news(old, r):
+    """One line saying what changed since `old` (a seen() dict), or None."""
+    now = seen(r)
+    if now == old:
+        return None
+    was = dict(map(tuple, old.get("stages", [])))
+    moved = " ".join(CHIP[s] + short(n) for n, s in r.stages if was.get(n) != s and n != "__default")
+    state = SAY.get(r.state, r.state)
+    if r.state == "waiting":
+        state += ": " + ", ".join(short(n) for n in r.waiting)
+    if r.state == old.get("state"):
+        return moved or state
+    return f"{moved}  ·  {state}" if moved and r.status != "completed" else state
+
+
+def notify(title, text):
+    script = ("on run argv\n display notification (item 2 of argv) with title \"wp\" "
+              "subtitle (item 1 of argv) sound name \"Glass\"\nend run")
+    subprocess.run(["osascript", "-e", script, title, text], capture_output=True)
+
+
+def watch():
+    """Poll followed runs until none are left. A second watcher exits at once."""
+    global _ado
+    os.makedirs(CACHE, exist_ok=True)
+    lock = open(os.path.join(CACHE, "watch.lock"), "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return
+    ados = {}
+    while True:
+        fs = follows()
+        if not fs:
+            return
+        now = datetime.datetime.now(datetime.timezone.utc)
+        gone, updates, waits = [], {}, {}
+        for k, f in fs.items():
+            if now - datetime.datetime.fromisoformat(f["queued"]) > FORGET:
+                gone.append(k)
+                continue
+            where = (f["org"], f["project"])
+            if where not in ados:
+                os.environ.update(WF_ORG=f["org"], WF_PROJECT=f["project"])
+                ados[where] = wf.Ado()
+            _ado = ados[where]
+            try:
+                if where not in waits:
+                    waits[where] = pending()
+                r = Run(rest(f"build/builds/{f['id']}"))
+                r.approvals = waits[where].get(r.id, [])
+                stages(r)
+            except RuntimeError as e:
+                print(f"{now:%F %T} {k}: {e}", flush=True)
+                continue
+            line = news(f, r)
+            if line:
+                notify(f"{r.pipeline} {r.number}", line)
+                updates[k] = seen(r)
+            if r.status == "completed" and not r.approvals:
+                gone.append(k)
+
+        def change(fs):
+            for k, u in updates.items():
+                if k in fs:
+                    fs[k].update(u)
+            for k in gone:
+                fs.pop(k, None)
+
+        if not follows(change):
+            return
+        time.sleep(POLL)
+
+
 # ── rendering ───────────────────────────────────────────────────────────────
 
 ICON = {"succeeded": "✓", "failed": "✗", "canceled": "⊘", "partiallySucceeded": "!", "inProgress": "●",
@@ -245,12 +384,14 @@ def short(name):
 
 
 def columns(rs):
-    """Fixed-width parts of a row: (icon tone, [(text, tone)]). Shared by ls and the TUI."""
+    """Fixed-width parts of a row: (icon tone, [(text, tone)]). Shared by ls and the TUI.
+    Followed runs are marked ◉."""
     wp_ = max([len(r.pipeline) for r in rs] + [8])
     wb = min(max([len(r.branch) for r in rs] + [6]), 28)
+    fs = follows()
     rows = []
     for r in rs:
-        parts = [(ICON.get(r.state, "?") + " ", TONE.get(r.state)), (f"{r.pipeline:<{wp_}}  ", "bold"),
+        parts = [("◉" if key(r) in fs else " ", "cyan"), (ICON.get(r.state, "?") + " ", TONE.get(r.state)), (f"{r.pipeline:<{wp_}}  ", "bold"),
                  (f"{r.number:<12}", "dim"), (f"{r.branch[:wb]:<{wb}}  ", None)]
         for n, s in r.stages if [n for n, _ in r.stages] != ["__default"] else []:
             parts.append((CHIP[s] + short(n) + " ", TONE.get(s, "dim")))
@@ -317,7 +458,7 @@ def tui(scr, a):
                 scr.addnstr(row, x, " " * (w - 1 - x), w - 1 - x, hl)
         if not rs:
             scr.addnstr(2, 2, "ingen runs", w - 3, pal["dim"])
-        keys = "↑↓ flytt · space godkjenn · enter åpne · w venter · a alle repoer · r oppdater · q avslutt"
+        keys = "↑↓ flytt · space godkjenn · f følg · enter åpne · w venter · a alle repoer · r oppdater · q avslutt"
         scr.addnstr(h - 1, 0, msg or keys, w - 1, (pal["red"] if err else pal["green"]) if msg else pal["dim"])
         scr.refresh()
 
@@ -346,6 +487,12 @@ def tui(scr, a):
                 done = approve(r)
                 msg = f"✓ godkjent {r.pipeline} {r.number}: {', '.join(done)}"
                 load()
+            except RuntimeError as e:
+                msg, err = str(e), True
+        elif k == ord("f") and rs:
+            r = rs[sel]
+            try:
+                msg = f"◉ følger {r.pipeline} {r.number}" if follow(r) else f"sluttet å følge {r.pipeline} {r.number}"
             except RuntimeError as e:
                 msg, err = str(e), True
         elif k == ord("w"):
@@ -400,6 +547,15 @@ def cmd_approve(a):
     print(green(f"✓ godkjent {r.pipeline} {r.number}: {', '.join(done)}"))
 
 
+def cmd_follow(a):
+    r = find(a.id)
+    try:
+        on = follow(r)
+    except RuntimeError as e:
+        die(str(e))
+    print(cyan(f"◉ følger {r.pipeline} {r.number}") if on else f"sluttet å følge {r.pipeline} {r.number}")
+
+
 def cmd_open(a):
     subprocess.run(["open", find(a.id).url])
 
@@ -416,6 +572,7 @@ GUIDE = """\
   wp [filtre]             levende liste, oppdateres hvert {refresh}. sekund
   wp ls [filtre]          samme liste, skrevet ut én gang (også når stdout ikke er en terminal)
   wp approve <run> [-c k] godkjenn alle ventende approvals på run-en (build id)
+  wp follow <run>         varsel ved hver statusendring til den er ferdig (igjen: slutt å følge)
   wp open <run>           åpne i nettleser
   wp help [kommando]      denne teksten, eller flaggene til én kommando
 
@@ -423,6 +580,7 @@ GUIDE = """\
 
   ↑↓ / j k        flytt            pgup/pgdn, ^u/^d   halv side
   space           godkjenn valgt run — alle stages som venter på den
+  f               følg valgt run (◉) — macOS-varsel ved hver endring; igjen: slutt å følge
   enter / o       åpne i nettleser
   w               bare runs som venter på godkjenning (av/på)
   a               dette repoet / hele prosjektet
@@ -448,6 +606,9 @@ GUIDE = """\
   · Space godkjenner uten å spørre igjen — det er hele poenget. Du kan bare godkjenne det
     ADO lar deg; ellers vises feilen nederst.
   · Gamle runs med ventende approvals (som aldri ble godkjent) blir liggende — `w` viser dem.
+  · Fulgte runs sjekkes hvert {poll}. sekund av en bakgrunnsprosess (`wp watch`) som lever så
+    lenge noe følges, også etter at lista er lukket. De ryddes bort når de er ferdige, eller når
+    de er over 2 dager gamle. Lagret i ~/.cache/wp/follow.json, logg i watch.log.
   · Auth: `az login` (eller azt main).
 """
 
@@ -461,7 +622,7 @@ def cmd_help(a, subs):
     repo = current_repo()
     txt = GUIDE.format(b="\033[1m" if on else "", r="\033[0m" if on else "", d="\033[2m" if on else "",
                        where=A().where, repo=f" {dim(f'(repo: {repo})')}" if repo else "",
-                       refresh=REFRESH, count=COUNT)
+                       refresh=REFRESH, count=COUNT, poll=POLL)
     if on and txt.count("\n") > os.get_terminal_size().lines:
         subprocess.run(["less", "-RFX"], input=txt, text=True)
     else:
@@ -497,6 +658,13 @@ def main():
     s.add_argument("-c", "--comment")
     s.set_defaults(fn=cmd_approve)
 
+    s = sub.add_parser("follow", help="notify on status changes until the run finishes; again to stop")
+    s.add_argument("id", type=int)
+    s.set_defaults(fn=cmd_follow)
+
+    s = sub.add_parser("watch", help=argparse.SUPPRESS)
+    s.set_defaults(fn=lambda a: watch(), bare=True)
+
     s = sub.add_parser("open", help="open run in browser")
     s.add_argument("id", type=int)
     s.set_defaults(fn=cmd_open)
@@ -509,7 +677,8 @@ def main():
     if not argv or argv[0] not in sub.choices and argv[0] not in ("-h", "--help"):
         argv = ["live"] + argv
     a = p.parse_args(argv)
-    A()
+    if not getattr(a, "bare", False):
+        A()
     if hasattr(a, "all"):
         a.home = None if os.environ.get("WF_PROJECT") else current_repo()
         a.repo = None if a.all else a.home
