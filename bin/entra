@@ -1,0 +1,1669 @@
+#!/usr/bin/env python3
+#
+# entra — Entra ID from the shell: switch az tenant and subscription, users and
+# their roles, DevOps group rules, Global Administrator for 30 minutes, app
+# registrations.
+#
+# Type:
+#
+#   entra                    TUI; tabs 1 tenant · 2 brukere · 3 devops · 4 apper
+#   entra admin [grunn]      Global Administrator via PIM for 30 min (prompts for the reason)
+#   entra pim-login          sign in for PIM again; `admin` does this when it has to
+#   entra help               explained (Norwegian)
+#
+# Tenants are azt's: aliases and ~/.azure-<alias> dirs from my-workday's
+# az-tenant.sh, plus any other ~/.azure-* holding a login. Switching in the TUI
+# also moves the shell entra was started from, on its next prompt (azure/entra.zsh).
+#
+# DevOps is the org in my-workday's .claude/ado-config.json (ENTRA_ADO_ORG
+# overrides), always through the login in ~/.azure.
+#
+# The az CLI can't get PIM's Graph scopes (AADSTS65002), so PIM signs in on its
+# own in the browser as Microsoft Graph Command Line Tools (ENTRA_PIM_CLIENT
+# overrides). Token in ~/.cache/entra/pim-<tenant>.json.
+#
+# TUI: ↑↓/jk move · enter open · esc back · / filter · 1-4 or tab switch tab · A admin · r refresh · ? help · q quit
+
+import argparse
+import base64
+import concurrent.futures
+import curses
+import datetime
+import glob
+import hashlib
+import http.server
+import json
+import locale
+import os
+import re
+import secrets
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+GRAPH = "https://graph.microsoft.com/v1.0"
+GRAPH_RES = "https://graph.microsoft.com"
+ADO_RES = "499b84ac-1321-427f-aa17-267ca6975798"
+GLOBAL_ADMIN = "62e90394-69f5-4237-9190-012177145e10"  # same role id in every tenant
+ADMIN_MINUTES = 30
+PIM_CLIENT = os.environ.get("ENTRA_PIM_CLIENT", "14d82eec-204b-4c2f-b7e8-296a70dab67e")
+PIM_SCOPE = " ".join(f"{GRAPH_RES}/{s}" for s in (
+    "RoleAssignmentSchedule.ReadWrite.Directory", "RoleEligibilitySchedule.Read.Directory")) + " offline_access"
+HOME = os.path.expanduser("~/.azure")
+WORKDAY = os.path.expanduser("~/visense/my-workday")
+AZT = os.path.join(WORKDAY, "scripts/az-tenant.sh")
+CACHE = os.path.expanduser("~/.cache/entra")
+SOON = 30  # days before a secret's expiry it turns yellow
+LICENSES = ["Basic", "Stakeholder"]
+ADO_ROLES = [("Contributors", "projectContributor"), ("Readers", "projectReader"),
+             ("Project Administrators", "projectAdministrator"), ("Stakeholders", "projectStakeholder")]
+AUDIENCE = {"AzureADMyOrg": "egen org", "AzureADMultipleOrgs": "multi-org",
+            "AzureADandPersonalMicrosoftAccount": "org+personlig", "PersonalMicrosoftAccount": "personlig"}
+
+TTY = sys.stdout.isatty()
+
+
+def c(code, s):
+    return f"\033[{code}m{s}\033[0m" if TTY else s
+
+
+bold = lambda s: c("1", s)
+green = lambda s: c("32", s)
+red = lambda s: c("31", s)
+
+
+def die(msg):
+    print(f"entra: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def ado_org():
+    if os.environ.get("ENTRA_ADO_ORG"):
+        return os.environ["ENTRA_ADO_ORG"]
+    try:
+        with open(os.path.join(WORKDAY, ".claude/ado-config.json")) as f:
+            return json.load(f)["org"]
+    except (OSError, ValueError, KeyError):
+        return "Hussoppen"
+
+
+ORG = ado_org()
+
+
+# ── http ────────────────────────────────────────────────────────────────────
+
+
+class Fail(RuntimeError):
+    def __init__(self, msg, code=None):
+        super().__init__(msg)
+        self.code = code
+
+
+def reason(raw):
+    """The human part of a Graph, ADO or login error body."""
+    try:
+        j = json.loads(raw)
+    except ValueError:
+        return raw.strip()[:300]
+    e = j.get("error") if isinstance(j, dict) else None
+    if isinstance(e, dict):
+        msg = e.get("message") or e.get("code")
+    elif isinstance(e, str):
+        msg = j.get("error_description") or e
+    else:
+        msg = j.get("message") or raw
+    if isinstance(msg, str) and msg.startswith("{"):  # PIM wraps its own error as JSON in message
+        try:
+            inner = json.loads(msg)
+            msg = f"{inner.get('errorCode')}: {inner.get('message')}"
+        except ValueError:
+            pass
+    return str(msg).strip().splitlines()[0][:300]
+
+
+def call(url, tok, body=None, method=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method or ("POST" if data is not None else "GET"),
+                                 headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:  # GroupEntitlements can take half a minute
+            raw = r.read()
+            return json.loads(raw) if raw.strip() else None
+    except urllib.error.HTTPError as e:
+        raise Fail(f"{e.code}: {reason(e.read().decode(errors='replace'))}", e.code)
+    except urllib.error.URLError as e:
+        raise Fail(f"nett: {e.reason}")
+    except (TimeoutError, OSError) as e:
+        raise Fail(f"nett: {e or 'tidsavbrudd'} ({urllib.parse.urlparse(url).netloc})")
+
+
+def oauth(tid, endpoint, **fields):
+    """Form POST to the login endpoint; errors come back in the dict, not raised."""
+    req = urllib.request.Request(f"https://login.microsoftonline.com/{tid}/oauth2/v2.0/{endpoint}",
+                                 data=urllib.parse.urlencode(fields).encode())
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read() or b"{}")
+        except ValueError:
+            return {"error": str(e.code)}
+
+
+def az(cfg, *args):
+    env = dict(os.environ, AZURE_CONFIG_DIR=cfg)
+    try:
+        p = subprocess.run(["az", *args, "-o", "json", "--only-show-errors"],
+                           capture_output=True, text=True, env=env)
+    except FileNotFoundError:
+        raise Fail("az er ikke installert")
+    if p.returncode:
+        lines = [l for l in p.stderr.splitlines() if l.strip()]
+        raise Fail((lines[0] if lines else "az feilet").removeprefix("ERROR: "))
+    return json.loads(p.stdout) if p.stdout.strip() else None
+
+
+_tokens = {}
+
+
+def token(cfg, resource):
+    t = _tokens.get((cfg, resource))
+    if not t or t[1] - time.time() < 120:
+        j = az(cfg, "account", "get-access-token", "--resource", resource)
+        t = _tokens[(cfg, resource)] = (j["accessToken"], int(j["expires_on"]))
+    return t[0]
+
+
+def q(path, params):
+    return path + "?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote, safe="$,'()/")
+
+
+def graph(path, body=None, method=None, cfg=None, tok=None):
+    url = path if path.startswith("https://") else f"{GRAPH}/{path}"
+    return call(url, tok or token(cfg or S.cfg, GRAPH_RES), body, method)
+
+
+def pages(path, cfg=None, tok=None):
+    out = []
+    while path:
+        j = graph(path, cfg=cfg, tok=tok)
+        out += j.get("value", [])
+        path = j.get("@odata.nextLink")
+    return out
+
+
+def ado(url, body=None, method=None):
+    return call(url, token(HOME, ADO_RES), body, method)
+
+
+def parallel(jobs):
+    """Run {name: fn} at once; each value is its result, or the Fail it raised."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        fut = {k: ex.submit(fn) for k, fn in jobs.items()}
+        out = {}
+        for k, f in fut.items():
+            try:
+                out[k] = f.result()
+            except Fail as e:
+                out[k] = e
+        return out
+
+
+# ── time ────────────────────────────────────────────────────────────────────
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def when(s):
+    if not s:
+        return None
+    try:
+        d = datetime.datetime.fromisoformat(re.sub(r"\.\d+", "", s).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=datetime.timezone.utc)
+
+
+def date(s, fmt="%d.%m.%Y"):
+    d = when(s) if isinstance(s, str) else s
+    return d.astimezone().strftime(fmt) if d else "—"
+
+
+# ── state ───────────────────────────────────────────────────────────────────
+
+
+class State:
+    """Which az config dir (tenant) entra is pointed at, and what it has fetched there."""
+
+    def __init__(self):
+        self.cfg = os.environ.get("AZURE_CONFIG_DIR") or HOME
+        self.account, self.org, self.cache = None, "", {}
+        self.admin, self.admin_end = None, None  # None: unknown (no PIM login yet)
+        self._ado_tid = False
+
+    def load(self):
+        self.cache.clear()
+        self.admin = self.admin_end = None
+        try:
+            self.account = az(self.cfg, "account", "show")
+        except Fail:
+            self.account = None
+        self.org = ""
+        if self.account:
+            try:
+                self.org = (graph("organization?$select=displayName").get("value") or [{}])[0].get("displayName", "")
+            except Fail:
+                pass
+
+    @property
+    def tid(self):
+        return (self.account or {}).get("tenantId")
+
+    @property
+    def user(self):
+        return ((self.account or {}).get("user") or {}).get("name", "")
+
+    @property
+    def alias(self):
+        return "main" if self.cfg == HOME else os.path.basename(self.cfg).removeprefix(".azure-")
+
+    def use(self, cfg):
+        self.cfg = os.environ["AZURE_CONFIG_DIR"] = cfg
+        # The shell that started entra picks this up on its next prompt (azure/entra.zsh).
+        os.makedirs(CACHE, exist_ok=True)
+        with open(os.path.join(CACHE, f"shell-{os.getppid()}"), "w") as f:
+            f.write(cfg)
+        self.load()
+
+    def get(self, key, fn):
+        if key not in self.cache:
+            self.cache[key] = fn()
+        return self.cache[key]
+
+    def me(self):
+        return self.get(("me", self.cfg), lambda: graph("me?$select=id")["id"])
+
+    def ado_here(self):
+        """DevOps lives in the tenant of the ~/.azure login; only there do users and groups line up with it."""
+        if self._ado_tid is False:
+            try:
+                self._ado_tid = az(HOME, "account", "show")["tenantId"]
+            except Fail:
+                self._ado_tid = None
+        return bool(self.tid) and self.tid == self._ado_tid
+
+    def subs(self):
+        def fetch():
+            return [a for a in az(self.cfg, "account", "list")
+                    if a.get("tenantId") == self.tid and not a.get("name", "").startswith("N/A")]
+        return self.get(("subs", self.cfg), fetch)
+
+    def users(self, cfg=None):
+        cfg = cfg or self.cfg
+        def fetch():
+            us = pages(q("users", {"$select": "id,displayName,userPrincipalName,mail,userType,accountEnabled",
+                                   "$top": "999"}), cfg=cfg)
+            return sorted(us, key=lambda u: (u.get("displayName") or "").lower())
+        return self.get(("users", cfg), fetch)
+
+    def groups(self, cfg=None):
+        cfg = cfg or self.cfg
+        def fetch():
+            gs = pages(q("groups", {"$select": "id,displayName,description", "$top": "999"}), cfg=cfg)
+            return sorted(gs, key=lambda g: (g.get("displayName") or "").lower())
+        return self.get(("groups", cfg), fetch)
+
+
+S = State()
+
+
+# ── tenants ─────────────────────────────────────────────────────────────────
+
+
+class Tenant:
+    def __init__(self, alias, domain):
+        self.alias, self.domain = alias, domain
+        self.dir = HOME if alias == "main" else os.path.expanduser(f"~/.azure-{alias}")
+        self.accounts, self.err = [], ""
+
+    def load(self):
+        try:
+            self.accounts = az(self.dir, "account", "list") or []
+        except Fail as e:
+            self.err = str(e)
+        return self
+
+    @property
+    def user(self):
+        return next((a["user"]["name"] for a in self.accounts if a.get("user")), "")
+
+    def login(self):
+        """Runs az login in the terminal (outside curses). True when it worked."""
+        args = ["login"] if self.domain == "-" else ["login", "--tenant", self.domain, "--allow-no-subscriptions"]
+        os.makedirs(self.dir, exist_ok=True)
+        print(f"\n$ AZURE_CONFIG_DIR={self.dir} az {' '.join(args)}\n")
+        ok = subprocess.run(["az", *args, "-o", "none"], env=dict(os.environ, AZURE_CONFIG_DIR=self.dir)).returncode == 0
+        _tokens.clear()
+        self.load()
+        return ok and bool(self.accounts)
+
+
+def tenants():
+    known = []
+    try:
+        with open(AZT) as f:
+            known = re.findall(r'^\s*([\w.-]+)\)\s+echo "([^"$]+)"', f.read(), re.M)
+    except OSError:
+        pass
+    ts = [Tenant(a, d) for a, d in known or [("main", "-")]]
+    seen = {t.dir for t in ts}
+    # Like azt, an unknown alias is the tenant domain itself. Only shown while logged in:
+    # other tools leave az config dirs around too (~/.azure-devops).
+    extra = [Tenant(os.path.basename(d).removeprefix(".azure-"), os.path.basename(d).removeprefix(".azure-"))
+             for d in sorted(glob.glob(os.path.expanduser("~/.azure-*")))
+             if d not in seen and os.path.isfile(os.path.join(d, "azureProfile.json"))]
+    with concurrent.futures.ThreadPoolExecutor() as ex:
+        list(ex.map(Tenant.load, ts + extra))
+    return ts + [t for t in extra if t.accounts]
+
+
+# ── devops ──────────────────────────────────────────────────────────────────
+
+VSAEX = f"https://vsaex.dev.azure.com/{ORG}/_apis"
+VSSPS = f"https://vssps.dev.azure.com/{ORG}/_apis"
+RULES = f"{VSAEX}/GroupEntitlements"
+
+
+def ado_users():
+    """DevOps users by Entra object id."""
+    def fetch():
+        out, cont = [], None
+        while True:
+            j = ado(f"{VSAEX}/userentitlements?api-version=7.1"
+                    + (f"&continuationToken={urllib.parse.quote(cont)}" if cont else ""))
+            out += j.get("items") or j.get("members") or []
+            cont = j.get("continuationToken")
+            if isinstance(cont, list):
+                cont = cont[0] if cont else None
+            if not cont:
+                return {u["user"].get("originId"): u for u in out}
+    return S.get("ado_users", fetch)
+
+
+def rules():
+    return S.get("rules", lambda: sorted(ado(f"{RULES}?api-version=7.1-preview.1").get("value", []),
+                                         key=lambda r: r["group"].get("displayName", "").lower()))
+
+
+def rule_summary(r):
+    projects = ", ".join(f"{p['projectRef']['name']}: {p['group']['groupType'].removeprefix('project').lower()}"
+                         for p in r.get("projectEntitlements") or [])
+    return f"{(r.get('licenseRule') or {}).get('licenseDisplayName', '?')}" + (f" · {projects}" if projects else "")
+
+
+def ado_groups_of(uid):
+    """(entitlement, DevOps group names) for an Entra user, or None when not in the org."""
+    e = ado_users().get(uid)
+    if not e:
+        return None
+    up = ado(f"{VSSPS}/graph/Memberships/{e['user']['descriptor']}?direction=up&api-version=7.1-preview.1")
+    ds = [m["containerDescriptor"] for m in up.get("value", [])]
+    names = []
+    if ds:
+        found = ado(f"{VSSPS}/graph/subjectlookup?api-version=7.1-preview.1",
+                    {"lookupKeys": [{"descriptor": d} for d in ds]}).get("value", {})
+        names = sorted(v.get("principalName") or v.get("displayName", "?") for v in found.values())
+    return e, names
+
+
+# ── pim ─────────────────────────────────────────────────────────────────────
+
+
+def pim_file(tid):
+    return os.path.join(CACHE, f"pim-{tid}.json")
+
+
+def pim_save(tid, j):
+    os.makedirs(CACHE, exist_ok=True)
+    fd = os.open(pim_file(tid), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"access_token": j["access_token"], "refresh_token": j.get("refresh_token"),
+                   "expires": time.time() + int(j.get("expires_in", 3600))}, f)
+
+
+def pim_token(tid, login=None):
+    """A Graph token with PIM scopes: cached, refreshed, or (with login) a new sign-in. None if none of those."""
+    try:
+        with open(pim_file(tid)) as f:
+            c = json.load(f)
+    except (OSError, ValueError):
+        c = {}
+    if c.get("access_token") and c.get("expires", 0) - time.time() > 120:
+        return c["access_token"]
+    if c.get("refresh_token"):
+        j = oauth(tid, "token", client_id=PIM_CLIENT, grant_type="refresh_token",
+                  refresh_token=c["refresh_token"], scope=PIM_SCOPE)
+        if "access_token" in j:
+            pim_save(tid, j)
+            return j["access_token"]
+    if not login:
+        return None
+    j = login(tid)
+    pim_save(tid, j)
+    return j["access_token"]
+
+
+def browser_login(tid):
+    """Auth code + PKCE against a one-shot localhost listener. Runs outside curses."""
+    verifier = secrets.token_urlsafe(64)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    state, got = secrets.token_urlsafe(16), {}
+
+    class Back(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            p = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            if p.get("state", [""])[0] == state:
+                got.update({k: v[0] for k, v in p.items()})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write("<p style='font:16px system-ui'>entra: ferdig, du kan lukke fanen.</p>".encode())
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Back)
+    srv.timeout = 5
+    redirect = f"http://localhost:{srv.server_address[1]}"
+    url = f"https://login.microsoftonline.com/{tid}/oauth2/v2.0/authorize?" + urllib.parse.urlencode({
+        "client_id": PIM_CLIENT, "response_type": "code", "redirect_uri": redirect, "scope": PIM_SCOPE,
+        "code_challenge": challenge, "code_challenge_method": "S256", "state": state,
+        "login_hint": S.user, "prompt": "select_account"})
+    print(f"\nPIM-innlogging for {S.org or tid} i nettleseren … (ctrl-c avbryter)\n")
+    subprocess.run(["open", url])
+    deadline = time.time() + 300
+    try:
+        while not got and time.time() < deadline:
+            srv.handle_request()
+    except KeyboardInterrupt:
+        raise Fail("innlogging avbrutt")
+    finally:
+        srv.server_close()
+    if "code" not in got:
+        raise Fail(got.get("error_description", "innlogging avbrutt eller tidsavbrutt").splitlines()[0])
+    j = oauth(tid, "token", client_id=PIM_CLIENT, grant_type="authorization_code", code=got["code"],
+              redirect_uri=redirect, code_verifier=verifier, scope=PIM_SCOPE)
+    if "access_token" not in j:
+        raise Fail(reason(json.dumps(j)))
+    return j
+
+
+def admin_status():
+    """Sets S.admin ('til 14:32', 'permanent', '') and S.admin_end from PIM, if there is a PIM login."""
+    tok = pim_token(S.tid) if S.tid else None
+    if not tok:
+        S.admin = S.admin_end = None
+        return
+    rows = pages(q("roleManagement/directory/roleAssignmentScheduleInstances",
+                   {"$filter": f"principalId eq '{S.me()}' and roleDefinitionId eq '{GLOBAL_ADMIN}'"}), tok=tok)
+    ends = [when(r.get("endDateTime")) for r in rows]
+    if not rows:
+        S.admin, S.admin_end = "", None
+    elif any(e is None for e in ends):
+        S.admin, S.admin_end = "permanent", None
+    else:
+        S.admin_end = max(ends)
+        S.admin = f"til {date(S.admin_end, '%H:%M')}"
+
+
+def activate(why, login):
+    tok = pim_token(S.tid, login)
+    body = {"action": "selfActivate", "principalId": S.me(), "roleDefinitionId": GLOBAL_ADMIN,
+            "directoryScopeId": "/", "justification": why,
+            "scheduleInfo": {"startDateTime": now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                             "expiration": {"type": "AfterDuration", "duration": f"PT{ADMIN_MINUTES}M"}}}
+    try:
+        graph("roleManagement/directory/roleAssignmentScheduleRequests", body, tok=tok)
+        msg = f"✓ Global Administrator i {ADMIN_MINUTES} min"
+    except Fail as e:
+        if "assignmentexists" not in str(e).lower():
+            raise
+        msg = "Global Administrator er allerede aktiv"
+    try:
+        admin_status()
+    except Fail:
+        pass
+    return msg + (f", {S.admin}" if S.admin else "")
+
+
+# ── text ────────────────────────────────────────────────────────────────────
+
+
+def listed(x):
+    """x if a fetch gave a list, else nothing (it failed, or wasn't asked for)."""
+    return x if isinstance(x, list) else []
+
+
+def ln(*parts):
+    return [p if isinstance(p, tuple) else (p, None) for p in parts]
+
+
+def section(title, n=None):
+    return [ln(), ln((title + (f" ({n})" if n is not None else ""), "bold"))]
+
+
+def field(label, value, color=None):
+    return ln((f"  {label:<18}", "dim"), (str(value) if value not in (None, "") else "—", color))
+
+
+def failed(e):
+    return [ln(("  " + str(e), "red"))]
+
+
+def table(rows, cap=48):
+    """Pads every cell but the last to its column's width."""
+    n = max((len(r) for r in rows), default=0)
+    widths = [min(max((len(r[i][0]) for r in rows if i < len(r) - 1), default=0), cap) for i in range(n)]
+    out = []
+    for r in rows:
+        line = []
+        for i, (t, col) in enumerate(r):
+            if i < len(r) - 1:
+                t = (t if len(t) <= widths[i] else t[:widths[i] - 1] + "…").ljust(widths[i]) + "  "
+            line.append((t, col))
+        out.append(line)
+    return out
+
+
+def portal(view):
+    return f"https://portal.azure.com/#@{S.tid}/view/{view}"
+
+
+def scope_label(scope, subs):
+    names = {s["id"]: s["name"] for s in subs}
+    m = re.match(r"/subscriptions/([^/]+)(?:/resourceGroups/([^/]+))?(?:/providers/.*/([^/]+))?$", scope, re.I)
+    if not m:
+        return scope
+    return " / ".join(p for p in (names.get(m[1], m[1][:8]), m[2], m[3]) if p)
+
+
+# ── views ───────────────────────────────────────────────────────────────────
+
+
+class Tab:
+    name, keys = "", ""
+
+    def __init__(self):
+        self.rows, self.sel, self.top, self.filter = None, 0, 0, ""
+
+    def keep(self, row):
+        return True
+
+    def visible(self):
+        words = self.filter.lower().split()
+        return [r for r in self.rows or [] if self.keep(r) and all(w in self.text(r).lower() for w in words)]
+
+    def fetch(self):
+        return []
+
+    def cells(self, row):
+        return []
+
+    def text(self, row):
+        return ""
+
+    def open(self, ui, row):
+        return None
+
+    def key(self, ui, k, row):
+        return False
+
+    def mark(self):
+        return ""
+
+
+class Detail:
+    title, keys = "", ""
+
+    def __init__(self):
+        self.lines, self.top = None, 0
+
+    def build(self):
+        return []
+
+    def key(self, ui, k):
+        return False
+
+
+class TenantTab(Tab):
+    name = "tenant"
+    keys = "enter bytt · l logg inn på nytt · n ny tenant"
+
+    def fetch(self):
+        rows = []
+        for t in tenants():
+            rows.append((t, None))
+            rows += [(t, a) for a in sorted(t.accounts, key=lambda a: a.get("name", "").startswith("N/A"))]
+        return rows
+
+    def cells(self, row):
+        t, a = row
+        here = t.dir == S.cfg
+        if a is None:
+            who = (t.user, None) if t.accounts else (t.err or "ikke logget inn", "yellow")
+            return [("●" if here else " ", "green"), (t.alias, "bold"),
+                    ("hjemmetenant" if t.domain == "-" else t.domain, "dim"), who,
+                    (t.dir.replace(os.path.expanduser("~"), "~"), "dim")]
+        name = "(tenant-nivå)" if a.get("name", "").startswith("N/A") else a.get("name", "")
+        star = a.get("isDefault")
+        return [(" ", None), ("  ★ " if star else "    ", "green" if here else "dim"),
+                (name, "green" if here and star else None), (a.get("tenantId", "")[:8], "dim"), (a["id"], "dim")]
+
+    def text(self, row):
+        t, a = row
+        return " ".join([t.alias, t.domain, t.user] + ([a.get("name", ""), a["id"]] if a else []))
+
+    def open(self, ui, row):
+        t, a = row
+        if not t.accounts and not ui.outside(t.login):
+            return ui.say(f"ikke logget inn på {t.alias}", True)
+        if a and not a.get("isDefault"):
+            az(t.dir, "account", "set", "--subscription", a["id"])
+        ui.busy("bytter")
+        S.use(t.dir)
+        ui.reset()
+        sub = f" · {a['name']}" if a and not a.get("name", "").startswith("N/A") else ""
+        ui.say(f"✓ {t.alias}{sub} — skallet følger etter ved neste prompt")
+
+    def key(self, ui, k, row):
+        if k == "l" and row:
+            ui.outside(row[0].login)
+            self.rows = None
+            return True
+        if k == "n":
+            d = ui.ask("tenant (domene eller GUID): ")
+            if d:
+                t = Tenant(d, d)
+                if ui.outside(t.login):
+                    self.open(ui, (t, None))
+                self.rows = None
+            return True
+        return False
+
+
+class UserTab(Tab):
+    name = "brukere"
+    keys = "enter vis · d bare DevOps · o portal · c kopier UPN"
+
+    def __init__(self):
+        super().__init__()
+        self.devops, self.ado = False, {}
+
+    def fetch(self):
+        users = S.users()
+        self.ado = {}
+        if S.ado_here():
+            try:
+                self.ado = ado_users()
+            except Fail:
+                pass
+        return users
+
+    def keep(self, u):
+        return not self.devops or u["id"] in self.ado
+
+    def mark(self):
+        return " · bare DevOps" if self.devops else ""
+
+    def cells(self, u):
+        lic = (self.ado.get(u["id"]) or {}).get("accessLevel", {}).get("licenseDisplayName", "")
+        flags = ("deaktivert", "red") if u.get("accountEnabled") is False else \
+                ("gjest", "yellow") if u.get("userType") == "Guest" else ("", None)
+        return [(u.get("displayName") or "?", "bold"), (u.get("userPrincipalName", ""), "dim"), flags, (lic, "cyan")]
+
+    def text(self, u):
+        return " ".join(filter(None, (u.get("displayName"), u.get("userPrincipalName"), u.get("mail"))))
+
+    def open(self, ui, u):
+        return UserDetail(u)
+
+    def key(self, ui, k, u):
+        if k == "d":
+            if not S.ado_here():
+                ui.say("DevOps hører til hjemmetenanten (main)", True)
+            else:
+                self.devops, self.sel = not self.devops, 0
+            return True
+        if k == "o" and u:
+            subprocess.run(["open", portal(f"Microsoft_AAD_UsersAndTenants/UserProfileMenuBlade/~/overview/userId/{u['id']}")])
+            return True
+        if k == "c" and u:
+            ui.copy(u.get("userPrincipalName", ""))
+            return True
+        return False
+
+
+class UserDetail(Detail):
+    keys = "+ legg i gruppe · - fjern fra gruppe · o portal · c kopier UPN"
+
+    def __init__(self, u):
+        super().__init__()
+        self.u, self.title, self.groups = u, u.get("displayName", ""), []
+
+    def build(self):
+        uid = self.u["id"]
+        jobs = {
+            "user": lambda: graph(f"users/{uid}?$select=displayName,userPrincipalName,mail,userType,accountEnabled,"
+                                  "jobTitle,department,createdDateTime,onPremisesSyncEnabled"),
+            "roles": lambda: pages(q("roleManagement/directory/roleAssignments",
+                                     {"$filter": f"principalId eq '{uid}'", "$expand": "roleDefinition"})),
+            "groups": lambda: pages(q(f"users/{uid}/memberOf", {"$select": "id,displayName", "$top": "999"})),
+            "rbac": lambda: self.rbac(uid),
+        }
+        pim = pim_token(S.tid)
+        if pim:
+            f = {"$filter": f"principalId eq '{uid}'", "$expand": "roleDefinition"}
+            jobs["eligible"] = lambda: pages(q("roleManagement/directory/roleEligibilitySchedules", f), tok=pim)
+            jobs["active"] = lambda: pages(q("roleManagement/directory/roleAssignmentScheduleInstances",
+                                             {"$filter": f"principalId eq '{uid}'"}), tok=pim)
+        if S.ado_here():
+            jobs["ado"] = lambda: ado_groups_of(uid)
+            jobs["rules"] = rules
+        r = parallel(jobs)
+
+        u = r["user"] if not isinstance(r["user"], Fail) else self.u
+        out = [ln((u.get("displayName", ""), "bold"))]
+        out += [field("UPN", u.get("userPrincipalName")), field("e-post", u.get("mail")),
+                field("type", "gjest" if u.get("userType") == "Guest" else "medlem",
+                      "yellow" if u.get("userType") == "Guest" else None),
+                field("aktiv", "ja" if u.get("accountEnabled", True) else "nei — deaktivert",
+                      None if u.get("accountEnabled", True) else "red"),
+                field("stilling", " · ".join(filter(None, (u.get("jobTitle"), u.get("department"))))),
+                field("opprettet", date(u.get("createdDateTime"))),
+                field("synket fra AD", "ja" if u.get("onPremisesSyncEnabled") else "nei"),
+                field("objekt-id", uid, "dim")]
+
+        out += section("Entra-roller")
+        if isinstance(r["roles"], Fail):
+            out += failed(r["roles"])
+        else:
+            ends = {}
+            for a in listed(r.get("active")):
+                if a.get("assignmentType") == "Activated":
+                    ends[a["roleDefinitionId"]] = a.get("endDateTime")
+            rows = []
+            for a in r["roles"]:
+                rd, scope = a.get("roleDefinition") or {}, a.get("directoryScopeId", "/")
+                end = ends.get(a.get("roleDefinitionId"))
+                rows.append([("⚡" if end else "●", "yellow" if end else "green"), (rd.get("displayName", "?"), None),
+                             (f"aktivert til {date(end, '%d.%m %H:%M')}" if end else "aktiv", "yellow" if end else "dim"),
+                             ("" if scope == "/" else scope, "dim")])
+            for e in listed(r.get("eligible")):
+                rows.append([("○", "dim"), ((e.get("roleDefinition") or {}).get("displayName", "?"), None),
+                             ("kvalifisert (PIM)", "dim"), ("", None)])
+            out += [ln("  ", *row) for row in table(rows)] or [ln(("  ingen", "dim"))]
+            if not pim:
+                out.append(ln(("  PIM-kvalifiseringer vises etter `entra pim-login` (eller A)", "dim")))
+            elif isinstance(r.get("eligible"), Fail):
+                out += failed(r["eligible"])
+
+        out += section("Azure-roller (RBAC)")
+        if isinstance(r["rbac"], Fail):
+            out += failed(r["rbac"])
+        elif not r["rbac"]:
+            out.append(ln(("  ingen" + ("" if S.subs() else " — tenanten har ingen abonnementer"), "dim")))
+        else:
+            rows = [[(a.get("roleDefinitionName", "?"), None), (scope_label(a.get("scope", ""), S.subs()), "dim"),
+                     ("" if a.get("principalId") == uid else f"via {a.get('principalName', 'gruppe')}", "cyan")]
+                    for a in sorted(r["rbac"], key=lambda a: (a.get("scope", ""), a.get("roleDefinitionName", "")))]
+            out += [ln("  ", *row) for row in table(rows, cap=60)]
+
+        rule_of = {}
+        if isinstance(r.get("rules"), list):
+            rule_of = {x["group"].get("originId"): x for x in r["rules"]}
+        if isinstance(r["groups"], Fail):
+            self.groups = []
+            out += section("Grupper") + failed(r["groups"])
+        else:
+            self.groups = sorted((g for g in r["groups"] if g.get("@odata.type") == "#microsoft.graph.group"),
+                                 key=lambda g: (g.get("displayName") or "").lower())
+            out += section("Grupper", len(self.groups))
+            rows = [[(g.get("displayName") or g["id"], None),
+                     (f"→ DevOps {rule_summary(rule_of[g['id']])}" if g["id"] in rule_of else "", "cyan")]
+                    for g in self.groups]
+            out += [ln("  ", *row) for row in table(rows)] or [ln(("  ingen", "dim"))]
+
+        if "ado" in r:
+            out += section(f"DevOps ({ORG})")
+            if isinstance(r["ado"], Fail):
+                out += failed(r["ado"])
+            elif not r["ado"]:
+                out.append(ln(("  ikke i organisasjonen", "dim")))
+            else:
+                e, names = r["ado"]
+                out.append(field("lisens", e.get("accessLevel", {}).get("licenseDisplayName"), "cyan"))
+                out.append(field("sist aktiv", date(e.get("lastAccessedDate"))))
+                out += [ln(("  " + n, None)) for n in names]
+        return out
+
+    def rbac(self, uid):
+        subs = S.subs()
+        if not subs:
+            return []
+        found = parallel({s["id"]: (lambda s=s: az(S.cfg, "role", "assignment", "list", "--assignee", uid, "--all",
+                                                    "--include-groups", "--include-inherited",
+                                                    "--subscription", s["id"])) for s in subs})
+        seen, out = set(), []
+        for v in found.values():
+            if isinstance(v, Fail):
+                raise v
+            for a in v:
+                if a["id"] not in seen:
+                    seen.add(a["id"])
+                    out.append(a)
+        return out
+
+    def key(self, ui, k):
+        uid = self.u["id"]
+        if k == "+":
+            rule_of = {}
+            if S.ado_here():
+                try:
+                    rule_of = {x["group"].get("originId"): x for x in rules()}
+                except Fail:
+                    pass
+            mine = {g["id"] for g in self.groups}
+            ui.busy()
+            g = ui.pick(f"Legg {self.title} i gruppe", [g for g in S.groups() if g["id"] not in mine],
+                        lambda g: [(g.get("displayName") or g["id"], None),
+                                   (f"→ DevOps {rule_summary(rule_of[g['id']])}" if g["id"] in rule_of else "", "cyan")])
+            if g:
+                graph(f"groups/{g['id']}/members/$ref", {"@odata.id": f"{GRAPH}/directoryObjects/{uid}"})
+                ui.say(f"✓ {self.title} lagt i {g['displayName']}")
+                self.lines = None
+            return True
+        if k == "-":
+            g = ui.pick(f"Fjern {self.title} fra gruppe", self.groups, lambda g: [(g.get("displayName") or g["id"], None)])
+            if g and ui.yes(f"fjerne {self.title} fra {g['displayName']}?"):
+                graph(f"groups/{g['id']}/members/{uid}/$ref", method="DELETE")
+                ui.say(f"✓ {self.title} fjernet fra {g['displayName']}")
+                self.lines = None
+            return True
+        if k == "o":
+            subprocess.run(["open", portal(f"Microsoft_AAD_UsersAndTenants/UserProfileMenuBlade/~/overview/userId/{uid}")])
+            return True
+        if k == "c":
+            ui.copy(self.u.get("userPrincipalName", ""))
+            return True
+        return False
+
+
+class DevopsTab(Tab):
+    name = "devops"
+    keys = "enter vis gruppe · n ny regel · x slett regel · o portal"
+
+    def fetch(self):
+        S.cache.pop("rules", None)
+        return rules()
+
+    def cells(self, r):
+        g = r["group"]
+        return [(g.get("displayName", "?"), "red" if g.get("isDeleted") else "bold"),
+                ((r.get("licenseRule") or {}).get("licenseDisplayName", "?"), "cyan"),
+                (rule_summary(r).partition(" · ")[2] or "ingen prosjekter", "dim"),
+                ("slettet i Entra" if g.get("isDeleted") else "" if r.get("status") == "applied" else r.get("status", ""),
+                 "red")]
+
+    def text(self, r):
+        return f"{r['group'].get('displayName', '')} {rule_summary(r)}"
+
+    def open(self, ui, r):
+        return RuleDetail(r)
+
+    def key(self, ui, k, r):
+        if k == "n":
+            new_rule(ui)
+            self.rows = None
+            return True
+        if k == "x" and r:
+            if delete_rule(ui, r):
+                self.rows = None
+            return True
+        if k == "o" and r:
+            subprocess.run(["open", group_portal(r["group"].get("originId"))])
+            return True
+        return False
+
+
+def group_portal(gid):
+    return f"https://portal.azure.com/#view/Microsoft_AAD_IAM/GroupDetailsMenuBlade/~/Overview/groupId/{gid}"
+
+
+def new_rule(ui):
+    ui.busy()
+    taken = {r["group"].get("originId") for r in rules()}
+    g = ui.pick("Ny DevOps-regel: Entra-gruppe", [g for g in S.groups(HOME) if g["id"] not in taken],
+                lambda g: [(g.get("displayName") or g["id"], None), ((g.get("description") or "")[:60], "dim")])
+    if not g:
+        return
+    lic = ui.pick(f"{g['displayName']}: lisens", LICENSES, lambda x: [(x, None)])
+    if not lic:
+        return
+    projects = sorted(ado(f"https://dev.azure.com/{ORG}/_apis/projects?api-version=7.1").get("value", []),
+                      key=lambda p: p["name"].lower())
+    p = ui.pick(f"{g['displayName']}: prosjekt", [None] + projects,
+                lambda p: [(p["name"], None) if p else ("(ingen prosjekttilgang)", "dim")])
+    if p is False:
+        return
+    role = p and ui.pick(f"{g['displayName']} i {p['name']}: rolle", ADO_ROLES, lambda r: [(r[0], None)])
+    if p and not role:
+        return
+    what = f"{g['displayName']} → {lic}" + (f" · {p['name']}: {role[0]}" if p else "")
+    if not ui.yes(f"opprett regel {what}?"):
+        return
+    body = {"group": {"origin": "aad", "originId": g["id"], "subjectKind": "group"},
+            "licenseRule": {"licensingSource": "account", "accountLicenseType": "express" if lic == "Basic" else "stakeholder",
+                            "licenseDisplayName": lic},
+            "projectEntitlements": [{"projectRef": {"id": p["id"]}, "group": {"groupType": role[1]}}] if p else []}
+    res = ado(f"{RULES}?api-version=7.1-preview.1", body) or {}
+    op = res.get("operationResult") or res
+    if op.get("isSuccess") is False:
+        errs = "; ".join(str(e.get("value", e)) for e in op.get("errors") or []) or "ukjent feil"
+        raise Fail(f"DevOps avviste regelen: {errs}")
+    S.cache.pop("rules", None)
+    ui.say(f"✓ regel opprettet: {what} — DevOps synker innen kort tid")
+
+
+def delete_rule(ui, r):
+    name = r["group"].get("displayName", "?")
+    if not ui.yes(f"slette DevOps-regelen for {name}? (tilgang fjernes ved neste synk, opptil 24 t)"):
+        return False
+    ado(f"{RULES}/{r['id']}?api-version=7.1-preview.1", method="DELETE")
+    S.cache.pop("rules", None)
+    ui.say(f"✓ regel for {name} slettet")
+    return True
+
+
+class RuleDetail(Detail):
+    keys = "+ legg til medlem · - fjern medlem · x slett regel · o portal"
+
+    def __init__(self, r):
+        super().__init__()
+        self.r, self.title, self.members = r, r["group"].get("displayName", ""), []
+        self.gid = r["group"].get("originId")
+
+    def build(self):
+        r, g = self.r, self.r["group"]
+        out = [ln((self.title, "bold"))]
+        out += [field("beskrivelse", g.get("description")), field("e-post", g.get("mailAddress")),
+                field("lisens", (r.get("licenseRule") or {}).get("licenseDisplayName"), "cyan"),
+                field("status", r.get("status")), field("sist kjørt", date(r.get("lastExecuted"), "%d.%m.%Y %H:%M")),
+                field("Entra-gruppe", self.gid, "dim")]
+        if g.get("isDeleted"):
+            out.append(ln(("  Gruppen er slettet i Entra — regelen gjør ingenting. Slett den (x).", "red")))
+        out += section("Prosjekter")
+        out += [ln("  ", *row) for row in table([[(p["projectRef"]["name"], None),
+                                                   (p["group"]["groupType"].removeprefix("project").lower(), "cyan")]
+                                                  for p in r.get("projectEntitlements") or []])] \
+            or [ln(("  ingen prosjekttilgang — bare lisens", "dim"))]
+        if g.get("isDeleted"):
+            return out
+        try:
+            self.members = sorted(pages(q(f"groups/{self.gid}/members",
+                                          {"$select": "id,displayName,userPrincipalName", "$top": "999"}), cfg=HOME),
+                                  key=lambda m: (m.get("displayName") or "").lower())
+            out += section("Medlemmer i Entra", len(self.members))
+            out += [ln("  ", *row) for row in table([[(m.get("displayName") or m["id"], None),
+                                                       (m.get("userPrincipalName") or m.get("@odata.type", "").split(".")[-1], "dim")]
+                                                      for m in self.members])] or [ln(("  ingen", "dim"))]
+        except Fail as e:
+            out += section("Medlemmer i Entra") + failed(e)
+        return out
+
+    def key(self, ui, k):
+        if k == "+":
+            ui.busy()
+            have = {m["id"] for m in self.members}
+            u = ui.pick(f"Legg til i {self.title}", [u for u in S.users(HOME) if u["id"] not in have],
+                        lambda u: [(u.get("displayName") or "?", None), (u.get("userPrincipalName", ""), "dim")])
+            if u:
+                graph(f"groups/{self.gid}/members/$ref", {"@odata.id": f"{GRAPH}/directoryObjects/{u['id']}"}, cfg=HOME)
+                ui.say(f"✓ {u['displayName']} lagt i {self.title} — DevOps synker innen kort tid")
+                self.lines = None
+            return True
+        if k == "-":
+            m = ui.pick(f"Fjern fra {self.title}", self.members,
+                        lambda m: [(m.get("displayName") or "?", None), (m.get("userPrincipalName", ""), "dim")])
+            if m and ui.yes(f"fjerne {m.get('displayName')} fra {self.title}?"):
+                graph(f"groups/{self.gid}/members/{m['id']}/$ref", method="DELETE", cfg=HOME)
+                ui.say(f"✓ {m.get('displayName')} fjernet fra {self.title}")
+                self.lines = None
+            return True
+        if k == "x":
+            if delete_rule(ui, self.r):
+                ui.back(reload=True)
+            return True
+        if k == "o":
+            subprocess.run(["open", group_portal(self.gid)])
+            return True
+        return False
+
+
+def expiry(app):
+    ends = [when(c.get("endDateTime")) for c in app.get("passwordCredentials", []) + app.get("keyCredentials", [])]
+    ends = [e for e in ends if e]
+    if not ends:
+        return ("", None)
+    live = [e for e in ends if e > now()]
+    if not live:
+        return ("✗ utløpt", "red")
+    d = (min(live) - now()).days
+    return (f"{'⚠' if d < SOON else '✓'} {d}d", "yellow" if d < SOON else "dim")
+
+
+class AppTab(Tab):
+    name = "apper"
+    keys = "enter vis · e utløper snart · o portal · c kopier appId"
+
+    def __init__(self):
+        super().__init__()
+        self.expiring = False
+
+    def fetch(self):
+        apps = pages(q("applications", {"$top": "999", "$select": (
+            "id,appId,displayName,createdDateTime,signInAudience,passwordCredentials,keyCredentials,web,spa,"
+            "publicClient,requiredResourceAccess,identifierUris,api,appRoles,notes,publisherDomain")}))
+        return sorted(apps, key=lambda a: (a.get("displayName") or "").lower())
+
+    def keep(self, a):
+        return not self.expiring or expiry(a)[1] in ("red", "yellow")
+
+    def mark(self):
+        return " · utløper snart" if self.expiring else ""
+
+    def cells(self, a):
+        return [(a.get("displayName") or "?", "bold"), (a["appId"], "dim"),
+                (AUDIENCE.get(a.get("signInAudience"), a.get("signInAudience", "")), None), expiry(a),
+                (date(a.get("createdDateTime")), "dim")]
+
+    def text(self, a):
+        return f"{a.get('displayName', '')} {a['appId']} {' '.join(a.get('identifierUris') or [])}"
+
+    def open(self, ui, a):
+        return AppDetail(a)
+
+    def key(self, ui, k, a):
+        if k == "e":
+            self.expiring, self.sel = not self.expiring, 0
+            return True
+        if k == "o" and a:
+            subprocess.run(["open", app_portal(a)])
+            return True
+        if k == "c" and a:
+            ui.copy(a["appId"])
+            return True
+        return False
+
+
+def app_portal(a):
+    return portal(f"Microsoft_AAD_RegisteredApps/ApplicationMenuBlade/~/Overview/appId/{a['appId']}")
+
+
+def sp_of(app_id):
+    """The service principal (enterprise app) for an appId in this tenant, or None."""
+    def fetch():
+        try:
+            return graph(f"servicePrincipals(appId='{app_id}')"
+                         "?$select=id,displayName,accountEnabled,appRoles,oauth2PermissionScopes")
+        except Fail as e:
+            if e.code == 404:
+                return None
+            raise
+    return S.get(("sp", S.cfg, app_id), fetch)
+
+
+class AppDetail(Detail):
+    keys = "o portal · c kopier appId"
+
+    def __init__(self, a):
+        super().__init__()
+        self.a, self.title = a, a.get("displayName", "")
+
+    def build(self):
+        a = self.a
+        resources = [r["resourceAppId"] for r in a.get("requiredResourceAccess") or []]
+        jobs = {"owners": lambda: pages(f"applications/{a['id']}/owners?$select=displayName,userPrincipalName"),
+                "sp": lambda: sp_of(a["appId"])}
+        jobs.update({f"res:{r}": (lambda r=r: sp_of(r)) for r in resources})
+        r = parallel(jobs)
+        sp = r["sp"] if not isinstance(r["sp"], Fail) else None
+        grants, assigned = [], []
+        if sp:
+            g = parallel({"grants": lambda: pages(q("oauth2PermissionGrants", {"$filter": f"clientId eq '{sp['id']}'"})),
+                          "roles": lambda: pages(f"servicePrincipals/{sp['id']}/appRoleAssignments")})
+            grants = g["grants"] if isinstance(g["grants"], list) else []
+            assigned = g["roles"] if isinstance(g["roles"], list) else []
+
+        out = [ln((a.get("displayName", ""), "bold"))]
+        out += [field("appId (klient)", a["appId"]), field("objekt-id", a["id"], "dim"),
+                field("målgruppe", AUDIENCE.get(a.get("signInAudience"), a.get("signInAudience"))),
+                field("opprettet", date(a.get("createdDateTime"))), field("publisher", a.get("publisherDomain")),
+                field("identifier-URI", ", ".join(a.get("identifierUris") or [])),
+                field("enterprise-app", ("ja" + ("" if sp.get("accountEnabled", True) else " — deaktivert")) if sp
+                      else "nei — ingen service principal i tenanten", None if sp else "yellow")]
+        if a.get("notes"):
+            out.append(field("notater", a["notes"]))
+
+        creds = [("secret", x) for x in a.get("passwordCredentials") or []] + \
+                [("sertifikat", x) for x in a.get("keyCredentials") or []]
+        out += section("Hemmeligheter og sertifikater", len(creds))
+        rows = []
+        for kind, x in sorted(creds, key=lambda kx: kx[1].get("endDateTime") or ""):
+            end = when(x.get("endDateTime"))
+            d = (end - now()).days if end else None
+            state = ("utløpt", "red") if d is not None and d < 0 else \
+                    (f"{d} dager igjen", "yellow" if d is not None and d < SOON else "dim")
+            rows.append([(kind, "dim"), (x.get("displayName") or x.get("hint") or x.get("keyId", "")[:8], None),
+                         (f"utløper {date(end)}", None), state])
+        out += [ln("  ", *row) for row in table(rows)] or [ln(("  ingen", "dim"))]
+
+        uris = [("web", u) for u in (a.get("web") or {}).get("redirectUris") or []] + \
+               [("spa", u) for u in (a.get("spa") or {}).get("redirectUris") or []] + \
+               [("mobil/desktop", u) for u in (a.get("publicClient") or {}).get("redirectUris") or []]
+        out += section("Redirect-URIer", len(uris))
+        out += [ln("  ", *row) for row in table([[(k, "dim"), (u, None)] for k, u in uris])] or [ln(("  ingen", "dim"))]
+
+        out += section("API-tillatelser")
+        for need in a.get("requiredResourceAccess") or []:
+            res = r.get(f"res:{need['resourceAppId']}")
+            res = res if isinstance(res, dict) else {}
+            names = {s["id"]: s["value"] for s in res.get("oauth2PermissionScopes") or []}
+            names.update({x["id"]: x["value"] for x in res.get("appRoles") or []})
+            consented = {s for gr in grants if gr.get("resourceId") == res.get("id")
+                         and gr.get("consentType") == "AllPrincipals" for s in (gr.get("scope") or "").split()}
+            granted = {x["appRoleId"] for x in assigned if x.get("resourceId") == res.get("id")}
+            out.append(ln(("  " + (res.get("displayName") or need["resourceAppId"]), "cyan")))
+            rows = []
+            for p in need.get("resourceAccess") or []:
+                name = names.get(p["id"], p["id"])
+                if p["type"] == "Scope":
+                    ok = name in consented
+                    rows.append([(name, None), ("delegert", "dim"),
+                                 ("✓ admin-samtykke" if ok else "— ikke admin-samtykket", "green" if ok else "dim")])
+                else:
+                    ok = p["id"] in granted
+                    rows.append([(name, None), ("applikasjon", "dim"),
+                                 ("✓ gitt" if ok else "✗ ikke gitt", "green" if ok else "red")])
+            out += [ln("    ", *row) for row in table(rows)]
+        if not a.get("requiredResourceAccess"):
+            out.append(ln(("  ingen", "dim")))
+
+        scopes = (a.get("api") or {}).get("oauth2PermissionScopes") or []
+        if scopes or a.get("appRoles"):
+            out += section("Eksponert API")
+            out += [ln("  ", *row) for row in table(
+                [[("scope", "dim"), (s.get("value", ""), None), (s.get("adminConsentDisplayName") or "", "dim")] for s in scopes] +
+                [[("app-rolle", "dim"), (x.get("value") or "", None),
+                  (f"{x.get('displayName', '')} ({', '.join(x.get('allowedMemberTypes') or [])})", "dim")]
+                 for x in a.get("appRoles") or []])]
+
+        owners = r["owners"]
+        out += section("Eiere", None if isinstance(owners, Fail) else len(owners))
+        if isinstance(owners, Fail):
+            out += failed(owners)
+        else:
+            out += [ln("  ", *row) for row in table([[(o.get("displayName") or "?", None),
+                                                       (o.get("userPrincipalName") or "", "dim")] for o in owners])] \
+                or [ln(("  ingen eiere", "yellow"))]
+        return out
+
+    def key(self, ui, k):
+        if k == "o":
+            subprocess.run(["open", app_portal(self.a)])
+            return True
+        if k == "c":
+            ui.copy(self.a["appId"])
+            return True
+        return False
+
+
+# ── tui ─────────────────────────────────────────────────────────────────────
+
+ENTER = ("\n", "\r", curses.KEY_ENTER)
+BACKSPACE = ("\x7f", "\b", curses.KEY_BACKSPACE)
+
+
+class UI:
+    def __init__(self, scr):
+        self.scr = scr
+        curses.curs_set(0)
+        curses.use_default_colors()
+        self.pal = {"dim": curses.A_DIM, "bold": curses.A_BOLD}
+        for i, (name, col) in enumerate([("green", curses.COLOR_GREEN), ("red", curses.COLOR_RED),
+                                         ("yellow", curses.COLOR_YELLOW), ("cyan", curses.COLOR_CYAN)], 1):
+            curses.init_pair(i, col, -1)
+            self.pal[name] = curses.color_pair(i)
+        self.tabs = [TenantTab(), UserTab(), DevopsTab(), AppTab()]
+        self.tab = 1 if S.account else 0
+        self.stack, self.msg, self.err, self.filtering = [], "", False, False
+
+    # ── plumbing
+
+    def say(self, msg, err=False):
+        self.msg, self.err = msg, err
+
+    def copy(self, s):
+        subprocess.run(["pbcopy"], input=s, text=True)
+        self.say(f"kopiert: {s}")
+
+    def reset(self):
+        for t in self.tabs:
+            t.rows, t.sel, t.top = None, 0, 0
+        self.stack = []
+
+    def back(self, reload=False):
+        if self.stack:
+            self.stack.pop()
+        if reload:
+            self.tabs[self.tab].rows = None
+
+    def busy(self, what="henter"):
+        h, w = self.scr.getmaxyx()
+        self.scr.addnstr(0, max(0, w - len(what) - 5), f" {what} … ", w - 1, self.pal["dim"])
+        self.scr.refresh()
+
+    def outside(self, fn):
+        """Leave curses to run something that talks to the terminal (az login, browser sign-in)."""
+        curses.def_prog_mode()
+        curses.endwin()
+        try:
+            return fn()
+        except KeyboardInterrupt:
+            raise Fail("avbrutt")
+        finally:
+            curses.reset_prog_mode()
+            self.scr.clear()
+            self.scr.refresh()
+
+    def put(self, y, parts, w, hl=0, x=0):
+        for s, col in parts:
+            if x >= w - 1:
+                break
+            self.scr.addnstr(y, x, s, w - 1 - x, self.pal.get(col, 0) | hl)
+            x += len(s)
+        if hl and x < w - 1:
+            self.scr.addnstr(y, x, " " * (w - 1 - x), w - 1 - x, hl)
+
+    def key(self):
+        try:
+            return self.scr.get_wch()
+        except curses.error:
+            return None
+
+    # ── prompts
+
+    def ask(self, label, default=""):
+        s = default
+        curses.curs_set(1)
+        try:
+            while True:
+                h, w = self.scr.getmaxyx()
+                self.scr.move(h - 1, 0)
+                self.scr.clrtoeol()
+                line = (label + s)[-(w - 2):]
+                self.scr.addnstr(h - 1, 0, line, w - 1, self.pal["yellow"])
+                self.scr.move(h - 1, min(len(line), w - 2))
+                self.scr.refresh()
+                k = self.key()
+                if k in ENTER:
+                    return s.strip()
+                if k == "\x1b":
+                    return None
+                if k in BACKSPACE:
+                    s = s[:-1]
+                elif k == "\x15":  # ^u
+                    s = ""
+                elif isinstance(k, str) and k.isprintable():
+                    s += k
+        finally:
+            curses.curs_set(0)
+
+    def yes(self, question):
+        return (self.ask(f"{question} [y/N] ") or "").lower() in ("y", "j", "ja", "yes")
+
+    def pick(self, title, items, cells):
+        """Full-screen chooser; typing filters. The chosen item, or False on esc."""
+        sel, top, f = 0, 0, ""
+        while True:
+            h, w = self.scr.getmaxyx()
+            words = f.lower().split()
+            shown = [i for i in items
+                     if all(x in " ".join(t for t, _ in cells(i)).lower() for x in words)]
+            sel = max(0, min(sel, len(shown) - 1))
+            body = h - 3
+            top = min(max(top, sel - body + 1), sel)
+            self.scr.erase()
+            self.put(0, [(f" {title}", "bold")], w)
+            self.put(1, [(" søk: ", "dim"), (f, "cyan"), ("▏", "dim")], w)
+            for y, row in enumerate(table([cells(i) for i in shown])[top:top + body]):
+                self.put(y + 2, [(" ", None)] + row, w, curses.A_REVERSE if top + y == sel else 0)
+            if not shown:
+                self.put(3, [("  ingen treff", "dim")], w)
+            self.put(h - 1, [("skriv for å søke · ↑↓ flytt · enter velg · esc avbryt", "dim")], w)
+            self.scr.refresh()
+            k = self.key()
+            if k == "\x1b":
+                return False
+            if k in ENTER and shown:
+                return shown[sel]
+            if k == curses.KEY_DOWN:
+                sel += 1
+            elif k == curses.KEY_UP:
+                sel -= 1
+            elif k == curses.KEY_NPAGE:
+                sel += body // 2
+            elif k == curses.KEY_PPAGE:
+                sel -= body // 2
+            elif k in BACKSPACE:
+                f, sel = f[:-1], 0
+            elif isinstance(k, str) and k.isprintable():
+                f, sel = f + k, 0
+
+    # ── drawing
+
+    def view(self):
+        return self.stack[-1] if self.stack else self.tabs[self.tab]
+
+    def ensure(self, v):
+        if isinstance(v, Tab) and v.rows is None or isinstance(v, Detail) and v.lines is None:
+            self.busy()
+            try:
+                if isinstance(v, Tab):
+                    v.rows = v.fetch()
+                else:
+                    v.lines = v.build()
+            except Fail as e:
+                self.say(str(e), True)
+                if isinstance(v, Tab):
+                    v.rows = []
+                else:
+                    v.lines = failed(e)
+
+    def draw(self):
+        scr = self.scr
+        h, w = scr.getmaxyx()
+        scr.erase()
+        who = f" entra · {S.org or S.tid or 'ikke logget inn'} ({S.alias})" + (f" · {S.user}" if S.user else "")
+        self.put(0, [(who, "bold")], w)
+        if S.admin_end and S.admin_end < now():
+            S.admin, S.admin_end = "", None
+        if S.admin:
+            left = f" ({int((S.admin_end - now()).total_seconds() // 60)} min)" if S.admin_end else ""
+            badge = f"⚡ admin {S.admin}{left} "
+            self.put(0, [(badge, "yellow")], w, x=max(len(who) + 2, w - len(badge) - 1))
+        tabs = []
+        for i, t in enumerate(self.tabs):
+            tabs.append((f" {i + 1} {t.name} ", "cyan" if i == self.tab and not self.stack else
+                         "bold" if i == self.tab else "dim"))
+        v = self.view()
+        if self.stack:
+            tabs.append(("› " + " › ".join(d.title for d in self.stack), "cyan"))
+        else:
+            tabs.append((v.mark(), "yellow"))
+            if v.filter or self.filtering:
+                tabs.append((f"  /{v.filter}" + ("▏" if self.filtering else ""), "cyan"))
+        self.put(1, tabs, w)
+        body = h - 3
+        if isinstance(v, Tab):
+            rows = v.visible()
+            v.sel = max(0, min(v.sel, len(rows) - 1))
+            v.top = min(max(v.top, v.sel - body + 1), v.sel)
+            for y, row in enumerate(table([v.cells(r) for r in rows])[v.top:v.top + body]):
+                self.put(y + 2, [(" ", None)] + row, w, curses.A_REVERSE if v.top + y == v.sel else 0)
+            if not rows:
+                self.put(3, [("  ingen treff" if v.rows else "  tomt", "dim")], w)
+            count = f"{len(rows)}" + (f"/{len(v.rows)}" if v.rows and len(rows) != len(v.rows) else "")
+            keys = f"{count} · {v.keys} · / filtrer · A admin · r oppdater · ? hjelp · q avslutt"
+        else:
+            v.top = max(0, min(v.top, len(v.lines) - body))
+            for y, line in enumerate(v.lines[v.top:v.top + body]):
+                self.put(y + 2, [(" ", None)] + line, w)
+            keys = f"esc tilbake · {v.keys} · A admin · r oppdater · q avslutt"
+        if self.filtering:
+            keys = "skriv for å filtrere · enter behold · esc fjern"
+        self.put(h - 1, [(self.msg or keys, ("red" if self.err else "green") if self.msg else "dim")], w)
+        scr.refresh()
+
+    # ── loop
+
+    def run(self):
+        self.scr.timeout(30_000)  # redraw now and then, so the admin countdown moves
+        if S.account:
+            self.busy("sjekker PIM")
+            try:
+                admin_status()
+            except Fail:
+                pass
+        while True:
+            v = self.view()
+            self.ensure(v)
+            self.draw()
+            k = self.key()
+            if k is None:
+                continue
+            self.msg, self.err = "", False
+            try:
+                if self.handle(k) == "quit":
+                    return
+            except Fail as e:
+                self.say(str(e), True)
+
+    def handle(self, k):
+        v = self.view()
+        if self.filtering:
+            if k in ENTER:
+                self.filtering = False
+            elif k == "\x1b":
+                self.filtering, v.filter = False, ""
+            elif k in BACKSPACE:
+                v.filter = v.filter[:-1]
+            elif isinstance(k, str) and k.isprintable():
+                v.filter += k
+                v.sel = 0
+            return
+        if k == "q":
+            return "quit"
+        if k in ("1", "2", "3", "4") or k == "\t":
+            self.tab = int(k) - 1 if k != "\t" else (self.tab + 1) % len(self.tabs)
+            self.stack = []
+            return
+        if k == "A":
+            return self.admin()
+        if k == "?":
+            return self.outside(lambda: show_help(page=True))
+        if isinstance(v, Detail):
+            body = self.scr.getmaxyx()[0] - 3
+            moves = {curses.KEY_DOWN: 1, "j": 1, curses.KEY_UP: -1, "k": -1, curses.KEY_NPAGE: body // 2,
+                     "\x04": body // 2, curses.KEY_PPAGE: -body // 2, "\x15": -body // 2, " ": body - 1}
+            if k in ("\x1b", curses.KEY_LEFT, "h") or k in BACKSPACE:
+                self.back()
+            elif k in moves:
+                v.top += moves[k]
+            elif k in ("g", curses.KEY_HOME):
+                v.top = 0
+            elif k in ("G", curses.KEY_END):
+                v.top = len(v.lines)
+            elif k == "r":
+                v.lines = None
+            else:
+                v.key(self, k)
+            return
+        rows = v.visible()
+        row = rows[v.sel] if rows else None
+        body = self.scr.getmaxyx()[0] - 3
+        if k in (curses.KEY_DOWN, "j"):
+            v.sel += 1
+        elif k in (curses.KEY_UP, "k"):
+            v.sel -= 1
+        elif k in (curses.KEY_NPAGE, "\x04"):
+            v.sel += body // 2
+        elif k in (curses.KEY_PPAGE, "\x15"):
+            v.sel -= body // 2
+        elif k in ("g", curses.KEY_HOME):
+            v.sel = 0
+        elif k in ("G", curses.KEY_END):
+            v.sel = len(rows) - 1
+        elif k == "/":
+            self.filtering = True
+        elif k == "\x1b":
+            v.filter = ""
+        elif k == "r":
+            S.cache.clear()
+            v.rows = None
+        elif k in ENTER or k == curses.KEY_RIGHT:
+            if row:
+                d = v.open(self, row)
+                if d:
+                    self.stack.append(d)
+        else:
+            v.key(self, k, row)
+
+    def admin(self):
+        if not S.account:
+            return self.say("ikke logget inn", True)
+        why = self.ask(f"Global Administrator i {ADMIN_MINUTES} min ({S.org or S.alias}) — begrunnelse: ")
+        if not why:
+            return self.say("avbrutt — begrunnelse kreves")
+        self.busy("aktiverer")
+        self.say(activate(why, lambda tid: self.outside(lambda: browser_login(tid))))
+
+
+# ── commands ────────────────────────────────────────────────────────────────
+
+
+GUIDE = """\
+{b}entra — Entra ID fra terminalen{r}
+
+{b}KOMMANDOER{r}
+
+  entra                   TUI med fire faner
+  entra admin [grunn]     Global Administrator via PIM i {minutes} min (spør om begrunnelse)
+  entra pim-login         logg inn for PIM på nytt
+  entra help              denne teksten
+
+{b}FANER{r}
+
+  1 tenant   azt sine tenanter (main, b2c-dev, b2c-stg …) med abonnementer under.
+             enter bytter tenant — og abonnement, på en abonnementslinje. Ikke innlogget: az login først.
+             l logg inn på nytt · n ny tenant (domene eller GUID, som `azt <domene>`)
+  2 brukere  alle brukere i tenanten; lisens i DevOps til høyre. d bare DevOps-brukere.
+             enter: profil, Entra-roller (aktive, PIM-aktiverte ⚡ og kvalifiserte ○), Azure-roller
+             i alle abonnementer (også via grupper), grupper (→ hvilken DevOps-tilgang de gir),
+             DevOps-lisens og -grupper. + legg i gruppe · - fjern fra gruppe
+  3 devops   gruppereglene i {org}: Entra-gruppe → lisens + prosjektroller.
+             enter: medlemmene i gruppa · + legg til · - fjern · n ny regel · x slett regel
+  4 apper    app-registreringer med nærmeste utløp for secret/sertifikat. e bare de som utløper.
+             enter: hemmeligheter, redirect-URIer, API-tillatelser med samtykke, eksponert API, eiere
+
+{b}TASTER{r}
+
+  ↑↓ / j k        flytt            pgup/pgdn, ^u/^d   halv side
+  enter / →       åpne             esc / ←            tilbake
+  /               filtrer          1-4 / tab          bytt fane
+  o               portal           c                  kopier UPN/appId
+  A               Global Administrator i {minutes} min, med begrunnelse
+  r               oppdater         q                  avslutt
+
+{b}VERDT Å VITE{r}
+
+  · Bytte av tenant gjelder entra og skallet du startet den fra (fra neste prompt, via
+    ~/.cache/entra/shell-<pid> og azure/entra.zsh). Andre terminaler beholder sin.
+  · PIM: az CLI får ikke PIM-scopene, så første gang logger entra inn i nettleseren som
+    «Microsoft Graph Command Line Tools». Den appen trenger admin-samtykke én gang for
+    RoleAssignmentSchedule.ReadWrite.Directory og RoleEligibilitySchedule.Read.Directory
+    («Need admin approval» betyr at det mangler). Token i ~/.cache/entra/pim-<tenant>.json.
+  · Etter aktivering har az sitt token fortsatt de gamle rollene til det fornyes (opptil en time).
+    Haster det: `az account clear && az login`.
+  · DevOps-regler synker ikke umiddelbart; sletting fjerner tilgang ved neste synk (opptil 24 t).
+  · DevOps går alltid via innloggingen i ~/.azure, uansett hvilken tenant som er valgt.
+"""
+
+
+def show_help(page=False):
+    on = TTY
+    txt = GUIDE.format(b="\033[1m" if on else "", r="\033[0m" if on else "", minutes=ADMIN_MINUTES, org=ORG)
+    if page or on and txt.count("\n") > os.get_terminal_size().lines:
+        subprocess.run(["less", "-RFX" if not page else "-R"], input=txt, text=True)
+    else:
+        print(txt)
+
+
+def ready():
+    S.load()
+    if not S.account:
+        die(f"ikke logget inn i {S.cfg} — `az login`, `azt <tenant> --login` eller `entra` → tenant")
+
+
+def cmd_tui(a):
+    if not (TTY and sys.stdin.isatty()):
+        die("trenger en terminal")
+    locale.setlocale(locale.LC_ALL, "")
+    os.environ.setdefault("ESCDELAY", "25")
+    S.load()
+    try:
+        curses.wrapper(lambda scr: UI(scr).run())
+    except KeyboardInterrupt:
+        pass
+
+
+def cmd_admin(a):
+    ready()
+    why = " ".join(a.reason).strip()
+    if not why:
+        try:
+            why = input(f"Global Administrator i {ADMIN_MINUTES} min ({S.org}) — begrunnelse: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+    if not why:
+        die("begrunnelse kreves")
+    try:
+        print(green(activate(why, browser_login)))
+    except Fail as e:
+        die(str(e))
+
+
+def cmd_pim_login(a):
+    ready()
+    try:
+        pim_save(S.tid, browser_login(S.tid))
+        admin_status()
+    except Fail as e:
+        die(str(e))
+    print(green(f"✓ PIM-innlogging lagret for {S.org}") + (f" — admin {S.admin}" if S.admin else ""))
+
+
+def main():
+    p = argparse.ArgumentParser(prog="entra", description="Entra ID TUI")
+    sub = p.add_subparsers(dest="cmd")
+    sub.add_parser("tui", help="the TUI (default)").set_defaults(fn=cmd_tui)
+    s = sub.add_parser("admin", help=f"Global Administrator via PIM for {ADMIN_MINUTES} min")
+    s.add_argument("reason", nargs="*")
+    s.set_defaults(fn=cmd_admin)
+    sub.add_parser("pim-login", help="sign in for PIM again").set_defaults(fn=cmd_pim_login)
+    sub.add_parser("help", help="forklaring (norsk)").set_defaults(fn=lambda a: show_help())
+    argv = sys.argv[1:] or ["tui"]
+    a = p.parse_args(argv)
+    try:
+        a.fn(a)
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
