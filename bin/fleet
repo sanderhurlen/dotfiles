@@ -9,7 +9,8 @@
 #
 # Type:
 #
-#   fleet                    live list (TUI); in Ghostty also opens `claude agents` in a pane to the left;
+#   fleet                    live list (TUI); in Ghostty also opens `claude agents` (only sessions under the
+#                            first root) in a pane to the left;
 #                            autopilot: starts review/fix agents by itself, weekdays 07–17 (~/.config/fleet/config.toml)
 #   fleet ls                 same list, printed once
 #   fleet go 8698            background agent on a work item: map → /wayfinder, else /implement
@@ -67,11 +68,11 @@ STATES = ("Doing", "To Do")
 OLD = 45  # days: work items created before this only show as one row that opens their query
 REFRESH = 15  # seconds between data refreshes
 SKIP = "--dangerously-skip-permissions"  # every agent fleet starts, and every one dispatched from agent view
-AGENTS = f"claude agents {SKIP}"
 WRITE = 15    # seconds between state file writes
 OUT = os.path.expanduser(os.environ.get("FLEET_OUT", "~/.cache/fleet"))
 ROOTS = [os.path.expanduser(p) for p in os.environ.get("FLEET_ROOTS", "~/visense").split(":") if p]
 HOME = ROOTS[0]
+AGENTS = f"claude agents --cwd {shlex.quote(HOME)} {SKIP}"  # only sessions started under the first root
 
 
 def die(msg):
@@ -1966,7 +1967,7 @@ GUIDE = """\
                             levende liste, oppdateres hvert {refresh}. sekund
                             varsler (macOS) når en fleet-agent venter på deg eller er ferdig (-q: ingen varsler)
                             autopilot på, se AUTOPILOT (--no-autopilot: av denne økta)
-                            i Ghostty: `claude agents` i en pane til venstre (ikke om den fortsatt er der)
+                            i Ghostty: `claude agents` i en pane til venstre, bare økter under {home} (ikke om den fortsatt er der)
   fleet ls [-a] [-u]        lista, skrevet ut én gang (-u: kart/spec foldet ut)
   fleet go <id> [-n]        bakgrunnsagent på et work item (-n: vis kommandoen)
   fleet review <id> [-n]    bakgrunnsagent som reviewer en PR
