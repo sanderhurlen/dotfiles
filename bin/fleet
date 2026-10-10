@@ -19,6 +19,7 @@
 #   fleet review 6966        background agent reviewing a PR: /review-pr
 #   fleet fix 7012           background agent fixing my PR: conflicts, failing build, review comments
 #   fleet prune [-n]         remove finished fleet agents whose item/PR is gone from the list
+#   fleet post 6966          post a review agent's findings (from ~/.cache/fleet/review) on the PR, y per finding
 #   fleet code 9006          VS Code in the item's worktree, .env* copied from the main checkout
 #   fleet clean [-n]         remove worktrees of Done work items where nothing can be lost
 #   fleet help               explained (Norwegian)
@@ -35,6 +36,7 @@ import concurrent.futures
 import curses
 import datetime
 import fcntl
+import glob
 import importlib.machinery
 import importlib.util
 import json
@@ -356,12 +358,191 @@ def stop(o):
     return f"■ stoppet {o.name} ({o.sid})"
 
 
+# ── inbox ───────────────────────────────────────────────────────────────────
+# Finished fleet agents I haven't marked seen: what each ended with (its last message, read
+# from the session's transcript) and, for autopilot's review agents, the findings they wrote
+# to REVIEWS — which `fleet post` turns into PR comments, one y at a time.
+
+SEEN = os.path.join(OUT, "seen.json")
+REVIEWS = os.path.join(OUT, "review")
+_words, _found = {}, {}  # path: (mtime, value) caches; the TUI renders twice a second
+
+
+def seen(raw):
+    """Session ids I've marked seen. The first time: every fleet session that has already
+    finished, so the inbox starts empty."""
+    try:
+        with open(SEEN) as f:
+            return set(json.load(f))
+    except FileNotFoundError:
+        ids = {a["id"] for a in raw if (a.get("name") or "").startswith("fleet-")
+               and (a.get("state") or a.get("status")) in FINISHED}
+        save_seen(ids)
+        return ids
+    except (OSError, ValueError):
+        return set()
+
+
+def save_seen(ids):
+    os.makedirs(OUT, exist_ok=True)
+    tmp = f"{SEEN}.{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(sorted(ids), f)
+    os.replace(tmp, SEEN)
+
+
+def mark_seen(d):
+    save_seen(seen([]) | {d.sid})
+    return f"✓ {d.name} merket som sett"
+
+
+def transcript(sid):
+    """The session's transcript under ~/.claude/projects, or None."""
+    hits = glob.glob(os.path.expanduser(f"~/.claude/projects/*/{glob.escape(sid)}.jsonl"))
+    return max(hits, key=os.path.getmtime) if hits else None
+
+
+def last_words(path):
+    """(the agent's last text message, when the transcript was last written) — ("", None) without one."""
+    try:
+        mt = os.path.getmtime(path)
+    except (OSError, TypeError):
+        return "", None
+    if _words.get(path, (None,))[0] != mt:
+        text = ""
+        with open(path, "rb") as f:
+            f.seek(max(0, os.path.getsize(path) - 512 * 1024))
+            tail = f.read().decode("utf-8", "replace").splitlines()
+        for line in reversed(tail):
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if d.get("type") != "assistant":
+                continue
+            c = (d.get("message") or {}).get("content") or []
+            t = [c] if isinstance(c, str) else [x.get("text", "") for x in c
+                                                if isinstance(x, dict) and x.get("type") == "text"]
+            if any(x.strip() for x in t):
+                text = "\n".join(t).strip()
+                break
+        _words[path] = (mt, text)
+    return _words[path][1], datetime.datetime.fromtimestamp(mt, datetime.timezone.utc)
+
+
+def gist(text, n=90):
+    """The first sentence of a message, markdown stripped."""
+    line = next((l for l in text.splitlines() if l.strip()), "")
+    line = re.sub(r"^[#>*\s-]+|[*`_]", "", line).strip()
+    line = re.split(r"(?<=[.!?])\s", line, maxsplit=1)[0]
+    return line if len(line) <= n else line[:n - 1] + "…"
+
+
+def findings(pr, since=0.0):
+    """What a review agent wrote to REVIEWS/<pr>.json — None without it, or if it's older than since (epoch s)."""
+    path = os.path.join(REVIEWS, f"{pr}.json")
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        return None
+    if mt < since:
+        return None
+    if _found.get(path, (None,))[0] != mt:
+        try:
+            with open(path) as f:
+                got = json.load(f)
+            got = got if isinstance(got, dict) else None
+        except (OSError, ValueError):
+            got = None
+        _found[path] = (mt, got)
+    return _found[path][1]
+
+
+def unposted(f):
+    return [x for x in f.get("findings") or [] if not x.get("posted")]
+
+
+def findings_chip(f):
+    """«🔎 3 funn · 1 blocker» / «🔎 ingen funn · anbefaler approve» / «🔎 postet»."""
+    if not f:
+        return []
+    all_, left = f.get("findings") or [], unposted(f)
+    if all_ and not left:
+        return [("  🔎 postet", "dim")]
+    if not all_:
+        return [("  🔎 ingen funn" + (" · anbefaler approve" if f.get("verdict") == "approve" else ""), "green")]
+    block = sum(1 for x in left if x.get("severity") == "blocker")
+    return [(f"  🔎 {len(left)} funn" + (f" · {block} blocker" if block else ""), "red" if block else "yellow")]
+
+
+class Done:
+    """A finished fleet agent I haven't marked seen. row: the list row it belongs to, if any."""
+    def __init__(self, a, row=None):
+        self.a, self.sid, self.name, self.row = a, a["id"], a.get("name", ""), row
+        self.state = a.get("state") or a.get("status") or "?"
+        self.text, self.at = last_words(transcript(a.get("sessionId") or self.sid))
+        self.at = self.at or datetime.datetime.fromtimestamp(a.get("startedAt", 0) / 1000, datetime.timezone.utc)
+        m = re.match(r"fleet-(pr|fix|wi)-(\d+)$", self.name)
+        self.pr = int(m.group(2)) if m and m.group(1) == "pr" else None
+        self.review = findings(self.pr, a.get("startedAt", 0) / 1000) if self.pr else None
+        self.id = row.id if row else self.sid
+        self.title = row.title if row else self.name
+        self.url = row.url if row else None
+        self.key = f"fleet-done-{self.sid}"
+
+
+def inbox(raw, rows):
+    """Done for the newest session of each fleet name that has finished and isn't seen, newest first.
+    rows: {agent name: list row}."""
+    newest = {}
+    for a in sorted(raw, key=lambda a: a.get("startedAt", 0)):
+        if (a.get("name") or "").startswith("fleet-"):
+            newest[a["name"]] = a
+    seen_ = seen(raw)
+    out = [Done(a, rows.get(n)) for n, a in newest.items()
+           if (a.get("state") or a.get("status")) in FINISHED and a["id"] not in seen_]
+    return sorted(out, key=lambda d: d.at, reverse=True)
+
+
+def read_here(d):
+    """The agent's last message (and its findings) in less, while the TUI is suspended."""
+    head = [f"{d.name} · {d.state} · {d.title}"] + ([d.url] if d.url else [])
+    if d.review:
+        head += ["", f"Review: {d.review.get('verdict', '?')} — {d.review.get('summary', '')}"]
+        for x in d.review.get("findings") or []:
+            head.append(f"  {'✓' if x.get('posted') else '•'} [{x.get('severity', '?')}] "
+                        f"{x.get('file') or '(generelt)'}{':' + str(x['line']) if x.get('line') else ''}  "
+                        f"{x.get('text', '')}")
+    subprocess.run(["less", "-R"], input="\n".join(head + ["", "─" * 60, "", d.text or "(ingen melding)"]) + "\n",
+                   text=True)
+    return ""
+
+
+def attach_here(d):
+    """`claude attach` in this terminal: continue where the agent stopped. Marks it seen."""
+    mark_seen(d)
+    subprocess.run(["claude", "attach", d.sid])
+    return ""
+
+
+def post_here(d):
+    """`fleet post <pr>` in this terminal: y per finding. Marks the agent seen once all are posted."""
+    subprocess.run([os.path.realpath(__file__), "post", str(d.pr)])
+    f = findings(d.pr) or {}
+    if not unposted(f):
+        mark_seen(d)
+    n = sum(1 for x in f.get("findings") or [] if x.get("posted"))
+    return f"🔎 !{d.pr}: {n} av {len(f.get('findings') or [])} funn postet"
+
+
 class Snapshot:
     def __init__(self, items=(), prs=(), agents_=None, at=0.0, error="", mine_=(), old=None):
         self.old = old  # Old, or None before the first fetch
         self.items, self.prs, self.agents, self.at, self.error = list(items), list(prs), agents_ or {}, at, error
         self.mine = list(mine_)  # Mine
         self.orphans = []  # Orphan
+        self.done = []  # Done: finished fleet agents I haven't marked seen
+        self.findings = {}  # PR id: what its review agent found, see findings()
         self.cleanup = []  # Cleanup: worktrees of Done items fleet couldn't safely remove
         self.cleaned = []  # result lines of what this refresh removed
         self.auto, self.autohead, self.news = {}, "", []  # autopilot: {key: chip}, header text, result lines
@@ -384,7 +565,10 @@ def snapshot(everyone, clean=False):
             by_pr.setdefault(i, []).append(m)
     for w in flat:
         w.prs = by_pr.get(w.id, [])
-    s.orphans = orphans(raw, {x.key for x in flat + others + s.mine})
+    s.done = inbox(raw, {x.key: x for x in flat + others + s.mine})
+    s.orphans = [o for o in orphans(raw, {x.key for x in flat + others + s.mine})
+                 if o.sid not in {d.sid for d in s.done}]
+    s.findings = {r.id: f for r in others if (f := findings(r.id))}
     ts_ = trees()
     by_id = {}
     for t in ts_:
@@ -743,6 +927,7 @@ def starts(x):
                  f"og oppdater PR-en i ADO.")]
     if isinstance(x, Review):
         return [(f"/review-pr {x.id}", x, None),
+                ("/code-review i worktree, funn til innboksen (poster ingenting)", Auto(x), None),
                 ("forklar PR-en for meg (ingen kommentarer)", x, explain(x)),
                 ("test lokalt: bygg og kjør testene", x,
                  f"Sjekk ut PR !{x.id} ({x.url}), kildebranch {x.source}, i et worktree. Bygg, kjør testene og "
@@ -915,7 +1100,17 @@ class Auto:
                 f"`git fetch origin {x.source} {x.target}` og `git checkout --detach origin/{x.source}`. Kjør så "
                 f"/code-review med origin/{x.target} som fast punkt; spec er work itemene PR-en lenker (hent dem "
                 f"fra ADO). Finnes ingen spec, hopp over Spec-aksen — ikke spør. Bare rapporter her: ikke post "
-                f"kommentarer, ikke stem, ikke push.")
+                f"kommentarer, ikke stem, ikke push. {report(x)}")
+
+
+def report(x):
+    """What a review agent ends with: its findings as JSON in REVIEWS, for the inbox and `fleet post`."""
+    return (f"Til slutt: skriv funnene til {short(REVIEWS)}/{x.id}.json (lag mappa) som JSON: "
+            '{"commit": "<sha du reviewet>", "verdict": "approve|changes|comment", "summary": "<2–3 setninger>", '
+            '"findings": [{"file": "<sti fra repo-roten>", "line": <linje i kildebranchens versjon, null for hele '
+            'fila>, "severity": "blocker|major|minor|nit", "text": "<kommentaren slik den skal stå i PR-en, på '
+            'norsk, til forfatteren>"}]}. Bare funn som er verdt å poste; tom liste om ingenting. Skriv fila på nytt '
+            "om den finnes.")
 
 
 def untriaged(w):
@@ -1311,6 +1506,18 @@ def menu(x, pilot=None):
              f"fjern {short(x.tree.path)} med makt? {what} ({', '.join(x.reasons)})"),
             ("v", "VS Code i worktreet", lambda: open_code(x.tree.main, x.tree.path), False),
             *([("o", "åpne work item", lambda: subprocess.run(["open", x.url]) and "", False)] if x.url else [])])
+    if isinstance(x, Done):
+        r = x.row
+        return (f"{x.name} ({x.state}) {x.title[:40]}", [
+            ("l", "les sluttmeldingen", lambda: read_here(x), "shell"),
+            *([("p", f"post funn i !{x.pr} (y per funn)", lambda: post_here(x), "shell")]
+              if x.review and unposted(x.review) else []),
+            *([("a", f"approve !{r.id}", lambda: approve(r) + " · " + mark_seen(x), False)]
+              if isinstance(r, Review) else []),
+            ("c", "fortsett i sesjonen (claude attach)", lambda: attach_here(x), "shell"),
+            ("x", "merk som sett", lambda: mark_seen(x), False),
+            ("r", "fjern sesjonen (claude rm)", lambda: end(Orphan(x.a)), f"fjerne {x.name}?"),
+            *([("o", "åpne i nettleser", lambda: subprocess.run(["open", x.url]) and "", False)] if x.url else [])])
     if isinstance(x, Orphan):
         return (f"{x.name} ({x.state})", [
             ("x", "fjern sesjonen (stop + rm)", lambda: end(x),
@@ -1446,7 +1653,7 @@ def pr_row(snap, r, wrepo):
              (r.title[:60], None), (f"  @{r.who} {ago(r.created)}", "dim")]
     if not r.asked:
         parts.append(("  (ikke reviewer)", "dim"))
-    return parts + agent_chip(snap, r) + auto_chip(snap, r)
+    return parts + agent_chip(snap, r) + auto_chip(snap, r) + findings_chip(snap.findings.get(r.id))
 
 
 def mine_row(snap, m, wrepo):
@@ -1464,10 +1671,23 @@ def orphan_row(o):
             (f"{ago(o.started):>4} siden  ", "dim"), (short(o.cwd), "dim")]
 
 
+def done_row(d):
+    icon, tone = AGENT.get(d.state, ("●", "dim"))
+    what = f"{'#' if isinstance(d.row, Work) else '!'}{d.row.id} {d.row.title[:40]}" if d.row else ""
+    return [(f"{icon} ", tone), (f"{d.name:<16} ", "bold"), (f"{ago(d.at):>4} ", "dim"), (what, None),
+            *findings_chip(d.review), (f"  — {gist(d.text) or 'ingen melding'}", "dim")]
+
+
 def lines(snap, everyone, open_=()):
     """[(parts, Work | Review | None)] — everything the list shows, in order. Maps in
     open_ (ids) show their open tickets under them."""
     out = []
+    if snap.done:
+        out.append(([(f"Ferdig · ikke sett ({len(snap.done)})", "bold"),
+                     ("  enter: les · post funn · fortsett · x sett", "dim")], None))
+        for d in snap.done:
+            out.append((done_row(d), d))
+        out.append(([], None))
     multi = len({w.project for w in snap.items}) > 1
     out.append(([(f"Work items · To Do/Doing ({len(snap.items)})", "bold")], None))
     for w in snap.items:
@@ -1573,6 +1793,10 @@ def write_state(snap, everyone, open_=(), cur=None, msg=""):
         "orphanAgents": [{"name": o.name, "id": o.sid, "state": o.state, "cwd": o.cwd,
                           "remove": f"fleet prune --id {o.sid}"} for o in snap.orphans],
         "agents": snap.agents,
+        "inbox": [{"name": d.name, "id": d.sid, "state": d.state, "finished": d.at.isoformat(timespec="seconds"),
+                   "row": d.row.key if d.row else None, "lastMessage": d.text, "review": d.review,
+                   "post": f"fleet post {d.pr}" if d.review and unposted(d.review) else None,
+                   "continue": f"claude attach {d.sid}"} for d in snap.done],
         "cleanup": [{"workItems": [i.id for i in c.items], "title": c.title, "worktree": c.tree.path,
                      "branch": c.tree.branch, "blockedBy": c.reasons, "mergedPr": (c.pr or {}).get("pullRequestId"),
                      "force": f"fleet clean --force {c.tree.path}"} for c in snap.cleanup],
@@ -1868,8 +2092,10 @@ def tui(scr, a):
                 subprocess.run(["open", cur.url])
         elif k == ord("m"):
             pop = menu(cur, pilot)
-        elif isinstance(cur, (Cleanup, Orphan)) and k in (10, 13, curses.KEY_ENTER, ord("v")):
+        elif isinstance(cur, (Cleanup, Orphan, Done)) and k in (10, 13, curses.KEY_ENTER, ord("v")):
             pop = menu(cur)
+        elif isinstance(cur, Done) and k == ord("x"):
+            act(lambda: mark_seen(cur))
         elif k in (10, 13, curses.KEY_ENTER):
             pop = start_menu(cur, s.agents)
         if sel != moved:
@@ -2037,6 +2263,80 @@ def cmd_pr(a):
     run_action(fn, find_review(a.id))
 
 
+def post_thread(p, x):
+    """One finding as an active thread on the PR, on its line when it has one. Returns the thread id."""
+    body = {"comments": [{"parentCommentId": 0, "content": x["text"], "commentType": 1}], "status": "active"}
+    if x.get("file"):
+        ctx = {"filePath": "/" + x["file"].lstrip("/")}
+        if x.get("line"):
+            ctx |= {"rightFileStart": {"line": int(x["line"]), "offset": 1},
+                    "rightFileEnd": {"line": int(x["line"]), "offset": 1}}
+        body["threadContext"] = ctx
+    t = rest(f"git/repositories/{p.raw['repository']['id']}/pullRequests/{p.id}/threads", body, project=p.project)
+    return t["id"]
+
+
+def edit_text(text):
+    """text, changed in $EDITOR."""
+    path = os.path.join(OUT, f".post-{os.getpid()}.md")
+    with open(path, "w") as f:
+        f.write(text)
+    subprocess.run(shlex.split(os.environ.get("EDITOR") or "vi") + [path])
+    with open(path) as f:
+        new = f.read().strip()
+    os.remove(path)
+    return new or text
+
+
+def cmd_post(a):
+    path = os.path.join(REVIEWS, f"{a.id}.json")
+    f = findings(a.id)
+    if not f:
+        die(f"ingen funn for !{a.id} ({short(path)})")
+    try:
+        p = fresh(a)
+    except RuntimeError as e:
+        die(str(e))
+    print(bold(f"!{p.id} {p.title}") + dim(f"  {p.repo} · {p.source} → {p.target}"))
+    print(f"{f.get('verdict', '?')} — {f.get('summary', '')}\n")
+    head = (p.raw.get("lastMergeSourceCommit") or {}).get("commitId", "")
+    if f.get("commit") and head and not head.startswith(f["commit"][:7]):
+        print(yellow(f"⚠ PR-en har fått nye commits siden reviewen ({f['commit'][:7]} → {head[:7]}) — "
+                     f"linjene kan ha flyttet seg\n"))
+    left = unposted(f)
+    if not left:
+        return print(dim("alle funn er postet"))
+    posted = 0
+    for n, x in enumerate(left, 1):
+        where_ = f"{x.get('file') or '(generelt)'}{':' + str(x['line']) if x.get('line') else ''}"
+        while True:
+            print(f"{bold(f'[{n}/{len(left)}]')} {yellow(x.get('severity', '?'))} {cyan(where_)}\n  "
+                  + x.get("text", "").replace("\n", "\n  "))
+            try:
+                ans = input(dim("  post? y ja · n hopp over · e rediger · q avslutt  ")).strip().lower()
+            except EOFError:
+                ans = "q"
+            if ans == "e":
+                x["text"] = edit_text(x.get("text", ""))
+                continue
+            break
+        if ans == "q":
+            break
+        if ans not in ("y", "j"):
+            continue
+        try:
+            x["posted"] = post_thread(p, x)
+            posted += 1
+            print(green(f"  ✓ postet (tråd {x['posted']})\n"))
+        except RuntimeError as e:
+            print(red(f"  ✗ {e}\n"))
+        tmp = f"{path}.{os.getpid()}"
+        with open(tmp, "w") as fh:
+            json.dump(f, fh, indent=2, ensure_ascii=False)
+        os.replace(tmp, path)
+    print(green(f"✓ postet {posted} funn på !{p.id}") if posted else dim("ingenting postet"))
+
+
 def cmd_wi(a):
     w = find_work(a.id)
     if a.action == "sprint":
@@ -2061,6 +2361,11 @@ GUIDE = """\
                  <policy> … (kjører/i kø) · draft · auto · klar
                ✗ rødt = noe feiler, ⏸ gult = venter på meg, ✓ = klar til complete.
                Work items som PR-en lenker (eller har id-en i branchen) får «↳ !<pr> ✗/⏸/✓» på linja.
+  Ferdig       øverst: fleet-agenter som er ferdige og ikke merket sett, nyeste først, med første
+               setning av sluttmeldingen (fra transkriptet) og review-funn «🔎 3 funn · 1 blocker».
+               enter/m: l les hele · p post funn (y per funn) · a approve · c fortsett (claude attach) ·
+               x merk sett (også rett på raden) · r fjern sesjonen · o åpne. Ved første kjøring regnes
+               alle som allerede er ferdige som sett.
   Foreldreløse fleet-agenter der work item/PR ikke lenger er i lista (Done, godkjent,
                completed, tatt bort). Fjernes manuelt: enter/m → x, eller `fleet prune`.
 
@@ -2078,6 +2383,8 @@ GUIDE = """\
   fleet fix <id> [-n]       bakgrunnsagent som fikser min PR: konflikter, bygg, review-kommentarer
   fleet prune [-n]          fjern ferdige foreldreløse agenter (claude rm; kjørende listes bare)
   fleet prune --id <id>     fjern én (stoppes først om den kjører)
+  fleet post <id>           post review-agentens funn på PR-en som tråder: y / n / e (rediger i $EDITOR) per funn.
+                            Advarer om PR-en har fått commits siden reviewen. Postede funn huskes.
   fleet pr <id> approve|auto|complete|abandon
                             godkjenn · sett auto-complete · fullfør nå (feiler om noe blokkerer) · forlat
   fleet wi <id> state [S]   sett state S (uten S: list typens states)
@@ -2130,7 +2437,8 @@ GUIDE = """\
   Starter agenter selv:
     ny PR der jeg er reviewer (ikke stemt) → fleet-pr-<id>: /code-review i worktree fleet-review<id>
                     på kildebranchen, target som fast punkt. Uten lokal klone: forklar PR-en.
-                    Poster ingenting i ADO. Én gang per PR.
+                    Poster ingenting i ADO — skriver funnene til {reviews}/<id>.json, som vises
+                    som «🔎» på PR-raden og i Ferdig; `fleet post <id>` / m → p poster dem. Én gang per PR.
     min PR får rødt bygg / konflikt → fleet-fix-<id>: merger target inn, fikser, pusher. Ingen
                     force-push, svarer ikke i tråder. Én gang per commit, maks {tries} forsøk, så «🤖 ga opp».
   Triagerer selv (trigger «triage»):
@@ -2169,7 +2477,7 @@ def cmd_help(a):
     print(GUIDE.format(b="\033[1m" if on else "", r="\033[0m" if on else "", org=A().org,
                        refresh=REFRESH, write=WRITE, home=short(HOME), out=short(OUT), agents=AGENTS,
                        d="\033[2m" if on else "", log=short(LOG), config=short(CONFIG),
-                       state=short(Pilot.PATH), **pilot_help()))
+                       state=short(Pilot.PATH), reviews=short(REVIEWS), **pilot_help()))
 
 
 def pilot_help():
@@ -2219,6 +2527,10 @@ def main():
     s.add_argument("id", type=int)
     s.add_argument("action", choices=("approve", "auto", "complete", "abandon"))
     s.set_defaults(fn=cmd_pr)
+
+    s = sub.add_parser("post", help="post a review agent's findings on the PR, y per finding")
+    s.add_argument("id", type=int)
+    s.set_defaults(fn=cmd_post)
 
     s = sub.add_parser("wi", help="act on a work item: state <State> (none: list states), sprint")
     s.add_argument("id", type=int)
