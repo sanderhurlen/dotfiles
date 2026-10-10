@@ -143,6 +143,7 @@ class PR:
         self.url = f"{A().org}/{urllib.parse.quote(A().project)}/_git/{urllib.parse.quote(self.repo)}" \
                    f"/pullrequest/{self.id}"
         self.policies = []  # [(name, status, blocking)]
+        self.done_at = {}  # policy name: when its evaluation last finished (datetime | None)
         self.allowed = None  # merge strategies the merge-strategy policy allows, None = any
 
     @property
@@ -178,6 +179,7 @@ def policies(pr):
             continue
         name = POLICY.get(kind, kind.lower()) or st.get("displayName") or st.get("statusName") or kind.lower()
         pr.policies.append((name, e["status"], cfg.get("isBlocking", False)))
+        pr.done_at[name] = ts(e.get("completedDate"))
 
 
 def prs(a):

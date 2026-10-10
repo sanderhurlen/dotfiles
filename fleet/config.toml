@@ -1,0 +1,16 @@
+# fleet — linked to ~/.config/fleet/config.toml by fleet/install.sh. Read when fleet starts;
+# a missing key keeps its default (the values below).
+
+[autopilot]
+enabled = true                              # --no-autopilot / A turn it off for a session
+triggers = ["review", "build", "conflict"]  # new PR to review · my PR's build fails · my PR conflicts
+max_parallel = 2                            # fleet agents running at once, manual ones included
+backlog_hours = 24                          # older events are skipped; weekend days don't count
+max_fix_attempts = 2                        # per PR, then «🤖 ga opp»
+hours = "07-17"                             # starts agents only then …
+weekdays = "mon-fri"                        # … on these days (or "mon,wed,fri"); A → u allows outside
+
+[notify]
+start = true    # autopilot started an agent (or gave up)
+done = true     # any fleet agent finished
+blocked = true  # any fleet agent waits for me
