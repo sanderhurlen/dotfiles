@@ -3,7 +3,7 @@
 
 [autopilot]
 enabled = true                              # --no-autopilot / A turn it off for a session
-triggers = ["review", "build", "conflict"]  # new PR to review · my PR's build fails · my PR conflicts
+triggers = ["review", "build", "conflict", "triage"]  # new PR to review · my PR's build fails · my PR conflicts · new untriaged Issue/Bug
 max_parallel = 2                            # fleet agents running at once, manual ones included
 backlog_hours = 24                          # older events are skipped; weekend days don't count
 max_fix_attempts = 2                        # per PR, then «🤖 ga opp»

@@ -11,7 +11,8 @@
 #
 #   fleet                    live list (TUI); in Ghostty also opens `claude agents` (only sessions under the
 #                            first root) in a pane to the left;
-#                            autopilot: starts review/fix agents by itself, weekdays 07–17 (~/.config/fleet/config.toml);
+#                            autopilot: starts review/fix agents by itself, weekdays 07–17 (~/.config/fleet/config.toml),
+#                            and triages new Issues/Bugs assigned to me (`wi triage --save`; m → t to approve);
 #                            keeps the Mac from idle-sleeping while it runs (caffeinate -i)
 #   fleet ls                 same list, printed once
 #   fleet go 8698            background agent on a work item: map → /wayfinder, else /implement
@@ -59,7 +60,7 @@ def _load(name):
     return mod
 
 
-wr = _load("wr")
+wr, wi = _load("wr"), _load("wi")
 wf, wp = wr.wf, wr.wp
 from_wf = ("bold", "dim", "cyan", "green", "yellow", "red", "TTY")
 globals().update({k: getattr(wf, k) for k in from_wf})
@@ -73,6 +74,7 @@ WRITE = 15    # seconds between state file writes
 OUT = os.path.expanduser(os.environ.get("FLEET_OUT", "~/.cache/fleet"))
 ROOTS = [os.path.expanduser(p) for p in os.environ.get("FLEET_ROOTS", "~/visense").split(":") if p]
 HOME = ROOTS[0]
+WI = os.path.join(os.path.dirname(os.path.realpath(__file__)), "wi")
 AGENTS = f"claude agents --cwd {shlex.quote(HOME)} {SKIP}"  # only sessions started under the first root
 
 
@@ -157,6 +159,8 @@ class Work:
 
     @property
     def prompt(self):
+        if self.kind == "map" and not self.children and not self.done_children:
+            return wf.chart_prompt(self.it)
         return f"/wayfinder {self.parent.id} ticket {self.id}" if self.decision else f"{self.skill} {self.id}"
 
 
@@ -823,7 +827,7 @@ def short(path):
 # answer threads. One fleet at a time runs it (autopilot.lock). Tuned in CONFIG.
 
 CONFIG = os.path.expanduser(os.environ.get("FLEET_CONFIG", "~/.config/fleet/config.toml"))
-DEFAULTS = {"autopilot": {"enabled": True, "triggers": ["review", "build", "conflict"], "max_parallel": 2,
+DEFAULTS = {"autopilot": {"enabled": True, "triggers": ["review", "build", "conflict", "triage"], "max_parallel": 2,
                           "backlog_hours": 24, "max_fix_attempts": 2, "hours": "07-17", "weekdays": "mon-fri"},
             "notify": {"start": True, "done": True, "blocked": True}}
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -914,6 +918,30 @@ class Auto:
                 f"kommentarer, ikke stem, ikke push.")
 
 
+def untriaged(w):
+    """An Issue/Bug given to me that nobody has triaged: To Do, no triage tag, not part of wayfinder."""
+    return (isinstance(w, Work) and w.kind == "item" and not w.decision and w.state == "To Do"
+            and w.type.lower() in ("issue", "bug")
+            and not any(t in wi.TRIAGED or t.startswith("wayfinder:") or t == "spec" for t in w.it.tags))
+
+
+def wi_env(w):
+    """wi in the item's project, and without offering to start wayfinder inside fleet's terminal."""
+    return os.environ | {"WF_ORG": A().org, "WF_PROJECT": w.project, "WI_NO_GO": "1"}
+
+
+ROUTE = {"ready-for-agent": ("agent-klar", "green"), "ready-for-human": ("for meg", "yellow"),
+         "needs-info": ("trenger info", "red"), "wayfinder": ("bør bli kart", "cyan")}
+TRIAGE_PAR = 2  # `wi triage` runs at once; they're short and don't hold an agent slot
+
+
+def triage_here(w):
+    """`wi triage <id>` in this terminal while the TUI is suspended: see the proposal, y writes it."""
+    subprocess.run([WI, "triage", str(w.id)], env=wi_env(w))
+    r = wi.triage_record(w.id)
+    return f"🧭 #{w.id} → {r['proposal']['route']}" if r and r.get("applied") else ""
+
+
 class Pilot:
     """Autopilot for one TUI. What must survive a restart — muted rows, what it started (one
     fingerprint per review, per PR commit for fixes), when it first saw an event, why a start
@@ -930,6 +958,7 @@ class Pilot:
         self.after = False  # also outside working hours, this session
         self.queue = []  # keys waiting for a slot or working hours, in start order
         self.pending = {}  # key: when launched, until `claude agents` lists it
+        self.procs = {}  # key: (Popen, Work) of a `wi triage --save` running in the background
         self.lock = None
         os.makedirs(OUT, exist_ok=True)
         f = open(os.path.join(OUT, "autopilot.lock"), "w")
@@ -1016,10 +1045,11 @@ class Pilot:
             return
         st = self.load()
         live = {r.key: r for r in s.prs if r.asked} | {m.key: m for m in s.mine}
+        work = {w.key: w for w in s.items if untriaged(w)} if "triage" in self.c["triggers"] else {}
         for k in self.LISTS:
-            st[k] = [x for x in st[k] if x in live]
+            st[k] = [x for x in st[k] if x in live or x in work]
         for k in self.MAPS:
-            st[k] = {x: v for x, v in st[k].items() if x.split("@")[0] in live}
+            st[k] = {x: v for x, v in st[k].items() if x.split("@")[0] in live or x.split("@")[0] in work}
         now, local = time.time(), datetime.datetime.now().astimezone()
         _, _, days = workhours(self.c)
         due, chips = [], {k: ("🔕 auto av", "dim") for k in st["muted"]}
@@ -1065,9 +1095,55 @@ class Pilot:
             s.news.append(line)
             chips[x.key] = (f"🤖 feilet: {st['failed'][x.key]}", "red") if x.key in st["failed"] else ("🤖 auto", "cyan")
             free -= 0 if x.key in st["failed"] else 1
+        self.triage(s, st, chips, work)
         self.save(st)
         s.auto = chips
         s.autohead = self.header(s.agents)
+
+    def spawn(self, w, st):
+        p = subprocess.Popen([WI, "triage", str(w.id), "--save"], cwd=HOME, env=wi_env(w), text=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                             start_new_session=True)
+        self.procs[w.key] = (p, w)
+        st["failed"].pop(w.key, None)
+        st["started"].setdefault(w.key, []).append(f"{w.key}@triage")
+
+    def triage(self, s, st, chips, work):
+        """Untriaged rows get `wi triage --save` once, in the background; the proposal waits in
+        wi's cache until I look at it (m → t). Nothing is written to ADO here."""
+        for k, (p, w) in list(self.procs.items()):
+            if p.poll() is None:
+                continue
+            del self.procs[k]
+            err = p.stderr.read().strip().splitlines()
+            p.stderr.close()
+            r = wi.triage_record(w.id)
+            if p.returncode or not r:
+                st["failed"][k] = (err[-1] if err else f"wi exited {p.returncode}")[:60]
+                s.news.append(f"🧭 #{w.id} triage feilet: {st['failed'][k]}")
+                continue
+            route, summary = r["proposal"]["route"], r["proposal"]["summary"]
+            s.news.append(f"🧭 #{w.id} triagert: {route} — {summary[:60]}")
+            if self.cfg["notify"]["start"]:
+                notify_one(f"🧭 #{w.id} triagert: {ROUTE[route][0]}", f"{w.title} — {summary}")
+        for k, w in work.items():
+            r = wi.triage_record(w.id)
+            if k in self.procs:
+                chips[k] = ("🧭 triagerer …", "cyan")
+            elif r:
+                label, tone = ROUTE[r["proposal"]["route"]]
+                chips[k] = (f"🧭 {label} · m → t", tone)
+            elif k in st["failed"]:
+                chips[k] = (f"🧭 feilet: {st['failed'][k]}", "red")
+            elif k in st["muted"] or k in st["started"] or not self.on:
+                continue
+            elif not self.open_():
+                chips[k] = (f"⏳ triage {self.opens()}", "dim")
+            elif len(self.procs) >= TRIAGE_PAR:
+                chips[k] = ("⏳ triage i kø", "dim")
+            else:
+                self.spawn(w, st)
+                chips[k] = ("🧭 triagerer …", "cyan")
 
     def header(self, agents_):
         if not self.lock:
@@ -1102,6 +1178,12 @@ class Pilot:
     def now(self, x):
         """«Kjør auto nå»: start the row's autopilot agent regardless of hours, slots and mute."""
         st = self.load()
+        if isinstance(x, Work):
+            if x.key in self.procs:
+                raise RuntimeError(f"#{x.id} triageres allerede")
+            self.spawn(x, st)
+            self.save(st)
+            return f"🧭 triagerer #{x.id} i bakgrunnen …"
         t = self.trigger(x)
         if not t and isinstance(x, Mine):
             raise RuntimeError(f"!{x.id}: ingen konflikt eller rødt bygg å fikse")
@@ -1123,12 +1205,13 @@ def pilot_menu(p):
 
 
 def pilot_options(p, x):
-    """The row menu's autopilot entries for a Review or Mine."""
-    if not p or not p.lock or not isinstance(x, (Review, Mine)):
+    """The row menu's autopilot entries for a Review or Mine, or an untriaged work item."""
+    if not p or not p.lock or not (isinstance(x, (Review, Mine)) or untriaged(x)):
         return []
     muted = x.key in p.load()["muted"]
-    return [("z", "slå på autopilot igjen" if muted else "demp autopilot for raden", lambda: p.mute(x), False),
-            ("n", "kjør auto nå", lambda: p.now(x), f"start autopilot-agent på {x.key} nå?")]
+    now = ("n", "triager i bakgrunnen nå", lambda: p.now(x), False) if isinstance(x, Work) else \
+        ("n", "kjør auto nå", lambda: p.now(x), f"start autopilot-agent på {x.key} nå?")
+    return [("z", "slå på autopilot igjen" if muted else "demp autopilot for raden", lambda: p.mute(x), False), now]
 
 
 # ── actions ─────────────────────────────────────────────────────────────────
@@ -1250,11 +1333,15 @@ def menu(x, pilot=None):
             ("g", "start review-agent", lambda: launch(x), False),
             *pilot_options(pilot, x),
             ("o", "åpne i nettleser", lambda: subprocess.run(["open", x.url]) and "", False)])
+    triage = [("t", "triage: se forslaget, y skriver til ADO", lambda: triage_here(x), "shell")] \
+        if x.kind == "item" and not x.decision and x.type.lower() in ("issue", "bug") else []
     return (f"#{x.id} {x.title[:50]}", [
+        *triage,
         ("s", f"endre status ({x.state})", lambda: status_menu(x), "sub"),
         ("i", "sett nåværende sprint", lambda: set_sprint(x), False),
         ("g", f"start agent ({x.skill})", lambda: launch(x), False),
         *code_option(x),
+        *pilot_options(pilot, x),
         ("o", "åpne i nettleser", lambda: subprocess.run(["open", x.url]) and "", False)])
 
 
@@ -1339,7 +1426,7 @@ def work_row(snap, w, multi, folded):
     if w.folds:
         parts.append((f"  {len(w.children)} åpne, {w.done_children} done", "dim"))
     parts.append((f"  → {w.skill}", "dim"))
-    return parts + pr_chip(w) + tree_chip(w) + agent_chip(snap, w)
+    return parts + pr_chip(w) + tree_chip(w) + agent_chip(snap, w) + auto_chip(snap, w)
 
 
 def child_row(snap, t, last, pad):
@@ -1724,6 +1811,12 @@ def tui(scr, a):
             elif confirm == "edit":
                 st = s.agents.get(cur.key)
                 edit = ["prompt", "", fn, f"{cur.key} finnes allerede ({st}) — start ny?" if st else False]
+            elif confirm == "shell":  # runs in this terminal: hand it over, then take it back
+                curses.def_prog_mode()
+                curses.endwin()
+                act(fn)
+                curses.reset_prog_mode()
+                scr.clear()
             elif confirm:
                 ask = (confirm, fn)
             else:
@@ -2001,7 +2094,9 @@ GUIDE = """\
   m         valg for raden:
               PR         a approve · u auto-complete · c complete · x abandon · g review-agent ·
                          z demp/slå på autopilot · n kjør auto nå · o åpne
-              work item  s endre status (1–9) · i nåværende sprint · g agent · v VS Code · o åpne
+              work item  t triage (Issue/Bug: `wi triage` her i terminalen, y skriver til ADO) ·
+                         s endre status (1–9) · i nåværende sprint · g agent · v VS Code ·
+                         z demp/slå på auto-triage · n triager nå (utriagerte) · o åpne
               min PR     f fix-agent · u auto-complete · c complete · x abandon ·
                          z demp/slå på autopilot · n kjør auto nå · o åpne
               agent      x fjern (stop + rm) · s stopp
@@ -2020,7 +2115,7 @@ GUIDE = """\
             Samme agentnavn og mappe som radens egen. Finnes agenten, spør y/n først.
 
 {b}AGENTENE{r}
-  kart  → claude --bg -n fleet-wi-<id> "/wayfinder <id>"   i {home}
+  kart  → claude --bg -n fleet-wi-<id> "/wayfinder <id>"   i {home}; tomt kart (fra triage) → tegn kartet
   annet → claude --bg -n fleet-wi-<id> "/implement <id>"   i repoet commits/PRer på itemet
           (eller barna) peker til, i worktree fleet-<id> — ellers i {home}
   kart-ticket → "/wayfinder <kart> ticket <id>" i {home}; task-tickets → "/implement <id>"
@@ -2038,6 +2133,11 @@ GUIDE = """\
                     Poster ingenting i ADO. Én gang per PR.
     min PR får rødt bygg / konflikt → fleet-fix-<id>: merger target inn, fikser, pusher. Ingen
                     force-push, svarer ikke i tråder. Én gang per commit, maks {tries} forsøk, så «🤖 ga opp».
+  Triagerer selv (trigger «triage»):
+    Issue/Bug tildelt meg i To Do uten triage-tag (og ikke wayfinder) → `wi triage <id> --save` i
+                    bakgrunnen, maks 2 om gangen, én gang per item. Bare et forslag i ~/.cache/wi/triage —
+                    skriver ingenting i ADO. Linja: 🧭 agent-klar / for meg / trenger info / bør bli kart · m → t;
+                    m → t viser forslaget og y skriver det. Holder ikke agentplass, ingen {backlog} t-grense.
   Ikke: drafts · PRer der jeg allerede har en agent jeg startet selv · hendelser eldre enn
   {backlog} t (helg teller ikke) · utenfor {hours} {days} — da i kø til arbeidstid starter.
   Maks {par} fleet-agenter kjører samtidig (mine teller med); resten «⏳ i kø», fix før review.

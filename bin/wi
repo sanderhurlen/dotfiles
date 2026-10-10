@@ -16,6 +16,9 @@
 #   wi q "<WIQL where>"      raw WIQL condition, same listing
 #   wi ask "<fritekst>"      Claude writes the WIQL (printed as a `wi q` line), runs
 #                            it, and answers when it's a question
+#   wi triage 8700           Claude proposes route, priority, parent, criteria and
+#                            questions; y writes them to ADO (see TRIAGE below)
+#   wi triage                my open Issues/Bugs nobody has triaged yet
 #   wi open 8700             open in browser
 #   wi help                  explained (Norwegian)
 #
@@ -25,6 +28,7 @@
 
 import argparse
 import datetime
+import html
 import importlib.machinery
 import importlib.util
 import json
@@ -44,7 +48,7 @@ _spec = importlib.util.spec_from_loader("wf", _loader)
 wf = importlib.util.module_from_spec(_spec)
 _loader.exec_module(wf)
 
-from_wf = ("bold", "dim", "cyan", "green", "yellow", "red", "state_c", "DONE", "CHILD", "PARENT", "TTY")
+from_wf = ("bold", "dim", "cyan", "green", "yellow", "red", "state_c", "DONE", "CHILD", "PARENT", "TTY", "text")
 globals().update({k: getattr(wf, k) for k in from_wf})
 
 ORDER = {"New": 0, "To Do": 0, "Proposed": 0, "Approved": 1, "Committed": 2, "Active": 3,
@@ -359,6 +363,284 @@ def cmd_ask(a):
                                        f"{rows}{more}", model=a.model))
 
 
+# ── triage ──────────────────────────────────────────────────────────────────
+# An Issue/Bug assigned to me → Claude → a proposal: route (the triage tag, or
+# wayfinder when it should become a map), priority, parent, acceptance criteria,
+# questions for the reporter. The proposal is cached per work item revision in
+# ~/.cache/wi/triage/<id>.json, so fleet's autopilot can triage in the background
+# and I approve later without a second Claude call. Only approving writes to ADO.
+
+TRIAGE_DIR = os.path.join(CACHE, "triage")
+TRIAGE_MODEL = os.environ.get("WI_TRIAGE_MODEL", "sonnet")
+ROUTES = ("ready-for-agent", "ready-for-human", "needs-info", "wayfinder")
+TRIAGE_TAGS = ("needs-triage", "needs-info", "ready-for-agent", "ready-for-human")
+TRIAGED = TRIAGE_TAGS[1:]
+PRIO = "Microsoft.VSTS.Common.Priority"
+AC = "Microsoft.VSTS.Common.AcceptanceCriteria"
+REPRO = "Microsoft.VSTS.TCM.ReproSteps"
+
+TRIAGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "route": {"type": "string", "enum": list(ROUTES)},
+        "priority": {"type": "integer", "minimum": 1, "maximum": 4},
+        "parent": {"type": "integer", "description": "id from the candidate list, or 0"},
+        "criteria": {"type": "array", "items": {"type": "string"}},
+        "questions": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+        "summary": {"type": "string", "maxLength": 100},
+        "why": {"type": "string"},
+    },
+    "required": ["route", "priority", "parent", "criteria", "questions", "summary", "why"],
+    "additionalProperties": False,
+}
+
+TRIAGE_SYSTEM = """\
+You triage one Azure DevOps work item (Issue or Bug) that was assigned to {me}, a developer.
+Decide how it should be worked, without doing the work.
+
+route — pick one:
+- ready-for-agent: clear and small. An unattended coding agent can implement and verify it
+  from the text alone (typo, copy change, a contained UI or logic fix with an obvious result).
+- ready-for-human: clear what to do, but it needs a person: judgement on design or wording,
+  legal/commercial content, access to prod or customers, manual verification, or the
+  developer said so.
+- needs-info: a fact only the reporter has is missing, so any fix would be a guess: where
+  (page, URL, environment), what happens vs. what was expected, which customer/data, steps.
+- wayfinder: too big or foggy for one working session: two or more open decisions, the
+  solution is unknown and needs research/prototype/discussion, it spans several repos or
+  systems, or it is more than a day or two of work / several PRs. It becomes a map.
+Prefer needs-info over guessing. A one-line item that names the page and the change is
+fine for ready-for-agent.
+
+priority: 1 = production down, data loss, or customers blocked; 2 = important, this sprint;
+3 = normal; 4 = cosmetic or typo. Keep the current priority when it fits.
+
+parent: the id of the candidate below this item clearly belongs under, else 0. Keep the
+current parent if it has one (return its id).
+
+criteria: acceptance criteria as short checkable statements, only what the item says or
+plainly implies — never invent requirements. Empty when route is needs-info or wayfinder,
+or when the item already has them.
+
+questions: for needs-info, 1–3 concrete questions to the reporter that unblock it. For other
+routes, empty.
+
+summary: one line, what is to be done. why: one sentence on the route.
+Write criteria, questions and summary in the item's language (usually Norwegian).
+
+Candidate parents (id | type | title):
+{candidates}
+"""
+
+
+def triage_path(id):
+    return os.path.join(TRIAGE_DIR, f"{id}.json")
+
+
+def triage_record(id):
+    """The cached proposal for a work item: {id, rev, at, model, proposal, applied}, or None."""
+    try:
+        with open(triage_path(id)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def save_record(r):
+    os.makedirs(TRIAGE_DIR, exist_ok=True)
+    tmp = f"{triage_path(r['id'])}.{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(r, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, triage_path(r["id"]))
+
+
+def raw_item(id):
+    try:
+        return rest(f"wit/workitems/{id}?$expand=relations")
+    except RuntimeError as e:
+        die(f"#{id}: {e}")
+
+
+def candidates(project):
+    """Open Epics and wayfinder maps in the project: where a triaged item may go."""
+    cond = ("[System.TeamProject] = @project AND [System.State] NOT IN ('Done', 'Closed', 'Removed', 'Resolved') "
+            "AND ([System.WorkItemType] = 'Epic' OR [System.Tags] CONTAINS 'wayfinder:map')")
+    ids = [w["id"] for w in rest("wit/wiql?$top=100", {"query": wiql([cond])},
+                                 project=urllib.parse.quote(project))["workItems"]]
+    return wf.many(ids)
+
+
+def parent_of(raw):
+    return next((int(r["url"].rsplit("/", 1)[1]) for r in raw.get("relations") or [] if r["rel"] == PARENT), 0)
+
+
+def describe(raw, comments):
+    """The work item as Claude reads it."""
+    f = raw["fields"]
+    who = lambda k: (f.get(k) or {}).get("displayName", "-")
+    p = parent_of(raw)
+    out = [f"#{raw['id']} {f.get('System.WorkItemType')}: {f.get('System.Title')}",
+           f"State: {f.get('System.State')} · Area: {f.get('System.AreaPath')} · Iteration: {f.get('System.IterationPath')}",
+           f"Priority: {f.get(PRIO, '-')} · Tags: {f.get('System.Tags') or '-'} · Parent: "
+           + (f"{p} {wf.get(p).title}" if p else "-"),
+           f"Created by {who('System.CreatedBy')} {f.get('System.CreatedDate', '')[:10]}, assigned to {who('System.AssignedTo')}"]
+    for name, k in (("Description", "System.Description"), ("Repro steps", REPRO), ("Acceptance criteria", AC)):
+        if f.get(k):
+            out.append(f"\n## {name}\n{text(f[k])}")
+    for who_, when, body in comments[-10:]:
+        out.append(f"\n## Comment by {who_} {when[:10]}\n{text(body)}")
+    return "\n".join(out)
+
+
+def propose(id, model):
+    """Run Claude on the work item and cache the proposal. → record"""
+    raw = raw_item(id)
+    f = raw["fields"]
+    item = wf.get(id)
+    cands = candidates(f["System.TeamProject"])
+    system = TRIAGE_SYSTEM.format(me=A().me(), candidates="\n".join(
+        f"{c.id} | {'map' if c.is_map else c.type} | {c.title}" for c in cands) or "(none)")
+    p = claude(system, describe(raw, A().comments(item)), TRIAGE_SCHEMA, model)
+    if p["parent"] and p["parent"] not in {c.id for c in cands} | {parent_of(raw)}:
+        p["parent"] = 0  # only parents that exist and are open
+    r = {"id": id, "rev": raw["rev"], "at": datetime.datetime.now().isoformat(timespec="seconds"),
+         "model": model, "title": f.get("System.Title"), "proposal": p, "applied": False}
+    save_record(r)
+    return r
+
+
+def route_c(route):
+    return {"ready-for-agent": green, "ready-for-human": yellow, "needs-info": red, "wayfinder": cyan}[route](route)
+
+
+def show_proposal(r, raw):
+    f, p = raw["fields"], r["proposal"]
+    cur_p = parent_of(raw)
+    arrow = lambda a, b: f"{a} → {bold(str(b))}" if str(a) != str(b) else str(a)
+    print(f"{bold(f.get('System.Title'))}  {dim(f'#{r['id']} {f.get('System.WorkItemType')} · {f.get('System.State')}')}")
+    print(f"  {'rute':<10} {route_c(p['route'])}" + (dim("  → tag wayfinder:map, så `wf go`") if p["route"] == "wayfinder" else ""))
+    print(f"  {'prioritet':<10} {arrow(f.get(PRIO, '-'), p['priority'])}")
+    if p["parent"] or cur_p:  # an existing parent is kept, so only a missing one can change
+        par = lambda i: f"{i} {wf.get(i).title}"
+        print(f"  {'parent':<10} {par(cur_p) if cur_p else arrow('-', par(p['parent']))}")
+    for name, xs in (("kriterier", p["criteria"]), ("spørsmål", p["questions"])):
+        for n, x in enumerate(xs):
+            print(f"  {name if n == 0 else '':<10} - {x}")
+    print(f"  {'sammendrag':<10} {p['summary']}")
+    print(dim(f"  {'hvorfor':<10} {p['why']}"))
+    print(dim(f"  {r['model']} · {r['at'].replace('T', ' ')[:16]}" + (" · brukt" if r.get("applied") else "")))
+
+
+def mention(identity):
+    """An ADO @mention of a person, so they get notified of the comment."""
+    return (f'<a href="#" data-vss-mention="version:2.0,{identity["id"]}">@{html.escape(identity["displayName"])}</a>'
+            if identity.get("id") else "")
+
+
+def apply_proposal(r, raw):
+    """Write the proposal to ADO. → one line saying what changed."""
+    f, p = raw["fields"], r["proposal"]
+    ops, did = [{"op": "test", "path": "/rev", "value": raw["rev"]}], []
+    tag = "wayfinder:map" if p["route"] == "wayfinder" else p["route"]
+    tags = [t.strip() for t in (f.get("System.Tags") or "").split(";") if t.strip() and t.strip() not in TRIAGE_TAGS]
+    ops.append({"op": "add", "path": "/fields/System.Tags", "value": "; ".join(tags + [tag])})
+    did.append(tag)
+    if f.get(PRIO) != p["priority"]:
+        ops.append({"op": "add", "path": f"/fields/{PRIO}", "value": p["priority"]})
+        did.append(f"P{p['priority']}")
+    if p["parent"] and not parent_of(raw):
+        ops.append({"op": "add", "path": "/relations/-",
+                    "value": {"rel": PARENT, "url": f"{A().org}/_apis/wit/workItems/{p['parent']}"}})
+        did.append(f"parent {p['parent']}")
+    desc = f.get("System.Description") or ""
+    if p["criteria"] and not f.get(AC) and "akseptkriterier" not in desc.lower():
+        ops.append({"op": "add", "path": "/fields/System.Description", "value": desc + "<h3>Akseptkriterier</h3><ul>"
+                    + "".join(f"<li>{html.escape(c)}</li>" for c in p["criteria"]) + "</ul>"})
+        did.append(f"{len(p['criteria'])} kriterier")
+    A().api(f"wit/workitems/{r['id']}", ops, method="PATCH", ctype="application/json-patch+json")
+    if p["route"] == "needs-info" and p["questions"]:
+        creator = f.get("System.CreatedBy") or {}
+        to = mention(creator) + " " if creator.get("uniqueName", "").lower() != A().me().lower() else ""
+        body = (f"<p>{to}Før jeg kan ta denne trenger jeg litt mer:</p><ol>"
+                + "".join(f"<li>{html.escape(q)}</li>" for q in p["questions"]) + "</ol>")
+        A().api(f"wit/workItems/{r['id']}/comments", {"text": body}, project=urllib.parse.quote(f["System.TeamProject"]))
+        did.append(f"{len(p['questions'])} spørsmål postet")
+    r.update(applied=True, rev=raw_item(r["id"])["rev"])
+    save_record(r)
+    return f"✓ #{r['id']} → " + " · ".join(did)
+
+
+def edit_proposal(r):
+    """$EDITOR on the proposal as JSON; the route must stay one of ROUTES."""
+    path = os.path.join(TRIAGE_DIR, f"{r['id']}.edit.json")
+    with open(path, "w") as f:
+        json.dump(r["proposal"], f, ensure_ascii=False, indent=2)
+    subprocess.run(shlex.split(os.environ.get("EDITOR", "vi")) + [path])
+    try:
+        with open(path) as f:
+            p = json.load(f)
+    except ValueError as e:
+        die(f"ugyldig JSON: {e}")
+    finally:
+        os.remove(path)
+    if p.get("route") not in ROUTES or set(TRIAGE_SCHEMA["required"]) - set(p):
+        die(f"rute må være én av {', '.join(ROUTES)}, og alle feltene må være med")
+    r["proposal"] = p
+    save_record(r)
+
+
+def untriaged():
+    """My open Issues/Bugs without a triage tag that aren't part of a map or spec."""
+    cond = ("[System.AssignedTo] = @Me AND [System.WorkItemType] IN ('Issue', 'Bug') AND [System.State] "
+            "NOT IN ('Done', 'Closed', 'Removed', 'Resolved')")
+    items = wf.many(execute(wiql(["[System.TeamProject] = @project", cond]), LIMIT))
+    return [t for t in items if not any(x in TRIAGED or x.startswith("wayfinder:") or x == "spec" for x in t.tags)]
+
+
+def cmd_triage(a):
+    if not a.id:
+        items = untriaged()
+        if not items:
+            return print(dim("alt er triagert"))
+        for t in items:
+            r = triage_record(t.id)
+            print(line(t) + (f"  {route_c(r['proposal']['route'])} {dim(r['proposal']['summary'])}" if r else ""))
+        return print(dim(f"{len(items)} utriagert · wi triage <id>"))
+    raw = raw_item(a.id)
+    r = triage_record(a.id)
+    if a.rerun or not r or r["rev"] != raw["rev"]:
+        if a.yes and r and not a.rerun:
+            die(f"#{a.id} er endret siden forslaget — se på det nytt med `wi triage {a.id}`")
+        r = propose(a.id, a.model)
+    if a.json:
+        return print(json.dumps(r, ensure_ascii=False, indent=2))
+    if a.save:
+        p = r["proposal"]
+        return print(f"#{a.id} {p['route']} P{p['priority']} — {p['summary']}")
+    show_proposal(r, raw)
+    if a.yes:
+        return print(apply_proposal(r, raw))
+    if not sys.stdin.isatty():
+        return
+    while True:
+        c = input(f"\n{bold('y')} skriv til ADO · {bold('e')} rediger · {bold('r')} kjør på nytt · {bold('n')} avbryt: ").strip().lower()
+        if c in ("y", "j"):
+            print(apply_proposal(r, raw_item(a.id)))
+            if r["proposal"]["route"] == "wayfinder" and not os.environ.get("WI_NO_GO") and input("start wayfinder nå (wf go)? [y/N] ").strip().lower() in ("y", "j"):
+                os.execvp("wf", ["wf", "go", str(a.id)])
+            return
+        if c == "e":
+            edit_proposal(r)
+        elif c == "r":
+            r = propose(a.id, a.model)
+        elif c in ("n", "q", ""):
+            return
+        else:
+            continue
+        print()
+        show_proposal(r, raw)
+
+
 # ── rendering ───────────────────────────────────────────────────────────────
 
 
@@ -460,6 +742,9 @@ GUIDE = """\
   wi ask "<fritekst>"     Claude lager WIQL, viser den som en `wi q`-linje, kjører den, og
                           svarer hvis det er et spørsmål. --wiql bare query · -l bare liste
                           · -a svar alltid · -m modell · -r hent prosjektdata på nytt
+  wi triage [id]          Claude foreslår rute, prioritet, parent, kriterier og spørsmål;
+                          y skriver til ADO · e rediger · r på nytt. Uten id: mine utriagerte
+                          -y skriv uten å spørre · --save bare lag forslaget · -m modell
   wi open <id>            åpne i nettleser
   wi help [kommando]      denne teksten, eller flaggene til én kommando
 
@@ -479,7 +764,12 @@ GUIDE = """\
 
 {b}VERDT Å VITE{r}
 
-  · Bare lesing — wi endrer aldri noe. Endre med `az boards work-item update` eller wf.
+  · Bare lesing, unntatt triage etter y. Endre ellers med `az boards work-item update` eller wf.
+  · triage: rute = ready-for-agent | ready-for-human | needs-info | wayfinder (blir tag
+    wayfinder:map, så `wf go <id>` tegner kartet). Skriver tag, prioritet, manglende parent,
+    akseptkriterier (i beskrivelsen) og, ved needs-info, spørsmålene som kommentar til den
+    som meldte saken. Forslaget caches per revisjon i ~/.cache/wi/triage — fleet lager det
+    i bakgrunnen. Modell: WI_TRIAGE_MODEL (default sonnet).
   · Sortering: state (ny → aktiv → ferdig), så id. Samme filtre gir alltid samme liste.
   · Uten -s skjules ferdige states; med -s får du nøyaktig de du ber om.
   · ask: Claude får prosjektets faktiske typer, states, områder, iterasjoner, folk og tags
@@ -556,6 +846,15 @@ def main():
     s.add_argument("-L", "--limit", type=int, default=LIMIT)
     s.add_argument("--wiql", action="store_true", help="print the WIQL, don't run it")
     s.set_defaults(fn=cmd_ask)
+
+    s = sub.add_parser("triage", help="Claude proposes how to triage an item; y writes it to ADO")
+    s.add_argument("id", type=int, nargs="?")
+    s.add_argument("-m", "--model", default=TRIAGE_MODEL)
+    s.add_argument("-r", "--rerun", action="store_true", help="ask Claude again even if a proposal is cached")
+    s.add_argument("-y", "--yes", action="store_true", help="write the proposal to ADO without asking")
+    s.add_argument("--save", action="store_true", help="only make and cache the proposal, print one line")
+    s.add_argument("--json", action="store_true", help="print the cached record")
+    s.set_defaults(fn=cmd_triage)
 
     s = sub.add_parser("tree", help="item and its children")
     s.add_argument("id", type=int)

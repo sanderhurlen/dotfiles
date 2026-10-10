@@ -204,7 +204,7 @@ class Ado:
             id=raw["id"], title=f.get("System.Title", ""), state=state, done=state in DONE,
             tags=[t.strip() for t in (f.get("System.Tags") or "").split(";") if t.strip()],
             assignee=a.get("uniqueName") if isinstance(a, dict) else None,
-            description=f.get("System.Description") or "",
+            description=(f.get("System.Description") or "") + (f.get("Microsoft.VSTS.TCM.ReproSteps") or ""),
             criteria=f.get("Microsoft.VSTS.Common.AcceptanceCriteria") or "",
             url=f"{self.org}/{proj}/_workitems/edit/{raw['id']}",
             type=f.get("System.WorkItemType", ""), project=proj,
@@ -653,6 +653,10 @@ def ref(t):
 
 def cmd_go(a):
     m = get(a.map)
+    if not m.is_map and not m.is_spec:
+        return go_item(m, a)
+    if m.is_map and not a.ticket and not m.links(CHILD) and not map_specs(m):
+        return chart(m, a)
     t = pick(m, a.ticket)
     if not t:
         die(f"nothing takeable on {m.id} — `wf map {m.id}`")
@@ -663,6 +667,31 @@ def cmd_go(a):
     if a.bg or (afk and not a.interactive):
         cmd += ["--bg", "-n", f"wf-{m.id}-{t.id}"]
     launch(cmd + [prompt], a.dry_run)
+
+
+def chart(m, a):
+    """A map with nothing under it yet — usually an item triage routed to wayfinder: its
+    description is still the original request. Interactive, it's a conversation."""
+    print(line(m, dim("  tomt kart → tegn det")))
+    cmd = ["claude"] + (["--bg", "-n", f"wf-{m.id}"] if a.bg else [])
+    launch(cmd + [chart_prompt(m)], a.dry_run)
+
+
+def chart_prompt(m):
+    return (f"/wayfinder Chart the map {ref(m)} — \"{m.title}\". It is tagged wayfinder:map but has no map "
+            f"body and no tickets yet: its description is the original request. Rewrite the description into "
+            f"the map body, keeping the original request quoted under Notes, then create the first decision "
+            f"tickets. Read it with {T().read_hint(m.id)}.")
+
+
+def go_item(t, a):
+    """wf go on an item that isn't a map: its triage tag says what to do."""
+    if "ready-for-agent" in t.tags or "ready-for-human" in t.tags:
+        a.ids, a.force, a.no_claim = [t.id], False, False
+        return cmd_run(a)
+    if "needs-info" in t.tags:
+        die(f"{t.id} venter på svar fra den som meldte saken (needs-info) — `wf show {t.id}`")
+    die(f"{t.id} er verken kart eller triagert — `wi triage {t.id}` først")
 
 
 def implement_prompt(t):
@@ -820,6 +849,9 @@ GUIDE = """\
   wf next <id>            id på neste ledige ticket (kart eller spec) — for scripting
   wf go <kart> [ticket]   /wayfinder-sesjon. Research → bakgrunn, ellers interaktiv
                           --bg tving bakgrunn · -i tving interaktiv
+                          Tomt kart (tagget, ingen tickets) → wayfinder tegner kartet fra beskrivelsen
+  wf go <id>              vanlig sak: ready-for-agent/-human → som wf run · needs-info → stopp
+                          · utriagert → `wi triage <id>` først (rute wayfinder gjør den til kart)
   wf run <id…>            /implement-agent i bakgrunnen, worktree t<id>, navn <repo>-<id>
                           -i interaktiv · -f ignorer sjekker · --no-claim
   wf fan <spec> [-y]      run på alle klare ikke-HITL tickets i spec-en
@@ -888,7 +920,7 @@ def main():
     s.add_argument("-C", "--no-comments", action="store_true")
     s.set_defaults(fn=cmd_show)
 
-    s = sub.add_parser("go", help="start a /wayfinder session on a map's next ticket")
+    s = sub.add_parser("go", help="/wayfinder on a map's next ticket; an empty map is charted, a triaged item run")
     s.add_argument("map", type=int)
     s.add_argument("ticket", type=int, nargs="?")
     s.add_argument("--bg", action="store_true", help="background session (default for research)")
