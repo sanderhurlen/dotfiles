@@ -1,0 +1,534 @@
+#!/usr/bin/env python3
+#
+# chores — keep every repo under FLEET_ROOTS (default ~/visense) maintained.
+#
+# Type:
+#
+#   chores sync [repo…]      fetch all, fast-forward the default branch where nothing can
+#                            be lost; on a feature branch only the local main ref moves
+#   chores mise [repo…]      is each runtime the repo needs pinned (mise, .nvmrc, global.json,
+#                            packageManager, engines, …), do the pins agree, and do they
+#                            match the baseline in ~/.config/fleet/config.toml [chores]
+#   chores help              explained (Norwegian)
+#
+# -n: sync only fetches and says what it would do. --notify: macOS notification when
+# something needs me (for launchd, chores/install.sh). Each run's result goes to
+# ~/.cache/fleet/chores.json, so fleet and Claude sessions can read it.
+
+import argparse
+import concurrent.futures
+import datetime
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import tomllib
+
+ROOTS = [os.path.expanduser(p) for p in os.environ.get("FLEET_ROOTS", "~/visense").split(":") if p]
+OUT = os.path.expanduser(os.environ.get("FLEET_OUT", "~/.cache/fleet"))
+STATE = os.path.join(OUT, "chores.json")
+CONFIG = os.path.expanduser(os.environ.get("FLEET_CONFIG", "~/.config/fleet/config.toml"))
+DEFAULTS = {"skip": [], "baseline": {}}
+# git must fail, never ask: a launchd run has nobody to answer
+ENV = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never", GIT_SSH_COMMAND="ssh -oBatchMode=yes")
+ADO_RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"  # Azure DevOps, for `az account get-access-token`
+
+TTY = sys.stdout.isatty()
+
+
+def c(code, s):
+    return f"\033[{code}m{s}\033[0m" if TTY else s
+
+
+dim = lambda s: c("2", s)
+bold = lambda s: c("1", s)
+green = lambda s: c("32", s)
+yellow = lambda s: c("33", s)
+red = lambda s: c("31", s)
+cyan = lambda s: c("36", s)
+
+
+def die(msg):
+    print(f"chores: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def config():
+    """[chores] from the fleet config, over DEFAULTS."""
+    out = {k: (dict(v) if isinstance(v, dict) else list(v)) for k, v in DEFAULTS.items()}
+    try:
+        with open(CONFIG, "rb") as f:
+            got = tomllib.load(f).get("chores") or {}
+    except FileNotFoundError:
+        return out
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        die(f"{CONFIG}: {e}")
+    out.update({k: v for k, v in got.items() if k in out and type(v) is type(out[k])})
+    out["baseline"] = {k: str(v) for k, v in out["baseline"].items()}
+    return out
+
+
+def repos(names):
+    """[(name, path)] of git clones one level under each root, only `names` when given."""
+    out = []
+    for root in ROOTS:
+        try:
+            entries = sorted(os.listdir(root), key=str.lower)
+        except OSError:
+            continue
+        out += [(n, os.path.join(root, n)) for n in entries if os.path.isdir(os.path.join(root, n, ".git"))]
+    if names:
+        want = {n.rstrip("/").lower() for n in names}
+        out = [r for r in out if r[0].lower() in want]
+        if missing := want - {r[0].lower() for r in out}:
+            die(f"ingen repo {', '.join(sorted(missing))} under {', '.join(ROOTS)}")
+    return out
+
+
+def save(kind, rows):
+    os.makedirs(OUT, exist_ok=True)
+    try:
+        with open(STATE) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        state = {}
+    state[kind] = {"at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"), "repos": rows}
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=1, ensure_ascii=False)
+    os.replace(tmp, STATE)
+
+
+def notify(subtitle, text):
+    script = ("on run argv\n display notification (item 2 of argv) with title \"chores\" "
+              "subtitle (item 1 of argv) sound name \"Glass\"\nend run")
+    subprocess.run(["osascript", "-e", script, subtitle, text], capture_output=True)
+
+
+def parallel(fn, items):
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        return list(pool.map(fn, items))
+
+
+def print_rows(rows, mark):
+    w = max((len(r["repo"]) for r in rows), default=0)
+    for r in rows:
+        print(f"{mark[r['status']]} {r['repo'].ljust(w)}  {r['text']}")
+
+
+# ── sync ────────────────────────────────────────────────────────────────────
+# Status: ok (up to date, or fast-forwarded), info (on a branch, main moved by ref),
+# held (main is behind but something local is in the way), fail (fetch or git failed).
+
+
+def ado_auth():
+    """Sign git in to dev.azure.com with my az login (as wf does), through the environment so
+    the token stays out of argv. Without az the keychain is all there is."""
+    try:
+        token = subprocess.run(["az", "account", "get-access-token", "--resource", ADO_RESOURCE, "--query",
+                                "accessToken", "-o", "tsv"], capture_output=True, text=True, timeout=60).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        token = ""
+    if token:
+        ENV.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="http.https://dev.azure.com/.extraHeader",
+                   GIT_CONFIG_VALUE_0=f"Authorization: Bearer {token}")
+    return bool(token)
+
+
+def git(d, *args, timeout=30):
+    """(returncode, stdout, stderr) of git in d."""
+    try:
+        p = subprocess.run(["git", "-C", d, *args], capture_output=True, text=True, timeout=timeout, env=ENV)
+        return p.returncode, p.stdout.strip(), p.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return 124, "", "tidsavbrudd"
+
+
+def out(d, *args):
+    rc, o, _ = git(d, *args)
+    return o if rc == 0 else ""
+
+
+def default_branch(d):
+    """origin's default branch: origin/HEAD, else main or master if origin has it."""
+    ref = out(d, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    if ref.startswith("origin/"):
+        return ref[len("origin/"):]
+    for b in ("main", "master"):
+        if out(d, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{b}"):
+            return b
+    return None
+
+
+def count(d, rng):
+    n = out(d, "rev-list", "--count", rng)
+    return int(n) if n.isdigit() else 0
+
+
+def busy(d):
+    """A merge, rebase, cherry-pick or revert in progress in the worktree at d."""
+    for p in ("MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
+        if os.path.exists(os.path.join(d, out(d, "rev-parse", "--git-path", p))):
+            return True
+    return False
+
+
+def changes(d):
+    """(changed paths, age in days of the oldest change) — untracked files count too."""
+    lines = [l for l in out(d, "status", "--porcelain").splitlines() if l]
+    times = []
+    for l in lines:
+        try:
+            times.append(os.path.getmtime(os.path.join(d, l[3:].split(" -> ")[-1].strip('"'))))
+        except OSError:
+            pass
+    age = int((time.time() - min(times)) / 86400) if times else 0
+    return len(lines), age
+
+
+def dirty_text(n, age):
+    return (f"{n} endrede filer" if n > 1 else "1 endret fil") + (f", eldste {age}d" if age else "")
+
+
+def checked_out(d, branch):
+    """Path of the worktree that has `branch` checked out, else None."""
+    path = None
+    for l in out(d, "worktree", "list", "--porcelain").splitlines():
+        if l.startswith("worktree "):
+            path = l[len("worktree "):]
+        elif l == f"branch refs/heads/{branch}":
+            return path
+    return None
+
+
+def ff(wt, branch, dry):
+    """Fast-forward `branch`, checked out at wt, to origin. (status, text)."""
+    up = f"origin/{branch}"
+    behind, ahead = count(wt, f"{branch}..{up}"), count(wt, f"{up}..{branch}")
+    if ahead and behind:
+        return "held", f"{branch} har {ahead} egne commits og er {behind} bak — ikke rørt"
+    if ahead:
+        return "held", f"{branch} har {ahead} upushede commits"
+    if not behind:
+        return "ok", "oppdatert"
+    if busy(wt):
+        return "held", f"{behind} bak, merge/rebase pågår — ikke rørt"
+    tracked = out(wt, "status", "--porcelain", "--untracked-files=no")
+    if tracked:
+        return "held", f"{behind} bak, {dirty_text(*changes(wt))} — ikke rørt"
+    if dry:
+        return "ok", f"ville tatt +{behind}"
+    rc, _, err = git(wt, "merge", "--ff-only", "--quiet", up)
+    if rc:
+        return "held", f"{behind} bak, fast-forward feilet: {err.splitlines()[0] if err else rc}"
+    return "ok", green(f"+{behind}")
+
+
+def sync_one(repo, dry):
+    name, d = repo
+    row = {"repo": name, "path": d}
+    if not out(d, "remote", "get-url", "origin"):
+        return row | {"status": "local", "text": dim("ingen origin")}
+    rc, _, err = git(d, "fetch", "--prune", "--quiet", "origin", timeout=120)
+    if rc:
+        why = next((l for l in err.splitlines() if l.startswith("fatal:")), err.splitlines()[-1] if err else rc)
+        return row | {"status": "fail", "text": f"fetch feilet: {why}"}
+    main = default_branch(d)
+    if not main:
+        return row | {"status": "fail", "text": "fant ikke default branch på origin"}
+    here = out(d, "symbolic-ref", "--short", "-q", "HEAD")
+    row["branch"] = here or "(detached)"
+    if here == main:
+        status, text = ff(d, main, dry)
+        n, age = changes(d)
+        if n and status == "ok":
+            text += dim(f" · {dirty_text(n, age)}")
+        return row | {"status": status, "text": f"{cyan(main)}  {text}"}
+
+    # on another branch: main follows origin where it is checked out, or as a plain ref
+    wt = checked_out(d, main)
+    if wt:
+        status, text = ff(wt, main, dry)
+        text = f"{main} i {os.path.basename(wt)}: {text}"
+    elif out(d, "rev-parse", "--verify", "--quiet", f"refs/heads/{main}"):
+        behind = count(d, f"{main}..origin/{main}")
+        if not behind:
+            status, text = "info", f"{main} oppdatert"
+        elif count(d, f"origin/{main}..{main}"):
+            status, text = "held", f"{main} har egne commits og er {behind} bak — ikke rørt"
+        elif dry:
+            status, text = "info", f"{main} ville tatt +{behind}"
+        else:
+            rc, _, err = git(d, "update-ref", f"refs/heads/{main}", f"refs/remotes/origin/{main}",
+                             out(d, "rev-parse", f"refs/heads/{main}"))
+            status, text = ("fail", f"{main}: {err}") if rc else ("info", f"{main} {green(f'+{behind}')}")
+    else:
+        status, text = "info", f"ingen lokal {main}"
+
+    br = row["branch"]
+    gone = here and out(d, "config", f"branch.{here}.merge") and \
+        not out(d, "rev-parse", "--verify", "--quiet", f"{here}@{{upstream}}")
+    extra = [f"{count(d, f'HEAD..origin/{main}')} bak {main}"]
+    if gone:
+        extra.append(yellow("upstream borte"))
+    n, age = changes(d)
+    if n:
+        extra.append(dirty_text(n, age))
+    return row | {"status": status, "text": f"{yellow(br)}  {text} · {' · '.join(extra)}"}
+
+
+def cmd_sync(a):
+    if not ado_auth():
+        print(yellow("az ga ikke token (az login?) — prøver git sin keychain"), file=sys.stderr)
+    rows = parallel(lambda r: sync_one(r, a.dry_run), repos(a.repos))
+    print_rows(rows, {"ok": green("✓"), "info": cyan("→"), "held": yellow("⚠"), "fail": red("✗"), "local": dim("·")})
+    held, fail = [r for r in rows if r["status"] == "held"], [r for r in rows if r["status"] == "fail"]
+    print(dim(f"\n{len(rows)} repoer · {len(held)} holdt igjen · {len(fail)} feilet"))
+    if not a.dry_run and not a.repos:
+        save("sync", [{k: v for k, v in r.items() if k != "text"} | {"text": strip(r["text"])} for r in rows])
+    if a.notify and fail:
+        notify(f"sync: {len(fail)} feilet", ", ".join(r["repo"] for r in fail))
+
+
+def strip(s):
+    return re.sub(r"\033\[[0-9;]*m", "", s)
+
+
+# ── mise ────────────────────────────────────────────────────────────────────
+# Which runtimes a repo needs, where it pins them, and whether the pins agree with each
+# other and with the baseline. Status: ok, warn (pins disagree or miss the baseline),
+# missing (needs a runtime nobody pins), skip (in [chores] skip), none (needs nothing).
+
+MISE_FILES = ("mise.toml", ".mise.toml", ".config/mise.toml", "mise/config.toml", ".config/mise/config.toml")
+DEEP = 3  # how far down to look for *.csproj / *.bicep
+PRUNE = {".git", "node_modules", "bin", "obj", ".venv", "dist", ".next"}
+
+
+def walk(d):
+    """File names up to DEEP levels under d."""
+    for root, dirs, files in os.walk(d):
+        depth = root[len(d):].count(os.sep)
+        dirs[:] = [x for x in dirs if x not in PRUNE and depth < DEEP]
+        yield from files
+
+
+def needs(d):
+    """Runtimes the repo needs, from what's in it."""
+    top = set(os.listdir(d))
+    deep = set(os.path.splitext(f)[1] for f in walk(d))
+    out = []
+    if "package.json" in top:
+        out.append("node")
+        pm = (read_json(os.path.join(d, "package.json")).get("packageManager") or "")
+        if "pnpm-lock.yaml" in top or pm.startswith("pnpm"):
+            out.append("pnpm")
+    if "global.json" in top or {".sln", ".slnx", ".csproj"} & deep:
+        out.append("dotnet")
+    if top & {"pyproject.toml", "requirements.txt", "setup.py"}:
+        out.append("python")
+    if ".bicep" in deep:
+        out.append("azure-cli")
+    return out
+
+
+def read_json(p):
+    try:
+        with open(p) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def read(p):
+    try:
+        with open(p) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def pins(d):
+    """{tool: [(source, pin)]} from every place a version can be pinned."""
+    got = {}
+    add = lambda tool, src, v: v and got.setdefault(tool, []).append((src, str(v).strip()))
+    for f in MISE_FILES:
+        p = os.path.join(d, f)
+        if not os.path.isfile(p):
+            continue
+        try:
+            with open(p, "rb") as fh:
+                tools = tomllib.load(fh).get("tools") or {}
+        except (OSError, tomllib.TOMLDecodeError):
+            add("?", f, "kan ikke leses")
+            continue
+        for tool, v in tools.items():
+            v = v[0] if isinstance(v, list) and v else v
+            v = v.get("version") if isinstance(v, dict) else v
+            add(tool.split(":")[-1], f, v)
+    for l in read(os.path.join(d, ".tool-versions")).splitlines():
+        parts = l.split("#")[0].split()
+        if len(parts) >= 2:
+            add(parts[0], ".tool-versions", parts[1])
+    for f in (".nvmrc", ".node-version"):
+        add("node", f, read(os.path.join(d, f)))
+    add("python", ".python-version", read(os.path.join(d, ".python-version")))
+    pkg = read_json(os.path.join(d, "package.json"))
+    engines = pkg.get("engines") or {}
+    add("node", "engines", engines.get("node"))
+    add("pnpm", "engines", engines.get("pnpm"))
+    pm = pkg.get("packageManager") or ""
+    if pm.startswith("pnpm@"):
+        add("pnpm", "packageManager", pm[len("pnpm@"):])
+    add("dotnet", "global.json", (read_json(os.path.join(d, "global.json")).get("sdk") or {}).get("version"))
+    try:
+        with open(os.path.join(d, "pyproject.toml"), "rb") as fh:
+            add("python", "pyproject", (tomllib.load(fh).get("project") or {}).get("requires-python"))
+    except (OSError, tomllib.TOMLDecodeError):
+        pass
+    return got
+
+
+def parse(pin):
+    """(op, version tuple) from '26', 'v22', '>=26', '^11.1', '11.1.1+sha…'; None for lts, latest, *."""
+    m = re.match(r"^(>=|>|\^|~|=)?\s*v?(\d+(?:\.\d+)*)", pin.split("+")[0].strip())
+    return (m.group(1) or "", tuple(int(x) for x in m.group(2).split("."))) if m else None
+
+
+def fits(pin, version):
+    """Does version (a tuple) satisfy pin? A bare pin is a prefix: '26' fits 26.4.0."""
+    p = parse(pin)
+    if not p or not version:
+        return True  # unreadable pins (lts, latest) are not drift
+    op, v = p
+    if op in (">=", ">"):
+        n = max(len(v), len(version))
+        return version + (0,) * (n - len(version)) >= v + (0,) * (n - len(v))
+    if op == "^":
+        return version[0] == v[0]
+    n = min(len(v), len(version))
+    return v[:n] == version[:n]
+
+
+def ver(pin):
+    p = parse(pin)
+    return p[1] if p else None
+
+
+def mise_one(repo, cfg):
+    name, d = repo
+    row = {"repo": name, "path": d}
+    if name in cfg["skip"]:
+        return row | {"status": "skip", "text": dim("hoppes over")}
+    need, have = needs(d), pins(d)
+    if not need and not have:
+        return row | {"status": "none", "text": dim("trenger ingen runtime")}
+    found, ok = [], []
+    mise = [f for f in MISE_FILES + (".tool-versions",) if os.path.isfile(os.path.join(d, f))]
+    if len(mise) > 1:
+        found.append(f"flere mise-filer: {', '.join(mise)}")
+    for tool in sorted(set(need) | set(have)):
+        ps = have.get(tool, [])
+        if not ps:
+            found.append(red(f"{tool} ikke pinnet"))
+            continue
+        srcs = lambda xs: ", ".join(s for s, _ in xs)
+        clash = [(s, v) for s, v in ps if not all(fits(v, ver(w)) or fits(w, ver(v)) for _, w in ps)]
+        base = cfg["baseline"].get(tool)
+        off = [(s, v) for s, v in ps if base and not (fits(v, ver(base)) or fits(base, ver(v)))]
+        if clash:
+            found.append(f"{tool} uenig: " + " ≠ ".join(f"{v} ({s})" for s, v in ps))
+        elif off:
+            found.append(f"{tool} {off[0][1]} ≠ {base} ({srcs(off)})")
+        else:
+            ok.append(f"{tool} {ps[0][1]}")
+    row |= {"needs": need, "pins": {t: dict(v) for t, v in have.items()}, "findings": [strip(f) for f in found]}
+    if found:
+        status = "missing" if all("ikke pinnet" in strip(f) for f in found) else "warn"
+        return row | {"status": status, "text": " · ".join(found + [dim(x) for x in ok])}
+    return row | {"status": "ok", "text": dim(" · ".join(ok))}
+
+
+def cmd_mise(a):
+    cfg = config()
+    rows = parallel(lambda r: mise_one(r, cfg), repos(a.repos))
+    print_rows(rows, {"ok": green("✓"), "warn": yellow("⚠"), "missing": red("✗"), "skip": dim("·"), "none": dim("·")})
+    bad = [r for r in rows if r["status"] in ("warn", "missing")]
+    base = " ".join(f"{k} {v}" for k, v in cfg["baseline"].items()) or "ingen ([chores.baseline])"
+    print(dim(f"\n{len(rows)} repoer · {len(bad)} trenger noe · baseline: {base}"))
+    if not a.repos:
+        save("mise", [{k: v for k, v in r.items() if k != "text"} for r in rows])
+    if a.notify and bad:
+        notify(f"mise: {len(bad)} repoer trenger noe", ", ".join(r["repo"] for r in bad))
+
+
+# ── help ────────────────────────────────────────────────────────────────────
+
+GUIDE = """\
+{b}chores{r} — vedlikehold av alle repoer under {roots}
+
+{b}chores sync{r}  (launchd: hver dag 07:00, eller når Mac-en våkner etter det)
+  Henter alle repoer (fetch --prune) og fast-forwarder default branch (main/master, fra origin/HEAD).
+  Rører aldri noe som kan gå tapt:
+    ✓  på main: fast-forward når ingen sporede filer er endret, ellers ⚠ «ikke rørt»
+    →  på en feature-branch: lokal main flyttes som ref (eller i worktreen der main er sjekket ut);
+       viser hvor langt grenen er bak main, om upstream er borte, og endrede filer med alder
+    ⚠  holdt igjen: endrede filer, egne commits på main, merge/rebase pågår
+    ✗  fetch feilet (ingen pålogging spørres om — git skal feile, ikke vente)
+    ·  ingen origin (bare lokalt)
+  Logger inn mot dev.azure.com med az-innloggingen (som wf), ellers git sin keychain.
+  -n: bare fetch og si hva den ville gjort.
+
+{b}chores mise{r}  (launchd: mandager 07:05)
+  For hvert repo: hvilke runtimes det trenger (package.json → node, pnpm-lock → pnpm, *.csproj/*.sln/
+  global.json → dotnet, pyproject → python, *.bicep → azure-cli), og hvor de er pinnet: mise-filer,
+  .tool-versions, .nvmrc, .python-version, engines, packageManager, global.json, requires-python.
+    ✓  alt pinnet, pinnene er enige, og de treffer baseline
+    ⚠  pinner er uenige (mise.toml 22 ≠ .mise.toml 26), bommer på baseline, eller flere mise-filer
+    ✗  trenger en runtime som ingen pinner
+    ·  i skip-lista, eller trenger ingen runtime
+  Poenget er at versjonen er pinnet og konsistent, ikke at mise brukes: global.json holder for .NET.
+  Baseline og skip-liste: {config} → [chores].
+
+Begge skriver resultatet til {state}. --notify: macOS-varsel når noe trenger meg.
+Installer launchd-jobbene: chores/install.sh (kjøres av script/install).
+"""
+
+
+def cmd_help(a):
+    on = TTY
+    print(GUIDE.format(b="\033[1m" if on else "", r="\033[0m" if on else "", roots=", ".join(ROOTS),
+                       config=CONFIG, state=STATE))
+
+
+# ── cli ─────────────────────────────────────────────────────────────────────
+
+
+def main():
+    p = argparse.ArgumentParser(prog="chores", description="keep every repo under FLEET_ROOTS maintained")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("sync", help="fetch all, fast-forward default branches where nothing can be lost")
+    s.add_argument("repos", nargs="*", help="only these (dir names)")
+    s.add_argument("-n", "--dry-run", action="store_true", help="fetch, say what would happen, move nothing")
+    s.add_argument("--notify", action="store_true", help="macOS notification when a fetch fails")
+    s.set_defaults(fn=cmd_sync)
+
+    s = sub.add_parser("mise", help="runtimes pinned, pins agree, pins match the baseline")
+    s.add_argument("repos", nargs="*", help="only these (dir names)")
+    s.add_argument("--notify", action="store_true", help="macOS notification when a repo needs something")
+    s.set_defaults(fn=cmd_mise)
+
+    s = sub.add_parser("help", help="forklaring (norsk)")
+    s.set_defaults(fn=cmd_help)
+
+    a = p.parse_args()
+    try:
+        a.fn(a)
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()

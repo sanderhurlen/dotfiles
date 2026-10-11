@@ -14,3 +14,14 @@ weekdays = "mon-fri"                        # … on these days (or "mon,wed,fri
 start = true    # autopilot started an agent (or gave up)
 done = true     # any fleet agent finished
 blocked = true  # any fleet agent waits for me
+
+[chores]  # bin/chores: repo maintenance under FLEET_ROOTS
+# mise: repos that need no runtime pinned (docs, templates, Business Central, prototypes)
+skip = ["brick1890-docs", "visense-docs", "pipeline-templates", "my-workday", "PROTOTYPE-visense-business",
+        "visense-bc-enterprise", "visense-bc-ledger-api", "visense-azure-ad-b2c"]
+
+[chores.baseline]  # mise: version every pin must match (prefix: "26" fits 26.4.0 and >=26)
+node = "26"
+pnpm = "11"
+dotnet = "10"
+python = "3.13"
