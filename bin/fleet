@@ -1005,7 +1005,7 @@ class Pilot:
         if isinstance(x, Review):
             if "review" not in trig or not x.asked or x.vote:
                 return None
-            return "review", f"{x.key}@review", x.created
+            return "review", f"{x.key}@review", None  # age from when fleet first saw me asked, not PR creation
         if x.pr.draft:
             return None
         fails = x.failing if "build" in trig else []
@@ -1079,6 +1079,7 @@ class Pilot:
                 continue
             when = (at or datetime.datetime.fromtimestamp(seen, datetime.timezone.utc)).astimezone()
             if work_age(when, local, days) > self.c["backlog_hours"]:
+                chips[x.key] = ("💤 for gammel · m → n", "dim")
                 continue
             due.append((isinstance(x, Review), when, x, why, fp))
         due.sort(key=lambda d: d[:2])  # fixes first, oldest first
@@ -2139,9 +2140,9 @@ GUIDE = """\
                     skriver ingenting i ADO. Linja: 🧭 agent-klar / for meg / trenger info / bør bli kart · m → t;
                     m → t viser forslaget og y skriver det. Holder ikke agentplass, ingen {backlog} t-grense.
   Ikke: drafts · PRer der jeg allerede har en agent jeg startet selv · hendelser eldre enn
-  {backlog} t (helg teller ikke) · utenfor {hours} {days} — da i kø til arbeidstid starter.
+  {backlog} t (helg teller ikke; review regnes fra da fleet først så meg som reviewer) · utenfor {hours} {days} — da i kø til arbeidstid starter.
   Maks {par} fleet-agenter kjører samtidig (mine teller med); resten «⏳ i kø», fix før review.
-  Linja: 🤖 auto · ⏳ i kø / venter til 07:00 · 🤖 feilet: … · 🤖 ga opp · 🔕 auto av.
+  Linja: 🤖 auto · ⏳ i kø / venter til 07:00 · 🤖 feilet: … · 🤖 ga opp · 🔕 auto av · 💤 for gammel (m → n).
   Demping (m → z) huskes til raden er borte fra lista; av/på og utenfor arbeidstid (A) gjelder økta.
   Review-worktrees fjernes når PR-en er borte fra lista og ingen agent jobber der.
   Konfig: {config}   tilstand: {state}
