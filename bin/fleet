@@ -35,6 +35,7 @@ import concurrent.futures
 import curses
 import datetime
 import fcntl
+import glob
 import importlib.machinery
 import importlib.util
 import json
@@ -75,6 +76,7 @@ OUT = os.path.expanduser(os.environ.get("FLEET_OUT", "~/.cache/fleet"))
 ROOTS = [os.path.expanduser(p) for p in os.environ.get("FLEET_ROOTS", "~/visense").split(":") if p]
 HOME = ROOTS[0]
 WI = os.path.join(os.path.dirname(os.path.realpath(__file__)), "wi")
+PROJECTS = os.path.expanduser("~/.claude/projects")  # <cwd, non-alphanumerics as -> / <sessionId>.jsonl
 AGENTS = f"claude agents --cwd {shlex.quote(HOME)} {SKIP}"  # only sessions started under the first root
 
 
@@ -316,6 +318,31 @@ def agents(raw):
     return out
 
 
+def quiet(raw):
+    """{name: seconds since the session's transcript last changed} for fleet's sessions (the newest
+    wins a shared name). Missing when the transcript can't be found."""
+    out, now = {}, time.time()
+    for a in sorted(raw, key=lambda a: a.get("startedAt", 0)):
+        name, sid = a.get("name") or "", a.get("sessionId")
+        if not name.startswith("fleet-"):
+            continue
+        out.pop(name, None)
+        if not sid:
+            continue
+        paths = [os.path.join(PROJECTS, re.sub(r"[^A-Za-z0-9]", "-", a.get("cwd", "")), f"{sid}.jsonl")]
+        for f in paths + glob.glob(os.path.join(PROJECTS, "*", f"{sid}.jsonl")):
+            try:
+                out[name] = now - os.path.getmtime(f)
+                break
+            except OSError:
+                pass
+    return out
+
+
+def ago(sec):
+    return f"{int(sec // 60)}m" if sec < 3600 else f"{int(sec // 3600)}t" if sec < 86400 else f"{int(sec // 86400)}d"
+
+
 class Orphan:
     """A fleet session whose work item or PR is no longer in the list (Done, reassigned,
     approved, completed)."""
@@ -361,6 +388,7 @@ class Snapshot:
         self.old = old  # Old, or None before the first fetch
         self.items, self.prs, self.agents, self.at, self.error = list(items), list(prs), agents_ or {}, at, error
         self.mine = list(mine_)  # Mine
+        self.quiet = {}  # {agent name: seconds since its transcript changed}
         self.orphans = []  # Orphan
         self.cleanup = []  # Cleanup: worktrees of Done items fleet couldn't safely remove
         self.cleaned = []  # result lines of what this refresh removed
@@ -374,6 +402,7 @@ def snapshot(everyone, clean=False):
         prs = active()
         items, old = work()
         s = Snapshot(items, reviews(prs, everyone), agents(raw), time.time(), mine_=mine(prs), old=old)
+        s.quiet = quiet(raw)
         others = reviews(prs, True)
     except RuntimeError as e:
         return Snapshot(at=time.time(), error=str(e))
@@ -828,7 +857,8 @@ def short(path):
 
 CONFIG = os.path.expanduser(os.environ.get("FLEET_CONFIG", "~/.config/fleet/config.toml"))
 DEFAULTS = {"autopilot": {"enabled": True, "triggers": ["review", "build", "conflict", "triage"], "max_parallel": 2,
-                          "backlog_hours": 24, "max_fix_attempts": 2, "hours": "07-17", "weekdays": "mon-fri"},
+                          "backlog_hours": 24, "max_fix_attempts": 2, "hours": "07-17", "weekdays": "mon-fri",
+                          "blocked_minutes": 30},
             "notify": {"start": True, "done": True, "blocked": True}}
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 BUSY = ("running", "working", "blocked")  # agent states that hold one of autopilot's slots
@@ -1016,10 +1046,18 @@ class Pilot:
         at = max((x.pr.done_at[n] for n in fails if x.pr.done_at.get(n)), default=None)
         return "; ".join(why), f"{x.key}@{commit}", at
 
-    def busy(self, agents_):
+    def holds(self, st, idle):
+        """Whether an agent holds a slot. One blocked longer than blocked_minutes (idle: seconds since
+        its transcript changed) is a finished turn waiting on me, not work — it frees its slot."""
+        return st in BUSY and not (st == "blocked" and idle is not None and idle > self.c["blocked_minutes"] * 60)
+
+    def parked(self, s):
+        return sum(1 for n, st in s.agents.items() if st in BUSY and not self.holds(st, s.quiet.get(n)))
+
+    def busy(self, s):
         now = time.time()
-        self.pending = {k: t for k, t in self.pending.items() if k not in agents_ and now - t < 120}
-        return sum(1 for st in agents_.values() if st in BUSY) + len(self.pending)
+        self.pending = {k: t for k, t in self.pending.items() if k not in s.agents and now - t < 120}
+        return sum(1 for n, st in s.agents.items() if self.holds(st, s.quiet.get(n))) + len(self.pending)
 
     def start(self, x, st, why, fp, notify_=True):
         try:
@@ -1083,7 +1121,7 @@ class Pilot:
                 continue
             due.append((isinstance(x, Review), when, x, why, fp))
         due.sort(key=lambda d: d[:2])  # fixes first, oldest first
-        free = self.c["max_parallel"] - self.busy(s.agents)
+        free = self.c["max_parallel"] - self.busy(s)
         self.queue = []
         for _, _, x, why, fp in due:
             if not self.on:
@@ -1099,7 +1137,7 @@ class Pilot:
         self.triage(s, st, chips, work)
         self.save(st)
         s.auto = chips
-        s.autohead = self.header(s.agents)
+        s.autohead = self.header(s)
 
     def spawn(self, w, st):
         p = subprocess.Popen([WI, "triage", str(w.id), "--save"], cwd=HOME, env=wi_env(w), text=True,
@@ -1146,15 +1184,16 @@ class Pilot:
                 self.spawn(w, st)
                 chips[k] = ("🧭 triagerer …", "cyan")
 
-    def header(self, agents_):
+    def header(self, s):
         if not self.lock:
             return "🤖 autopilot kjører i en annen fleet"
         if not self.on:
             return "🤖 autopilot av"
         q = f" · {len(self.queue)} i kø" if self.queue else ""
+        q += f" · {p} ⏸ venter på meg (teller ikke)" if (p := self.parked(s)) else ""
         if not self.open_():
             return f"🤖 autopilot pause til {self.opens()}{q}"
-        return (f"🤖 autopilot på · {self.busy(agents_)}/{self.c['max_parallel']} kjører{q}"
+        return (f"🤖 autopilot på · {self.busy(s)}/{self.c['max_parallel']} kjører{q}"
                 + (" · også utenfor arbeidstid" if self.after else ""))
 
     def toggle(self):
@@ -1199,7 +1238,7 @@ class Pilot:
 def pilot_menu(p):
     if not p.lock:
         raise RuntimeError("autopilot kjører i en annen fleet")
-    return (p.header({}), [
+    return (p.header(Snapshot()), [
         ("a", "slå av (denne økta)" if p.on else "slå på", p.toggle, False),
         ("u", "ikke utenfor arbeidstid" if p.after else "tillat utenfor arbeidstid (denne økta)", p.allow,
          False if p.after else "autopilot også utenfor arbeidstid denne økta?")])
@@ -1366,7 +1405,8 @@ def agent_chip(snap, x):
     if not st:
         return []
     icon, tone = AGENT.get(st, ("●", "dim"))
-    return [(f"  {icon} agent {st}", tone)]
+    idle = snap.quiet.get(x.key)
+    return [(f"  {icon} agent {st}" + (f" {ago(idle)}" if st == "blocked" and idle is not None else ""), tone)]
 
 
 def auto_chip(snap, x):
@@ -1574,6 +1614,7 @@ def write_state(snap, everyone, open_=(), cur=None, msg=""):
         "orphanAgents": [{"name": o.name, "id": o.sid, "state": o.state, "cwd": o.cwd,
                           "remove": f"fleet prune --id {o.sid}"} for o in snap.orphans],
         "agents": snap.agents,
+        "agentIdleSeconds": {n: round(v) for n, v in snap.quiet.items()},
         "cleanup": [{"workItems": [i.id for i in c.items], "title": c.title, "worktree": c.tree.path,
                      "branch": c.tree.branch, "blockedBy": c.reasons, "mergedPr": (c.pr or {}).get("pullRequestId"),
                      "force": f"fleet clean --force {c.tree.path}"} for c in snap.cleanup],
@@ -2142,6 +2183,8 @@ GUIDE = """\
   Ikke: drafts · PRer der jeg allerede har en agent jeg startet selv · hendelser eldre enn
   {backlog} t (helg teller ikke; review regnes fra da fleet først så meg som reviewer) · utenfor {hours} {days} — da i kø til arbeidstid starter.
   Maks {par} fleet-agenter kjører samtidig (mine teller med); resten «⏳ i kø», fix før review.
+  En agent som har stått ⏸ over {blocked} min (transkriptet urørt) er ferdig med turen og venter
+                    på meg — den teller ikke, så køen går videre. Linja viser hvor lenge: «⏸ agent blocked 5d».
   Linja: 🤖 auto · ⏳ i kø / venter til 07:00 · 🤖 feilet: … · 🤖 ga opp · 🔕 auto av · 💤 for gammel (m → n).
   Demping (m → z) huskes til raden er borte fra lista; av/på og utenfor arbeidstid (A) gjelder økta.
   Review-worktrees fjernes når PR-en er borte fra lista og ingen agent jobber der.
@@ -2176,7 +2219,7 @@ def cmd_help(a):
 def pilot_help():
     c = config()[0]["autopilot"]
     return dict(tries=c["max_fix_attempts"], backlog=c["backlog_hours"], hours=c["hours"],
-                days=c["weekdays"], par=c["max_parallel"])
+                days=c["weekdays"], par=c["max_parallel"], blocked=c["blocked_minutes"])
 
 
 # ── cli ─────────────────────────────────────────────────────────────────────
