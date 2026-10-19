@@ -106,7 +106,8 @@ class Run:
         self.ref, self.commit = raw.get("sourceBranch") or "", raw.get("sourceVersion") or ""
         self.branch = (raw.get("sourceBranch") or "").replace("refs/heads/", "").replace("refs/pull/", "PR ")
         self.branch = self.branch.removesuffix("/merge")
-        self.who = (raw.get("requestedFor") or {}).get("uniqueName", "").split("@")[0]
+        self.email = (raw.get("requestedFor") or {}).get("uniqueName", "")
+        self.who = self.email.split("@")[0]
         self.repo = (raw.get("repository") or {}).get("name", "")
         self.queued = ts(raw.get("queueTime"))
         self.started, self.finished = ts(raw.get("startTime")), ts(raw.get("finishTime"))
@@ -192,18 +193,24 @@ def runs(a):
     """Runs matching the filters, newest first, with approvals and stages filled in. Grouped:
     the GROUP newest of each pipeline, pipelines in order of their newest run."""
     q = {"queryOrder": "queueTimeDescending", "$top": 300 if a.group else a.count * (4 if a.pipeline else 1)}
+    branch = a.branch and (a.branch if a.branch.startswith("refs/") else f"refs/heads/{a.branch}")
     if a.repo:
         q.update(repositoryId=repo_id(a.repo), repositoryType="TfsGit")
-    if a.branch:
-        q["branchName"] = a.branch if a.branch.startswith("refs/") else f"refs/heads/{a.branch}"
+    if branch:
+        q["branchName"] = branch
     if a.mine:
         q["requestedFor"] = A().me()
     waits = pending()
     if a.waiting:
         if not waits:
             return []
-        q["buildIds"] = ",".join(str(i) for i in sorted(waits, reverse=True)[:200])
+        # ADO refuses buildIds alongside any other filter, so those are applied here instead
+        q = {"buildIds": ",".join(str(i) for i in sorted(waits, reverse=True)[:200])}
     rs = [Run(r) for r in rest("build/builds?" + urllib.parse.urlencode(q))["value"]]
+    if a.waiting:
+        me = a.mine and A().me().lower()
+        rs = sorted((r for r in rs if (not a.repo or r.repo == a.repo) and (not branch or r.ref == branch)
+                     and (not me or r.email.lower() == me)), key=lambda r: r.queued, reverse=True)
     if a.pipeline:
         rs = [r for r in rs if a.pipeline.lower() in r.pipeline.lower()]
     if a.group:
