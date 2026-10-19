@@ -152,8 +152,8 @@ class Work:
 
     @property
     def folds(self):
-        """Shows its open tickets under it: maps and specs."""
-        return self.kind in ("map", "spec")
+        """Shows its open tickets under it: maps, specs, and Issues/Bugs with child tasks."""
+        return head(self.it)
 
     @property
     def task(self):
@@ -164,6 +164,11 @@ class Work:
         if self.kind == "map" and not self.children and not self.done_children:
             return wf.chart_prompt(self.it)
         return f"/wayfinder {self.parent.id} ticket {self.id}" if self.decision else f"{self.skill} {self.id}"
+
+
+def head(it):
+    """An item that lists its children under it: a map or spec, or an Issue/Bug broken into tasks."""
+    return it.is_map or it.is_spec or (it.type.lower() in ("bug", "issue") and bool(it.links(wf.CHILD)))
 
 
 def unfold(m):
@@ -191,14 +196,14 @@ def wiql(when):
 
 def work():
     """(items, Old): my work items in To Do/Doing across the org created the last OLD days: bugs
-    first, then Doing, then by id. Tasks under a map or spec only show as its children; the parent
+    first, then Doing, then by id. Tasks under a map, spec or Issue/Bug only show as its children; the parent
     is listed even if not mine."""
     q = lambda when: [w["id"] for w in rest("wit/wiql", {"query": wiql(when)}, scope="org")["workItems"]]
     ids, old = q(f"[System.CreatedDate] >= @Today - {OLD}"), Old(len(q(f"[System.CreatedDate] < @Today - {OLD}")))
     wf._cache.clear()
     its = wf.many(ids)
     wf.fetch([p for t in its for p in t.links(wf.PARENT)])
-    heads = {p.id: p for t in its for p in wf.many(t.links(wf.PARENT)) if p.is_map or p.is_spec}
+    heads = {p.id: p for t in its for p in wf.many(t.links(wf.PARENT)) if head(p)}
     items = [Work(t, next((Work(heads[p]) for p in t.links(wf.PARENT) if p in heads), None)) for t in its]
     under = {w.parent.id for w in items if w.task and w.parent}
     items = [w for w in items if not (w.task and w.parent)]
@@ -1950,7 +1955,8 @@ def find_work(id):
     items = wf.many([id])
     if not items:
         die(f"fant ikke work item {id}")
-    parent = next((p for p in wf.many(items[0].links(wf.PARENT)) if p.is_map or p.is_spec), None)
+    wf.fetch(items[0].links(wf.PARENT))
+    parent = next((p for p in wf.many(items[0].links(wf.PARENT)) if head(p)), None)
     w = Work(items[0], Work(parent) if parent else None)
     if w.folds:
         unfold(w)
