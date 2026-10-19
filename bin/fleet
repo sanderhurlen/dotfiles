@@ -339,7 +339,7 @@ def quiet(raw):
     return out
 
 
-def ago(sec):
+def span(sec):
     return f"{int(sec // 60)}m" if sec < 3600 else f"{int(sec // 3600)}t" if sec < 86400 else f"{int(sec // 86400)}d"
 
 
@@ -1406,7 +1406,7 @@ def agent_chip(snap, x):
         return []
     icon, tone = AGENT.get(st, ("●", "dim"))
     idle = snap.quiet.get(x.key)
-    return [(f"  {icon} agent {st}" + (f" {ago(idle)}" if st == "blocked" and idle is not None else ""), tone)]
+    return [(f"  {icon} agent {st}" + (f" {span(idle)}" if st == "blocked" and idle is not None else ""), tone)]
 
 
 def auto_chip(snap, x):
