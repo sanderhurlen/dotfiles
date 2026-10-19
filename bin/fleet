@@ -20,14 +20,16 @@
 #   fleet fix 7012           background agent fixing my PR: conflicts, failing build, review comments
 #   fleet prune [-n]         remove finished fleet agents whose item/PR is gone from the list
 #   fleet code 9006          VS Code in the item's worktree, .env* copied from the main checkout
-#   fleet clean [-n]         remove worktrees of Done work items where nothing can be lost
+#   fleet clean [-n]         remove worktrees of Done work items and gone PRs where nothing can be lost
 #   fleet help               explained (Norwegian)
 #
 # What the list shows is written to ~/.cache/fleet/screen.txt and state.json every
 # 15 s, so a Claude session can read it.
 #
 # Agents run in the local clone of the item's/PR's repo (found under FLEET_ROOTS,
-# default ~/visense), else in the first root. Named fleet-wi-<id> / fleet-pr-<id> / fleet-fix-<id>.
+# default ~/visense), else in the first root. Named for what they work on and their role:
+# fleet-wi-<id>-<role> / fleet-pr-<id>-<role> (fleet-pr-7012-fix, fleet-pr-6966-review), so every
+# agent on a PR or work item shows on its row and goes when it does.
 # TUI: ↑↓/jk move · m actions for the row · enter start agent (pick prompt, or type one) · →/← unfold/fold a map or spec · o open · a all PRs · A autopilot · r refresh · q quit
 
 import argparse
@@ -136,7 +138,7 @@ class Work:
         self.id, self.title, self.state, self.url = it.id, it.title, it.state, it.url
         self.project, self.type = it.project, it.type
         self.kind = "map" if it.is_map else "spec" if it.is_spec else "item"
-        self.key = f"fleet-wi-{self.id}"
+        self.key, self.role = f"fleet-wi-{self.id}", "go"
         self.children, self.done_children = [], 0  # a map's/spec's open tickets (Work), and how many are done
         self.trees = []  # local worktrees for this item, see worktrees()
         self.prs = []  # my active PRs (Mine) that link this item or carry its id in their branch
@@ -229,7 +231,7 @@ class Review:
         mine = next((r for r in raw.get("reviewers") or [] if r.get("id") == my_id), None)
         self.asked = mine is not None
         self.vote = mine.get("vote", 0) if mine else 0
-        self.key = f"fleet-pr-{self.id}"
+        self.key, self.role = f"fleet-pr-{self.id}", "review"
 
 
 def active():
@@ -257,7 +259,7 @@ class Mine:
         self.votes = [(n.split(" ")[0], v) for n, v, _ in p.reviewers if v < 0]  # (first name, -5/-10)
         self.threads = 0  # active comment threads, see detail()
         self.items = set()  # work item ids it links, or its branch carries
-        self.key = f"fleet-fix-{self.id}"
+        self.key, self.role = f"fleet-pr-{self.id}", "fix"
 
     @property
     def failing(self):
@@ -314,33 +316,72 @@ def sessions():
         return []
 
 
+NAME = re.compile(r"fleet-(wi|pr)-(\d+)(?:-([a-z][a-z-]*))?")
+LEGACY = {"wi": "go", "pr": "review"}  # the role of a name from before roles: fleet-wi-<id>, fleet-pr-<id>
+
+
+def agent_name(x, role=None):
+    """The agent for a role on a row: fleet-pr-7012-fix, fleet-wi-9006-go. role None = the row's own.
+    Rows without roles (wp's failed runs) are named by their key."""
+    role = role or getattr(x, "role", None)
+    return f"{x.key}-{role}" if role else x.key
+
+
+def canon(name):
+    """A fleet session's name with its role: names from before roles get theirs
+    (fleet-fix-7012 → fleet-pr-7012-fix, fleet-pr-6966 → fleet-pr-6966-review, fleet-wi-9006 → …-go)."""
+    if m := re.fullmatch(r"fleet-fix-(\d+)", name):
+        return f"fleet-pr-{m.group(1)}-fix"
+    m = NAME.fullmatch(name)
+    return f"{name}-{LEGACY[m.group(1)]}" if m and not m.group(3) else name
+
+
+def owner(name):
+    """The row key an agent belongs to (fleet-pr-7012-fix → fleet-pr-7012), or None."""
+    m = NAME.fullmatch(canon(name))
+    return f"fleet-{m.group(1)}-{m.group(2)}" if m else None
+
+
+def owned(agents_, x):
+    """[(role, state)] of the row's agents."""
+    p = f"{x.key}-"
+    return [(n[len(p):], st) for n, st in agents_.items() if n.startswith(p)]
+
+
 def agents(raw):
-    """{name: state} for fleet's sessions (the newest wins a shared name)."""
+    """{name: state} for fleet's sessions, names with their role (the newest wins a shared name)."""
     out = {}
     for a in sorted(raw, key=lambda a: a.get("startedAt", 0)):
         if (a.get("name") or "").startswith("fleet-"):
-            out[a["name"]] = a.get("state") or a.get("status") or "?"
+            out[canon(a["name"])] = a.get("state") or a.get("status") or "?"
     return out
+
+
+def idle(a):
+    """Seconds since a session's transcript last changed, or None when it can't be found."""
+    sid = a.get("sessionId")
+    if not sid:
+        return None
+    paths = [os.path.join(PROJECTS, re.sub(r"[^A-Za-z0-9]", "-", a.get("cwd", "")), f"{sid}.jsonl")]
+    for f in paths + glob.glob(os.path.join(PROJECTS, "*", f"{sid}.jsonl")):
+        try:
+            return time.time() - os.path.getmtime(f)
+        except OSError:
+            pass
+    return None
 
 
 def quiet(raw):
     """{name: seconds since the session's transcript last changed} for fleet's sessions (the newest
     wins a shared name). Missing when the transcript can't be found."""
-    out, now = {}, time.time()
+    out = {}
     for a in sorted(raw, key=lambda a: a.get("startedAt", 0)):
-        name, sid = a.get("name") or "", a.get("sessionId")
+        name = canon(a.get("name") or "")
         if not name.startswith("fleet-"):
             continue
         out.pop(name, None)
-        if not sid:
-            continue
-        paths = [os.path.join(PROJECTS, re.sub(r"[^A-Za-z0-9]", "-", a.get("cwd", "")), f"{sid}.jsonl")]
-        for f in paths + glob.glob(os.path.join(PROJECTS, "*", f"{sid}.jsonl")):
-            try:
-                out[name] = now - os.path.getmtime(f)
-                break
-            except OSError:
-                pass
+        if (sec := idle(a)) is not None:
+            out[name] = sec
     return out
 
 
@@ -357,6 +398,9 @@ class Orphan:
         self.started = datetime.datetime.fromtimestamp(a.get("startedAt", 0) / 1000, datetime.timezone.utc)
         self.id, self.title, self.url = self.sid, self.name, None
         self.key = f"fleet-orphan-{self.sid}"
+        self.idle = idle(a)
+        if self.idle is None:
+            self.idle = time.time() - a.get("startedAt", 0) / 1000
 
     @property
     def finished(self):
@@ -364,9 +408,21 @@ class Orphan:
 
 
 def orphans(raw, keys):
-    """Orphans among the fleet sessions, oldest first. keys: the agent names something in the list owns."""
+    """Orphans among the fleet sessions, oldest first. keys: the rows in the list, whose agents aren't orphans."""
     return [Orphan(a) for a in sorted(raw, key=lambda a: a.get("startedAt", 0))
-            if (a.get("name") or "").startswith("fleet-") and a["name"] not in keys]
+            if (a.get("name") or "").startswith("fleet-") and owner(a["name"]) not in keys]
+
+
+GRACE = 24 * 3600  # seconds a finished agent (and its PR worktree) stays after its transcript last changed
+
+
+def stale(os_):
+    """Orphans to remove by themselves: finished, untouched for GRACE, of a PR that left the list
+    (completed, abandoned, approved) or a work item that's Done. Anything else waits for `fleet prune`."""
+    named = [(o, NAME.fullmatch(canon(o.name))) for o in os_]
+    named = [(o, m.group(1), int(m.group(2))) for o, m in named if m and o.finished and o.idle >= GRACE]
+    wf.fetch([i for _, kind, i in named if kind == "wi"])
+    return [o for o, kind, i in named if kind == "pr" or (i in wf._cache and wf._cache[i].done)]
 
 
 def end(o):
@@ -401,7 +457,7 @@ class Snapshot:
 
 
 def snapshot(everyone, clean=False):
-    """Everything the list shows. clean: also remove worktrees of Done items where it's safe."""
+    """Everything the list shows. clean: also remove worktrees of Done items and gone PRs, and stale orphans, where it's safe."""
     raw = sessions()
     try:
         prs = active()
@@ -427,9 +483,17 @@ def snapshot(everyone, clean=False):
     for w in flat:
         w.trees = by_id.get(w.id, [])
     try:
-        cands = candidates(ts_, raw)
-        listed = {r.id for r in others}
-        cands += [Cleanup(t, [], *check(t, ts_, raw), review=i) for i, t in review_trees().items() if i not in listed]
+        if clean:
+            for o in stale(s.orphans):
+                try:
+                    line = end(o).replace("✓", "🧹", 1)
+                    s.orphans.remove(o)
+                except RuntimeError as e:
+                    line = f"✗ {e}"
+                log(line)
+                s.cleaned.append(line)
+            raw = sessions()
+        cands = candidates(ts_, raw) + pr_cleanups(ts_, raw, {r.id for r in others} | {m.id for m in s.mine})
     except RuntimeError as e:
         s.error = f"opprydding: {e}"
         return s
@@ -443,15 +507,18 @@ def snapshot(everyone, clean=False):
 
 # ── worktrees ───────────────────────────────────────────────────────────────
 
-REVIEW_TREE = re.compile(r"fleet-review(\d+)$")
+# fleet-pr-<id>-<role>; before roles fleet-review<id> (autopilot's review) and fleet-pr<id> (fix)
+PR_TREE = re.compile(r"fleet-(?:pr-(\d+)-[a-z][a-z-]*|review(\d+)|pr(\d+))$")
 TREE_ID = re.compile(r"(?:^t?|[-_/+])(\d{3,6})(?=$|[-_/+.])")  # fleet-9006, t9006, feat/9006-x
 SKIP_DIRS = {".git", ".claude", "node_modules", "bin", "obj", "dist", "build", ".next", ".turbo", ".venv"}
 
 
 class Tree:
-    """A linked worktree that belongs to work items: its dir name or branch carries their ids."""
-    def __init__(self, main, path, branch, head, locked, ids):
+    """A linked worktree that belongs to work items (its dir name or branch carries their ids),
+    or to a PR (pr: fleet made it for an agent on that PR, and ids is empty)."""
+    def __init__(self, main, path, branch, head, locked, ids, pr=None):
         self.main, self.path, self.branch, self.head, self.locked, self.ids = main, path, branch, head, locked, ids
+        self.pr = pr
 
 
 def trees():
@@ -460,13 +527,8 @@ def trees():
     return [t for t in linked() if t.ids]
 
 
-def review_trees():
-    """{PR id: Tree} for the worktrees autopilot's reviews made: fleet-review<id>."""
-    return {int(m.group(1)): t for t in linked() if (m := REVIEW_TREE.match(os.path.basename(t.path)))}
-
-
 def linked():
-    """Every linked worktree of the repos under ROOTS, with the work item ids it carries."""
+    """Every linked worktree of the repos under ROOTS, with the work item ids or PR it carries."""
     out = []
     for root in ROOTS:
         try:
@@ -484,9 +546,12 @@ def linked():
                 path, branch = f.get("worktree"), f.get("branch", "").removeprefix("refs/heads/")
                 if not path or not os.path.isdir(path):
                     continue
-                ids = {int(i) for x in (os.path.basename(path), branch) for i in TREE_ID.findall(x)}
+                # a PR's id isn't a work item's, and its source branch's items aren't its to finish
+                pr = next((int(g) for g in m.groups() if g), None) \
+                    if (m := PR_TREE.search(os.path.basename(path))) else None
+                ids = set() if pr else {int(i) for x in (os.path.basename(path), branch) for i in TREE_ID.findall(x)}
                 locked = next((l.removeprefix("locked").strip() or "låst" for l in ls if l.startswith("locked")), None)
-                out.append(Tree(d, path, branch, f.get("HEAD", ""), locked, ids))
+                out.append(Tree(d, path, branch, f.get("HEAD", ""), locked, ids, pr))
     return out
 
 
@@ -509,12 +574,11 @@ LOG = os.path.join(OUT, "cleanup.log")
 
 
 class Cleanup:
-    """A finished worktree: of Done work items, or (review: PR id) of an autopilot review whose
-    PR left the list."""
-    def __init__(self, tree, items, reasons, pr, review=None):
+    """A finished worktree: of Done work items, or of a fleet agent on a PR that left the list."""
+    def __init__(self, tree, items, reasons, pr):
         self.tree, self.items, self.reasons, self.pr = tree, items, reasons, pr
-        if review:
-            self.id, self.title, self.url, self.label = review, f"autopilot-review av !{review}", None, f"!{review} borte"
+        if tree.pr:
+            self.id, self.title, self.url, self.label = tree.pr, f"worktree for !{tree.pr}", None, f"!{tree.pr} borte"
         else:
             self.id, self.title, self.url = items[0].id, items[0].title, items[0].url
             self.label = f"#{self.id} Done"
@@ -547,11 +611,15 @@ def merged_pr(t):
 
 
 def check(t, others, raw):
-    """(reasons it isn't safe to remove, completed PR or None)."""
+    """(reasons it isn't safe to remove, completed PR or None). A PR's worktree also waits GRACE
+    after its agents last worked, so what they found can still be read."""
     reasons = []
-    busy = [a for a in raw if inside(a.get("cwd", ""), t.path) and a.get("state") != "done"]
+    here = [a for a in raw if inside(a.get("cwd", ""), t.path)]
+    busy = [a for a in here if a.get("state") != "done"]
     if busy:
         reasons.append("agent " + ", ".join(f"{a.get('name') or a['id']} {a.get('state')}" for a in busy))
+    elif t.pr and (fresh_ := [s for a in here if (s := idle(a)) is not None and s < GRACE]):
+        reasons.append(f"agent ferdig for {span(min(fresh_))} siden")
     if any(inside(o.path, t.path) for o in others if o is not t):
         reasons.append("har worktrees inni")
     if t.locked:
@@ -579,6 +647,18 @@ def candidates(ts_, raw):
         out.append(Cleanup(t, items, reasons, pr))
     # innermost first, so a nested worktree goes before the one around it
     return sorted(out, key=lambda c: -c.tree.path.count("/"))
+
+
+def pr_cleanups(ts_, raw, listed):
+    """Cleanup per worktree fleet made for an agent on a PR that's no longer in listed (ids)."""
+    return [Cleanup(t, [], *check(t, ts_, raw)) for t in linked() if t.pr and t.pr not in listed]
+
+
+def listed_prs(prs):
+    """Ids of the PRs the list shows, others' (all) and mine: a PR not among them is done with."""
+    my_id = me()[0]
+    return {r.id for r in reviews(prs, True)} | {p["pullRequestId"] for p in prs
+                                                 if (p.get("createdBy") or {}).get("id") == my_id}
 
 
 def log(line):
@@ -714,7 +794,7 @@ def where_review(r):
 
 def where_fix(m):
     """(cwd, worktree) for fixing my PR: the checkout that already has its source branch,
-    else a new worktree fleet-pr<id> in the repo's clone (no dash: not a work item id).
+    else a new worktree fleet-pr-<id>-fix in the repo's clone.
     (None, None) without a clone."""
     main = clones().get((m.project.lower(), m.repo.lower()))
     if not main:
@@ -723,12 +803,13 @@ def where_fix(m):
         f = dict(l.split(" ", 1) for l in e.splitlines() if " " in l)
         if f.get("branch") == f"refs/heads/{m.source}" and os.path.isdir(f.get("worktree", "")):
             return f["worktree"], None
-    return main, f"fleet-pr{m.id}"
+    return main, f"fleet-pr-{m.id}-fix"
 
 
-def plan(x, prompt=None):
+def plan(x, prompt=None, role=None):
     """(cwd, cmd) that starts the background agent for a Work, Mine, Review, or anything with
-    where() → (cwd, worktree) and prompt (wp's failed runs). prompt: instead of the row's own."""
+    where() → (cwd, worktree) and prompt (wp's failed runs). prompt: instead of the row's own;
+    role: names the agent (agent_name), the row's own when None."""
     if hasattr(x, "where"):
         cwd, wt = x.where()
         prompt = prompt or x.prompt
@@ -744,56 +825,56 @@ def plan(x, prompt=None):
         cwd, wt = where_review(x)
         prompt = prompt or (f"/review-pr {x.id}" if cwd else f"/review-pr {x.url}")
         cwd = cwd or HOME
-    cmd = ["claude", SKIP, "--bg", "-n", x.key]
+    cmd = ["claude", SKIP, "--bg", "-n", agent_name(x, role)]
     if wt:
         cmd += ["-w", wt]
     return cwd, cmd + [prompt]
 
 
-def launch(x, prompt=None):
+def launch(x, prompt=None, role=None):
     """Start the agent. Returns a one-line result; raises RuntimeError on failure."""
-    cwd, cmd = plan(x, prompt)
+    cwd, cmd = plan(x, prompt, role)
     trust(cwd)
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     if r.returncode:
         raise RuntimeError((r.stderr or r.stdout).strip().splitlines()[-1] if (r.stderr or r.stdout).strip()
                            else f"claude exited {r.returncode}")
     m = re.search(r"backgrounded · (\w+)", r.stdout)
-    return f"▶ {x.key} startet{f' ({m.group(1)})' if m else ''} i {short(cwd)}: {cmd[-1][:60]}"
+    return f"▶ {agent_name(x, role)} startet{f' ({m.group(1)})' if m else ''} i {short(cwd)}: {cmd[-1][:60]}"
 
 
 def starts(x):
-    """[(label, row, prompt)] offered when enter starts an agent on x: its own prompt first, then
-    fixing its PRs, then what fits the kind of row. row is whose agent (name, cwd) runs it;
-    prompt None = row's own."""
+    """[(label, row, role, prompt)] offered when enter starts an agent on x: its own prompt first, then
+    fixing its PRs, then what fits the kind of row. row is whose agent (key, cwd) runs it, role
+    names it among the row's agents (None = row's own); prompt None = row's own."""
     if isinstance(x, Mine):
-        return [(f"fiks: {'; '.join(x.todo) or 'sjekk bygg og kommentarer'}", x, None),
-                (f"/code-review {x.source} mot {x.target}", x,
+        return [(f"fiks: {'; '.join(x.todo) or 'sjekk bygg og kommentarer'}", x, None, None),
+                (f"/code-review {x.source} mot {x.target}", x, "code-review",
                  f"/code-review PR !{x.id} ({x.url}): endringene på {x.source} mot {x.target}, "
                  f"merge-base som fast punkt. Rapporter funn, ikke endre koden."),
-                ("/pr  skriv PR-beskrivelsen på nytt", x,
+                ("/pr  skriv PR-beskrivelsen på nytt", x, "desc",
                  f"/pr Skriv PR-beskrivelsen til !{x.id} ({x.url}) på nytt ut fra endringene på {x.source} "
                  f"mot {x.target} og work items {', '.join(f'#{i}' for i in sorted(x.items)) or '-'}, "
                  f"og oppdater PR-en i ADO.")]
     if isinstance(x, Review):
-        return [(f"/review-pr {x.id}", x, None),
-                ("forklar PR-en for meg (ingen kommentarer)", x, explain(x)),
-                ("test lokalt: bygg og kjør testene", x,
+        return [(f"/review-pr {x.id}", x, None, None),
+                ("forklar PR-en for meg (ingen kommentarer)", x, "explain", explain(x)),
+                ("test lokalt: bygg og kjør testene", x, "test",
                  f"Sjekk ut PR !{x.id} ({x.url}), kildebranch {x.source}, i et worktree. Bygg, kjør testene og "
                  f"det som berøres, og rapporter hva som feiler eller oppfører seg rart. Ikke post kommentarer.")]
-    out = [(x.prompt, x, None)]
-    out += [(f"fiks PR !{m.id}: {'; '.join(m.todo) or 'sjekk bygg og kommentarer'}", m, None) for m in x.prs]
+    out = [(x.prompt, x, None, None)]
+    out += [(f"fiks PR !{m.id}: {'; '.join(m.todo) or 'sjekk bygg og kommentarer'}", m, None, None) for m in x.prs]
     if x.kind == "map":
-        out.append(("oppsummer kartet: gjort, neste, blokkert", x,
+        out.append(("oppsummer kartet: gjort, neste, blokkert", x, "summary",
                     f"Oppsummer kart #{x.id} «{x.title}» ({x.url}): hva er avgjort og gjort, hva er neste ledige "
                     f"ticket, og hva blokkerer. Bare les — ikke endre noe."))
     elif x.kind == "spec":
-        out.append((f"/to-tickets {x.id}", x, f"/to-tickets {x.id}"))
+        out.append((f"/to-tickets {x.id}", x, "tickets", f"/to-tickets {x.id}"))
     elif not x.decision:
         skill = "/diagnosing-bugs" if x.type.lower() == "bug" else "/tdd"
-        out.append((f"{skill} {x.id}", x, f"{skill} #{x.id} «{x.title}» ({x.url})"))
+        out.append((f"{skill} {x.id}", x, skill[1:], f"{skill} #{x.id} «{x.title}» ({x.url})"))
         if x.prs or x.trees:
-            out.append((f"/code-review {x.id}", x,
+            out.append((f"/code-review {x.id}", x, "code-review",
                         f"/code-review #{x.id}: endringene på branchen for #{x.id} mot målbranchen, merge-base som "
                         f"fast punkt, spec fra work item #{x.id}. Rapporter funn, ikke endre koden."))
     return out
@@ -801,15 +882,15 @@ def starts(x):
 
 def start_menu(x, agents_):
     """The menu enter opens on a Work/Review/Mine: numbered prompts from starts(), e for my own.
-    Asks y/n first when that agent already exists."""
-    def ask(r):
-        st = agents_.get(r.key)
-        return f"{r.key} finnes allerede ({st}) — start ny?" if st else False
-    opts = [(str(n), label, lambda r=r, p=p: launch(r, p), ask(r))
-            for n, (label, r, p) in enumerate(starts(x)[:9], 1)]
+    Asks y/n first when an agent with that role already exists."""
+    def ask(r, role):
+        st = agents_.get(name := agent_name(r, role))
+        return f"{name} finnes allerede ({st}) — start ny?" if st else False
+    opts = [(str(n), label, lambda r=r, p=p, role=role: launch(r, p, role), ask(r, role))
+            for n, (label, r, role, p) in enumerate(starts(x)[:9], 1)]
     what = f"#{x.id}" if isinstance(x, Work) else f"!{x.id}"
     return (f"start agent · {what} {x.title[:40]}",
-            opts + [("e", "egendefinert prompt …", lambda text: launch(x, f"{about(x)}\n\n{text}"), "edit")])
+            opts + [("e", "egendefinert prompt …", lambda text: launch(x, f"{about(x)}\n\n{text}", "ask"), "edit")])
 
 
 def about(x):
@@ -834,7 +915,7 @@ def notify(snap, names, what):
     titles = {x.key: f"{'#' if isinstance(x, Work) else '!'}{x.id} {x.title}"
               for x in snap.items + [t for w in snap.items for t in w.children] + snap.prs + snap.mine}
     for n in names:
-        notify_one(f"{n} {what}", titles.get(n, n))
+        notify_one(f"{n} {what}", titles.get(owner(n), n))
 
 
 def notify_one(subtitle, text):
@@ -918,10 +999,10 @@ def explain(r):
 
 
 class Auto:
-    """The agent autopilot starts for a Review or Mine: the row's own agent name, so its chip and
-    `claude agents` show it, with a prompt that posts nothing in ADO. launch() takes it."""
+    """The agent autopilot starts for a Review or Mine: the row's own agent (review, fix), so its chip
+    and `claude agents` show it, with a prompt that posts nothing in ADO. launch() takes it."""
     def __init__(self, x, why=""):
-        self.x, self.why, self.key, self.id, self.title = x, why, x.key, x.id, x.title
+        self.x, self.why, self.key, self.role, self.id, self.title = x, why, x.key, x.role, x.id, x.title
 
     def clone(self):
         return clones().get((self.x.project.lower(), self.x.repo.lower()))
@@ -933,7 +1014,7 @@ class Auto:
             if not cwd:
                 raise RuntimeError(f"ingen lokal klone av {x.project}/{x.repo}")
             return cwd, wt
-        return (self.clone(), f"fleet-review{x.id}") if self.clone() else (HOME, None)
+        return (self.clone(), agent_name(self)) if self.clone() else (HOME, None)
 
     @property
     def prompt(self):
@@ -992,7 +1073,7 @@ class Pilot:
         self.on = on and self.c["enabled"]
         self.after = False  # also outside working hours, this session
         self.queue = []  # keys waiting for a slot or working hours, in start order
-        self.pending = {}  # key: when launched, until `claude agents` lists it
+        self.pending = {}  # agent name: when launched, until `claude agents` lists it
         self.procs = {}  # key: (Popen, Work) of a `wi triage --save` running in the background
         self.lock = None
         os.makedirs(OUT, exist_ok=True)
@@ -1006,7 +1087,8 @@ class Pilot:
     def load(self):
         try:
             with open(self.PATH) as f:
-                st = json.load(f)
+                # my PRs' rows were fleet-fix-<id> before agents got roles
+                st = json.loads(re.sub(r'"fleet-fix-(\d+)', r'"fleet-pr-\1', f.read()))
         except (OSError, ValueError):
             st = {}
         return {k: list(st.get(k) or []) for k in self.LISTS} | {k: dict(st.get(k) or {}) for k in self.MAPS}
@@ -1072,10 +1154,10 @@ class Pilot:
             line = f"🤖 {x.key} feilet: {e}"
         else:
             st["failed"].pop(x.key, None)
-            self.pending[x.key] = time.time()
+            self.pending[agent_name(x)] = time.time()
             line = "🤖 " + line
             if notify_ and self.cfg["notify"]["start"]:
-                notify_one(f"🤖 startet {x.key}", f"!{x.id} {x.title}")
+                notify_one(f"🤖 startet {agent_name(x)}", f"!{x.id} {x.title}")
         st["started"].setdefault(x.key, []).append(fp)
         return line
 
@@ -1106,9 +1188,10 @@ class Pilot:
                 continue
             why, fp, at = t
             seen = st["seen"].setdefault(fp, now)
-            agent = s.agents.get(x.key)
+            name = agent_name(x)
+            agent = s.agents.get(name)
             tries = st["started"].get(x.key, [])
-            if x.key in st["muted"] or fp in tries or agent in BUSY or x.key in self.pending:
+            if x.key in st["muted"] or fp in tries or agent in BUSY or name in self.pending:
                 continue
             if agent and not tries:  # I started that one myself
                 continue
@@ -1255,7 +1338,7 @@ def pilot_options(p, x):
         return []
     muted = x.key in p.load()["muted"]
     now = ("n", "triager i bakgrunnen nå", lambda: p.now(x), False) if isinstance(x, Work) else \
-        ("n", "kjør auto nå", lambda: p.now(x), f"start autopilot-agent på {x.key} nå?")
+        ("n", "kjør auto nå", lambda: p.now(x), f"start autopilot-agent {agent_name(x)} nå?")
     return [("z", "slå på autopilot igjen" if muted else "demp autopilot for raden", lambda: p.mute(x), False), now]
 
 
@@ -1406,12 +1489,13 @@ STATUS = {"ledig": "green", "tatt": "yellow", "blokkert": "red"}
 
 
 def agent_chip(snap, x):
-    st = snap.agents.get(x.key)
-    if not st:
-        return []
-    icon, tone = AGENT.get(st, ("●", "dim"))
-    idle = snap.quiet.get(x.key)
-    return [(f"  {icon} agent {st}" + (f" {span(idle)}" if st == "blocked" and idle is not None else ""), tone)]
+    """One chip per agent on the row, named by its role: «▶ review running  ⏸ fix blocked 4d»."""
+    out = []
+    for role, st in owned(snap.agents, x):
+        icon, tone = AGENT.get(st, ("●", "dim"))
+        sec = snap.quiet.get(f"{x.key}-{role}")
+        out.append((f"  {icon} {role} {st}" + (f" {span(sec)}" if st == "blocked" and sec is not None else ""), tone))
+    return out
 
 
 def auto_chip(snap, x):
@@ -1550,7 +1634,7 @@ def lines(snap, everyone, open_=()):
             out.append((orphan_row(o), o))
     if snap.cleanup:
         out.append(([], None))
-        out.append(([(f"Opprydding · worktrees for Done work items ({len(snap.cleanup)})", "bold")], None))
+        out.append(([(f"Opprydding · worktrees for Done work items og borte PRer ({len(snap.cleanup)})", "bold")], None))
         for c in snap.cleanup:
             where_ = f"{os.path.basename(c.tree.main)}/…/{os.path.basename(c.tree.path)}"
             why = ", ".join(c.reasons) or "trygt å fjerne"
@@ -1571,8 +1655,8 @@ PAINT = {"green": green, "red": red, "yellow": yellow, "cyan": cyan, "dim": dim,
 
 def work_json(snap, w):
     out = {"id": w.id, "title": w.title, "state": w.state, "type": w.type, "kind": w.kind,
-           "project": w.project, "url": w.url, "prompt": w.prompt, "agent": w.key,
-           "agentState": snap.agents.get(w.key), "start": f"fleet go {w.id}",
+           "project": w.project, "url": w.url, "prompt": w.prompt, "agent": agent_name(w),
+           "agents": dict(owned(snap.agents, w)), "start": f"fleet go {w.id}",
            "worktrees": [t for _, t in w.trees], "myPrs": [m.id for m in w.prs]}
     if w.trees:
         out["openInCode"] = f"fleet code {w.id}"
@@ -1605,22 +1689,22 @@ def write_state(snap, everyone, open_=(), cur=None, msg=""):
         "oldWorkItems": {"count": snap.old.n, "query": snap.old.url} if snap.old else None,
         "pullRequests": [{"id": r.id, "title": r.title, "project": r.project, "repo": r.repo,
                           "author": r.who, "source": r.source, "target": r.target, "url": r.url,
-                          "imReviewer": r.asked, "myVote": r.vote, "agent": r.key,
-                          "agentState": snap.agents.get(r.key), "start": f"fleet review {r.id}"}
+                          "imReviewer": r.asked, "myVote": r.vote, "agent": agent_name(r),
+                          "agents": dict(owned(snap.agents, r)), "start": f"fleet review {r.id}"}
                          for r in snap.prs],
         "myPullRequests": [{"id": m.id, "title": m.title, "project": m.project, "repo": m.repo,
                             "source": m.source, "target": m.target, "url": m.url, "draft": m.pr.draft,
                             "autoComplete": m.pr.auto, "ready": m.pr.ready, "conflicts": m.pr.conflicts,
                             "policies": [{"name": n, "status": st, "blocking": b} for n, st, b in m.pr.policies],
                             "negativeVotes": dict(m.votes), "activeThreads": m.threads,
-                            "workItems": sorted(m.items), "todo": m.todo, "agent": m.key,
-                            "agentState": snap.agents.get(m.key), "start": f"fleet fix {m.id}"}
+                            "workItems": sorted(m.items), "todo": m.todo, "agent": agent_name(m),
+                            "agents": dict(owned(snap.agents, m)), "start": f"fleet fix {m.id}"}
                            for m in snap.mine],
         "orphanAgents": [{"name": o.name, "id": o.sid, "state": o.state, "cwd": o.cwd,
                           "remove": f"fleet prune --id {o.sid}"} for o in snap.orphans],
         "agents": snap.agents,
         "agentIdleSeconds": {n: round(v) for n, v in snap.quiet.items()},
-        "cleanup": [{"workItems": [i.id for i in c.items], "title": c.title, "worktree": c.tree.path,
+        "cleanup": [{"workItems": [i.id for i in c.items], "pr": c.tree.pr, "title": c.title, "worktree": c.tree.path,
                      "branch": c.tree.branch, "blockedBy": c.reasons, "mergedPr": (c.pr or {}).get("pullRequestId"),
                      "force": f"fleet clean --force {c.tree.path}"} for c in snap.cleanup],
         "cleanedThisRefresh": snap.cleaned, "cleanupLog": LOG,
@@ -1856,8 +1940,8 @@ def tui(scr, a):
                 except RuntimeError as e:
                     msg, err = str(e), True
             elif confirm == "edit":
-                st = s.agents.get(cur.key)
-                edit = ["prompt", "", fn, f"{cur.key} finnes allerede ({st}) — start ny?" if st else False]
+                st = s.agents.get(name := agent_name(cur, "ask"))
+                edit = ["prompt", "", fn, f"{name} finnes allerede ({st}) — start ny?" if st else False]
             elif confirm == "shell":  # runs in this terminal: hand it over, then take it back
                 curses.def_prog_mode()
                 curses.endwin()
@@ -2013,7 +2097,7 @@ def cmd_prune(a):
         keys = {x.key for x in flat + reviews(prs, True) + mine(prs)}
     except RuntimeError as e:
         die(str(e))
-    os_ = [o for o in os_ if o.name not in keys]
+    os_ = [o for o in os_ if owner(o.name) not in keys]
     if not os_:
         return print(dim("ingen foreldreløse agenter"))
     for o in os_:
@@ -2042,21 +2126,26 @@ def cmd_code(a):
 
 
 def cmd_clean(a):
+    try:
+        listed = listed_prs(active())
+    except RuntimeError as e:
+        die(str(e))
+    find = lambda raw: candidates(trees(), raw) + pr_cleanups(trees(), raw, listed)
     raw = sessions()
-    cands = candidates(trees(), raw)
+    cands = find(raw)
     if a.force:
         path = os.path.realpath(os.path.expanduser(a.force))
         c = next((c for c in cands if os.path.realpath(c.tree.path) == path), None)
         if not c:
-            die(f"{a.force} er ikke en worktree for et Done work item")
+            die(f"{a.force} er ikke en worktree for et Done work item eller en borte PR")
         line = remove(c, raw, force=True)
         return print(red(line) if line.startswith("✗") else green(line))
     if not cands:
-        return print(dim("ingen worktrees for Done work items"))
+        return print(dim("ingen worktrees for Done work items eller borte PRer"))
     while True:  # again after removing, so a worktree that had finished ones inside can go too
         removed, blocked = 0, []
         for c in cands:
-            head = f"#{c.id} {c.title[:50]}  {short(c.tree.path)}"
+            head = f"{'#' if c.items else '!'}{c.id} {c.title[:50]}  {short(c.tree.path)}"
             if c.reasons:
                 blocked.append(yellow(f"🧹 {head}  — {', '.join(c.reasons)}"))
             elif a.dry_run:
@@ -2068,7 +2157,7 @@ def cmd_clean(a):
         if not removed or not blocked:
             break
         raw = sessions()
-        cands = candidates(trees(), raw)
+        cands = find(raw)
     for line in blocked:
         print(line)
 
@@ -2110,7 +2199,9 @@ GUIDE = """\
                ✗ rødt = noe feiler, ⏸ gult = venter på meg, ✓ = klar til complete.
                Work items som PR-en lenker (eller har id-en i branchen) får «↳ !<pr> ✗/⏸/✓» på linja.
   Foreldreløse fleet-agenter der work item/PR ikke lenger er i lista (Done, godkjent,
-               completed, tatt bort). Fjernes manuelt: enter/m → x, eller `fleet prune`.
+               completed, tatt bort). Ferdige agenter på en borte PR eller et Done work item
+               fjernes av seg selv når transkriptet har stått urørt {grace} t (se OPPRYDDING);
+               resten manuelt: enter/m → x, eller `fleet prune`.
 
 {b}KOMMANDOER{r}
 
@@ -2131,7 +2222,7 @@ GUIDE = """\
   fleet wi <id> state [S]   sett state S (uten S: list typens states)
   fleet wi <id> sprint      flytt til prosjektets nåværende sprint (default-teamet)
   fleet code <id> [-n N]    VS Code i itemets worktree, med .env* kopiert fra hovedtreet
-  fleet clean [-n]          fjern worktrees for Done work items der ingenting kan gå tapt
+  fleet clean [-n]          fjern worktrees for Done work items og borte PRer der ingenting kan gå tapt
   fleet clean --force <wt>  fjern likevel (ulagrede endringer går tapt; branchen beholdes)
   fleet help                denne teksten
 
@@ -2160,26 +2251,27 @@ GUIDE = """\
                   PR: forklar for meg · test lokalt   min PR: /code-review · /pr
               e   egendefinert prompt — enter starter, esc avbryter, ctrl-u/w sletter
                   (prefikses med hvilket element den gjelder: id, tittel, url)
-            Samme agentnavn og mappe som radens egen. Finnes agenten, spør y/n først.
+            Hvert valg er sin egen rolle (fleet-pr-<id>-explain, -test, -code-review, -desc, -ask; work
+            item -summary, -tickets, -tdd, -diagnosing-bugs …), i radens mappe. Finnes den rollen, spør y/n først.
 
-{b}AGENTENE{r}
-  kart  → claude --bg -n fleet-wi-<id> "/wayfinder <id>"   i {home}; tomt kart (fra triage) → tegn kartet
-  annet → claude --bg -n fleet-wi-<id> "/implement <id>"   i repoet commits/PRer på itemet
+{b}AGENTENE{r}  {d}navngitt fleet-<wi|pr>-<id>-<rolle>: alle agentene på en PR/et item vises på linja («▶ review running  ⏸ fix blocked 4d»){r}
+  kart  → claude --bg -n fleet-wi-<id>-go "/wayfinder <id>"   i {home}; tomt kart (fra triage) → tegn kartet
+  annet → claude --bg -n fleet-wi-<id>-go "/implement <id>"   i repoet commits/PRer på itemet
           (eller barna) peker til, i worktree fleet-<id> — ellers i {home}
   kart-ticket → "/wayfinder <kart> ticket <id>" i {home}; task-tickets → "/implement <id>"
-  PR    → claude --bg -n fleet-pr-<id> "/review-pr <id>"   i lokal klone av PR-ens repo
-  min PR → claude --bg -n fleet-fix-<id> "<hva som blokkerer + instrukser>"  i checkouten som
-          allerede har kildebranchen, ellers i worktree fleet-pr<id> i klonen. Pusher, completer ikke.
+  PR    → claude --bg -n fleet-pr-<id>-review "/review-pr <id>"   i lokal klone av PR-ens repo
+  min PR → claude --bg -n fleet-pr-<id>-fix "<hva som blokkerer + instrukser>"  i checkouten som
+          allerede har kildebranchen, ellers i worktree fleet-pr-<id>-fix i klonen. Pusher, completer ikke.
   Alle startes med --dangerously-skip-permissions — også agent view (`{agents}`).
   Kloner finnes én mappe ned i FLEET_ROOTS (default ~/visense, kolon-separert).
   Følg med: `claude agents` (venstre pane) · status vises også på linja (▶ ⏸ ✓).
 
 {b}AUTOPILOT{r}  {d}(bare mens lista er åpen, og bare i én fleet om gangen){r}
   Starter agenter selv:
-    ny PR der jeg er reviewer (ikke stemt) → fleet-pr-<id>: /code-review i worktree fleet-review<id>
+    ny PR der jeg er reviewer (ikke stemt) → fleet-pr-<id>-review: /code-review i worktree fleet-pr-<id>-review
                     på kildebranchen, target som fast punkt. Uten lokal klone: forklar PR-en.
                     Poster ingenting i ADO. Én gang per PR.
-    min PR får rødt bygg / konflikt → fleet-fix-<id>: merger target inn, fikser, pusher. Ingen
+    min PR får rødt bygg / konflikt → fleet-pr-<id>-fix: merger target inn, fikser, pusher. Ingen
                     force-push, svarer ikke i tråder. Én gang per commit, maks {tries} forsøk, så «🤖 ga opp».
   Triagerer selv (trigger «triage»):
     Issue/Bug tildelt meg i To Do uten triage-tag (og ikke wayfinder) → `wi triage <id> --save` i
@@ -2190,10 +2282,9 @@ GUIDE = """\
   {backlog} t (helg teller ikke; review regnes fra da fleet først så meg som reviewer) · utenfor {hours} {days} — da i kø til arbeidstid starter.
   Maks {par} fleet-agenter kjører samtidig (mine teller med); resten «⏳ i kø», fix før review.
   En agent som har stått ⏸ over {blocked} min (transkriptet urørt) er ferdig med turen og venter
-                    på meg — den teller ikke, så køen går videre. Linja viser hvor lenge: «⏸ agent blocked 5d».
+                    på meg — den teller ikke, så køen går videre. Linja viser hvor lenge: «⏸ fix blocked 5d».
   Linja: 🤖 auto · ⏳ i kø / venter til 07:00 · 🤖 feilet: … · 🤖 ga opp · 🔕 auto av · 💤 for gammel (m → n).
   Demping (m → z) huskes til raden er borte fra lista; av/på og utenfor arbeidstid (A) gjelder økta.
-  Review-worktrees fjernes når PR-en er borte fra lista og ingen agent jobber der.
   Konfig: {config}   tilstand: {state}
 
 {b}OPPRYDDING{r}  {d}(automatisk i lista; --no-clean slår av){r}
@@ -2203,6 +2294,11 @@ GUIDE = """\
     (med mindre en fullført PR merget akkurat HEAD) · ikke låst · ingen worktrees inni
   Sammen med worktreet: den lokale branchen (bare når en fullført PR merget den) og
   Claude-sesjonene som jobbet der. Logg: {log}
+  PR-worktrees (fleet-pr-<id>-<rolle>, og gamle fleet-review<id>/fleet-pr<id>) er ferdige når PR-en
+  er borte fra lista (completed, abandoned, godkjent av meg), og fjernes likt — men først når agentene
+  der har stått urørt {grace} t, så det de fant kan leses.
+  Foreldreløse agenter som er ferdige (done/failed) fjernes også ({d}claude rm{r}) når PR-en er borte
+  eller work itemet er Done, og transkriptet har stått urørt {grace} t. Kjørende og ⏸ røres ikke.
   Det som står i veien listes under «Opprydding» med grunnen; enter/m → f rydd likevel.
 
 {b}FOR CLAUDE{r}
@@ -2219,7 +2315,7 @@ def cmd_help(a):
     print(GUIDE.format(b="\033[1m" if on else "", r="\033[0m" if on else "", org=A().org,
                        refresh=REFRESH, write=WRITE, home=short(HOME), out=short(OUT), agents=AGENTS,
                        d="\033[2m" if on else "", log=short(LOG), config=short(CONFIG),
-                       state=short(Pilot.PATH), **pilot_help()))
+                       state=short(Pilot.PATH), grace=GRACE // 3600, **pilot_help()))
 
 
 def pilot_help():
@@ -2239,7 +2335,7 @@ def main():
     s.add_argument("-a", "--all", action="store_true", help="all others' PRs, not just where I'm reviewer")
     s.add_argument("--no-split", action="store_true", help="don't open the claude agents pane in Ghostty")
     s.add_argument("-q", "--quiet", action="store_true", help="no notification when an agent needs me")
-    s.add_argument("--no-clean", action="store_true", help="don't remove worktrees of Done work items")
+    s.add_argument("--no-clean", action="store_true", help="don't remove finished worktrees and orphan agents")
     s.add_argument("--no-autopilot", action="store_true", help="start no agents by itself this session")
     s.set_defaults(fn=cmd_live)
 
@@ -2281,7 +2377,7 @@ def main():
     s.add_argument("-n", type=int, help="which worktree, when there are several")
     s.set_defaults(fn=cmd_code)
 
-    s = sub.add_parser("clean", help="remove worktrees of Done work items where nothing can be lost")
+    s = sub.add_parser("clean", help="remove worktrees of Done work items and gone PRs where nothing can be lost")
     s.add_argument("-n", "--dry-run", action="store_true", help="only list what would go and what's in the way")
     s.add_argument("--force", metavar="WORKTREE", help="remove this one anyway (uncommitted changes are lost)")
     s.set_defaults(fn=cmd_clean)
