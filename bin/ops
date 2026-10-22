@@ -11,8 +11,12 @@
 #                              the tema's Utfall, notat in its Rapport). «t: …» / «n: …» force the
 #                              kind. Without text: type one innspill after another, the queue shows
 #   ops kø [--igjen]           the queue and how far each innspill has come; --igjen retries errors
+#   ops watch [--en] [--dry]   while the meeting runs: watches the next meeting's page, and an Utfall
+#                              sticky without #id that has stopped changing becomes an ADO Issue; the
+#   (o, åpne, sync)            sticky is rewritten as «#id tittel / Ansvarlig / Frist», with a small
+#                              … mark in its corner while ops works on it, gone when it's done. Opens
+#                              the page first. --en: one pass, nothing opened
 #   ops log                    the open tiltak by due date: x = løst, u = +1 uke
-#   ops åpne (o)               open the next meeting's page on the board
 #   ops lukk [dato] [--dry]    after the meeting: Utfall stickies without #id become Issues, the
 #                              rest becomes the referat in the epic, and the meeting is closed
 #
@@ -50,6 +54,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -788,6 +793,39 @@ for (const it of items) {
 }
 return { n };"""
 
+# watch: a small round … in the sticky's top right corner while the Issue is made, removed when it's
+# done (no mark), and the sticky's new text when there is one. One mark per sticky, found by name.
+MARK_JS = """const items = %s;
+const page = await figma.getNodeByIdAsync(%s);
+await figma.setCurrentPageAsync(page);
+let n = 0;
+for (const it of items) {
+  const s = await figma.getNodeByIdAsync(it.id);
+  if (!s || s.type !== "STICKY") continue;
+  if (it.text) {
+    const len = s.text.characters.length;
+    for (const f of (len ? s.text.getRangeAllFontNames(0, len) : [s.text.fontName])) await figma.loadFontAsync(f);
+    s.text.characters = it.text;
+  }
+  const name = "ops-merke " + s.id;
+  let m = s.parent.findChild(c => c.name === name);
+  if (!it.mark) { if (m) m.remove(); n++; continue; }
+  if (!m) {
+    m = figma.createShapeWithText();
+    m.name = name;
+    m.shapeType = "ELLIPSE";
+    m.resize(32, 32);
+    s.parent.appendChild(m);
+  }
+  await figma.loadFontAsync(m.text.fontName);
+  m.text.characters = it.mark;
+  m.fills = [{ type: "SOLID", color: { r: 1, g: 0.85, b: 0.4 } }];
+  m.strokes = [];
+  m.x = s.x + s.width - 22; m.y = s.y - 10;
+  n++;
+}
+return { n };"""
+
 # The tiltakslogg section's table gets one row per open tiltak (id and title link to ADO),
 # the section grows to fit, and stickies of tiltak that are Done turn green.
 LOG_JS = """const rows = %s, sub = %s, done = %s;
@@ -900,7 +938,7 @@ class Ctx:
         self.version, self.pages, self.board, self.board_err, self.people = None, [], None, "", {}
         try:
             f = figma(f"files/{FILE}?depth=1")
-            self.version = f["version"]
+            self.version = f"{f['version']}:{f.get('lastModified', '')}"  # version alone lags behind edits
             self.pages = [(p["id"], p["name"]) for p in f["document"]["children"]]
             start = next((p for p in self.pages if p[1].strip().upper() == "STARTSIDE"), None)
             self.people = people_of(page_doc(start[0], self.version)) if start else {}
@@ -1113,8 +1151,115 @@ def cmd_worker(a):
                 return  # what's left waits for a board page (`ops neste`) or for `ops kø --igjen`
 
 
-def cmd_sync(a):
-    cmd_ko(argparse.Namespace(igjen=True, antall=0))
+# ── watch ───────────────────────────────────────────────────────────────────
+# A sticky is taken only once its text is the same on two looks in a row, so nobody's half-typed
+# line becomes an Issue. Issues made but not yet tagged on the board are kept in watch.json, so a
+# failed board write is retried instead of making the Issue twice.
+
+WATCH = os.path.join(os.path.dirname(INBOX), "watch.json")
+
+
+def watch_made():
+    try:
+        with open(WATCH) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_made(made):
+    os.makedirs(os.path.dirname(WATCH), exist_ok=True)
+    with open(WATCH, "w") as f:
+        json.dump(made, f, ensure_ascii=False, indent=1)
+
+
+def say(msg):
+    print(f"{datetime.datetime.now():%H:%M:%S} {msg}", flush=True)
+
+
+def watch_pass(state, dry, wait=True):
+    """One look at the next meeting's page: Utfall stickies without #id → Issues, stickies retagged."""
+    f = figma(f"files/{FILE}?depth=1")
+    ver = f"{f['version']}:{f.get('lastModified', '')}"
+    if wait and ver == state.get("ver") and not state["pending"]:
+        return
+    state["ver"] = ver
+    ctx = Ctx()
+    board = ctx.board
+    if not board:
+        if state.get("missing") != ctx.next:
+            say(dim(ctx.board_err or f"ingen side for {day(ctx.next)} ennå — `ops neste` lager den"))
+        state["missing"], state["pending"] = ctx.next, {}
+        return
+    state["missing"] = None
+    d = board.date
+    if d in ctx.closed:
+        return
+    loose = {st["id"]: (ar, s, st) for ar, s, st in board.stickies()
+             if s["name"] and COMMIT.search(s["name"]) and st["text"] and not TAGGED.search(st["text"])}
+    made = watch_made()
+    ready = [v for k, v in loose.items() if k not in made and (not wait or state["pending"].get(k) == v[2]["text"])]
+    state["pending"] = {k: v[2]["text"] for k, v in loose.items() if k not in made and v not in ready}
+    retag = [{"id": k, "text": t} for k, t in made.items() if k in loose]
+    if ready and not dry:
+        try:
+            mark(board, [{"id": st["id"], "mark": "…"} for _, _, st in ready])
+        except RuntimeError as e:
+            say(red(f"merke: {e}"))
+    nxt = d if d > today() else next_meeting(
+        [r[2] for r in ctx.referat] + [e["date"] for e in ctx.epics] + [d + WEEK], ctx.closed | {d})
+    for ar, s, st in ready:
+        c = classify(st["text"], ctx, "tiltak")
+        c["omraade"] = ar["name"]
+        hit = same(c["tittel"], ctx.items)
+        if hit:
+            text = f"#{hit['id']} {st['text']}"
+            say(dim(f"= #{hit['id']} {hit['title'][:60]} — finnes i ADO, stickyen får #{hit['id']}"))
+        elif dry:
+            say(f"ville laget  {c['tittel'][:64]}  " + dim(f"{c['eier'] or '–'} · {c['frist']} · {ar['name']}"))
+            continue
+        else:
+            id = create_issue(c, st["text"], nxt, ctx.people, ensure_epic(d, ctx.epics),
+                              f"{epic_title(d)}, {ar['name']} › {s['name']} (sticky)")
+            ctx.items.append({"id": id, "title": c["tittel"]})
+            text = sticky_text({"c": c, "ado": id})
+            say(green(f"#{id}") + f"  {c['tittel']}  " + dim(f"{c['eier'] or 'uten eier'} · {ar['name']}"))
+        made[st["id"]] = text
+        save_made(made)
+        retag.append({"id": st["id"], "text": text})
+    if dry or not retag:
+        return
+    mark(board, retag)
+    save_made({k: t for k, t in watch_made().items() if k not in {r["id"] for r in retag}})
+    say(dim(f"{len(retag)} sticky(er) oppdatert på «{board.page}»"))
+
+
+def mark(board, items):
+    return use_figma(MARK_JS % (json.dumps(items, ensure_ascii=False), json.dumps(board.page_id)),
+                     {"type": "object", "required": ["n"], "properties": {"n": {"type": "integer"}}})
+
+
+def cmd_watch(a):
+    with locked("watch", block=False) as free:
+        if not free:
+            die("ops watch kjører allerede")
+        if not a.dry:
+            cmd_ko(argparse.Namespace(igjen=True, antall=0))
+        if not a.en:
+            cmd_apne(a)
+            say(dim(f"følger med på boardet hvert {a.hvert}. sekund — ctrl-c avslutter"))
+        state = {"pending": {}}
+        try:
+            while True:
+                try:
+                    watch_pass(state, a.dry, wait=not a.en)
+                except RuntimeError as e:
+                    say(red(str(e)))
+                if a.en:
+                    return
+                time.sleep(a.hvert)
+        except KeyboardInterrupt:
+            print()
 
 
 # ── neste ───────────────────────────────────────────────────────────────────
@@ -1523,14 +1668,16 @@ def main():
     lu.add_argument("--dry", action="store_true", help="vis planen, skriv ingenting")
     lu.add_argument("--igjen", action="store_true", help="lukk et møte som allerede er lukket på nytt")
     lu.add_argument("-y", "--yes", action="store_true", help="ikke spør")
-    sub.add_parser("åpne", aliases=["o"], help="åpne siden for neste møte på boardet")
-    sub.add_parser("sync", help="samme som `ops kø --igjen`")
+    wa = sub.add_parser("watch", aliases=["o", "åpne", "sync"], help="under møtet: nye Utfall-stickies → ADO-issues, stickyen ryddes og får #id")
+    wa.add_argument("--en", action="store_true", help="én runde, uten å vente på at stickyen er ferdigskrevet")
+    wa.add_argument("--dry", action="store_true", help="vis hva som ville blitt laget, skriv ingenting")
+    wa.add_argument("--hvert", type=int, default=30, help="sekunder mellom hver titt (30)")
     sub.add_parser("_worker")
     a = p.parse_args()
     if a.cmd is None:
         a = p.parse_args(["log"])
-    {"neste": cmd_neste, "ny": cmd_neste, "add": cmd_add, "log": cmd_log, "lukk": cmd_lukk, "sync": cmd_sync,
-     "kø": cmd_ko, "åpne": cmd_apne, "o": cmd_apne, "_worker": cmd_worker}[a.cmd](a)
+    {"neste": cmd_neste, "ny": cmd_neste, "add": cmd_add, "log": cmd_log, "lukk": cmd_lukk, "watch": cmd_watch, "sync": cmd_watch,
+     "kø": cmd_ko, "åpne": cmd_watch, "o": cmd_watch, "_worker": cmd_worker}[a.cmd](a)
 
 
 if __name__ == "__main__":
