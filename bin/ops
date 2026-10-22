@@ -1,43 +1,39 @@
 #!/usr/bin/env python3
 #
-# ops — the Operations board (FigJam) and its tiltak (Azure DevOps) in the terminal,
-# with an innboks: type a line, Haiku sorts it into the right område/seksjon and adds
-# what it knows (eier, frist, related open tiltak), and it goes back to the board as a
-# sticky and/or to ADO as an Issue.
+# ops — the weekly Operations meeting: the FigJam board shows it, Azure DevOps holds the
+# tiltak. One command per moment of the week:
 #
-# Same board and conventions as the operations-referat / operations-nytt-referat skills
-# in ~/visense/my-workday: newest «Referat <dato>» page, area Visense\Operations,
-# tags operations-mote + rapportert:<dato> (+ «Ikke satt»), Due Date = neste møte.
+#   ops neste [dato] [--dry]   before the meeting: clone the right template as «Referat <dato>»,
+#                              fill its tiltakslogg with the open tiltak, create the meeting epic
+#   ops add "<tekst>"          any time: Haiku sorts the line into a tema; a tiltak becomes an ADO
+#                              Issue right away, and either kind lands on the board as a sticky
+#                              (tiltak in the tema's Utfall, notat in its Rapport)
+#   ops log                    the open tiltak by due date: x = løst, u = +1 uke
+#   ops lukk [dato] [--dry]    after the meeting: Utfall stickies without #id become Issues, the
+#                              rest becomes the referat in the epic, and the meeting is closed
 #
-# Type:
+# neste, log and lukk also tidy up: an epic whose meeting is over and whose Issues are all
+# Done is closed.
 #
-#   ops                      live view (TUI): 1 board · 2 tiltak · 3 innboks; n = nytt innspill
-#   ops ls                   board and open tiltak, printed once
-#   ops add "<tekst>"        classify one line and save it to the innboks (queued for the board)
-#   ops sync                 write queued innboks entries to the board as stickies
-#   ops ny [dato]            open the next meeting: clone the right template as «Referat <dato>»
-#                            and carry the open tiltak forward in its tiltakslogg
-#
-# Stickies only go to a referat page for today or later: once a meeting is over, `ops ny`
-# has to open the next one first (`ops sync --gammel` writes to the old page anyway).
-# ADO Issues from the innboks are parented to the next meeting's epic, «Operations-møte
-# <dato>», created as a stub if it doesn't exist yet; /operations-referat fills it in after.
+# Each tema on a referat page holds a Rapport and an Utfall section. A sticky with «#1234»
+# is tiltak 1234 in ADO; lukk skips those, log turns them green when they're done.
+# The meeting epic «Operations-møte <dato>» is closed for writing once lukk has written its
+# referat (LUKKET marker); add then targets the next meeting, and waits in a queue until
+# `ops neste` has made its page.
 #
 # Reading the board needs a Figma personal access token (file_content:read), in
 # FIGMA_TOKEN or the keychain:
 #   security add-generic-password -a "$USER" -s figma-token -w '<figd_…>' -U
-# Writing stickies goes through the Figma MCP server (`claude -p`, OPS_MODEL), which
-# needs a one-time `/mcp` → figma → Authenticate in an interactive claude session.
-# Without a token the board view is empty; tiltak and innboks still work.
+# Writing goes through the Figma MCP server (`claude -p`), which needs a one-time
+# `/mcp` → figma → Authenticate in an interactive claude session.
 #
-# OPS_FIGMA_FILE overrides the board, OPS_MODEL the model (default haiku).
-# TUI: 1/2/3 or tab view · ←→/hl column · ↑↓/jk card · enter details · n new · o open
-#      · > / < move tiltak state · f queue · a ADO issue · S sync board · r refresh · q quit
+# OPS_FIGMA_FILE overrides the board, OPS_MODEL the sorting model (haiku),
+# OPS_REFERAT_MODEL the model that writes the referat (sonnet).
 
 import argparse
-import colorsys
 import curses
 import datetime
+import difflib
 import html
 import importlib.machinery
 import importlib.util
@@ -47,9 +43,7 @@ import os
 import re
 import subprocess
 import sys
-import textwrap
 import threading
-import time
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -71,23 +65,25 @@ PROJECT = "Visense"
 AREA = "Visense\\Operations"
 ITEM = f"https://dev.azure.com/Hussoppen/{PROJECT}/_workitems/edit/"
 MODEL = os.environ.get("OPS_MODEL", "haiku")
+REFERAT_MODEL = os.environ.get("OPS_REFERAT_MODEL", "sonnet")
 CACHE = os.path.expanduser("~/.cache/ops")
 INBOX = os.path.expanduser("~/.local/state/ops/inbox.json")
-DONE_DAYS = 14   # Done tiltak stay on the board this long
-ADO_EVERY, FIGMA_EVERY = 60, 300  # seconds between refreshes
 
-# The områder as the skills know them; used until the board itself has been read.
-AREAS = ["Salg → Leveranse", "Support og henvendelser", "Økonomi", "Folk og kapasitet",
-         "Produktoppfølging", "Risiko og annet", "Oppstart og sjekkpunkt"]
+# The temaer as the templates have them; used until the board itself has been read.
+AREAS = ["Salg -> Leveranse", "Support og henvendelser", "Økonomi", "Produktoppfølging",
+         "Folk og kapasitet", "Risiko og annet", "Kvartal"]
 COMMIT = re.compile(r"(?i)utfall|tiltak|beslutning")  # sections whose stickies are tiltak
 NOT_AREAS = re.compile(r"(?i)tiltakslogg|trafikklys")
+TAGGED = re.compile(r"#(\d{3,})")  # a sticky that already is an ADO tiltak
 MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "mai": 5, "jun": 6, "jul": 7, "aug": 8,
           "sep": 9, "okt": 10, "nov": 11, "des": 12}
 MONTH_NAMES = ["januar", "februar", "mars", "april", "mai", "juni", "juli", "august",
                "september", "oktober", "november", "desember"]
 DAYS = ["man", "tir", "ons", "tor", "fre", "lør", "søn"]
 PAGE_MONTHS = ["jan", "feb", "mars", "apr", "mai", "juni", "juli", "aug", "sept", "okt", "nov", "des"]
-STUB = "Opprettet av ops før møtet"  # epic description marker: the meeting hasn't been written up yet
+STUB = "Opprettet av ops før møtet"  # epic description: the meeting hasn't been written up yet
+LUKKET = "Lukket av ops"               # epic description: lukk has run; any non-stub epic counts as closed
+WEEK = datetime.timedelta(days=7)
 
 
 def die(msg):
@@ -131,18 +127,31 @@ def epic_title(d):
 def cadence(d):
     """Which template a meeting date gets. Månedlig = siste fredag i måneden (STARTSIDE);
     kvartalsvis = the månedlige in mars/juni/sept/des — an assumption, the board doesn't say."""
-    last = (d + datetime.timedelta(days=7)).month != d.month
+    last = (d + WEEK).month != d.month
     return "Kvartalsvis" if last and d.month % 3 == 0 else "Månedlig" if last else "Ukentlig"
 
 
-def next_meeting(dates):
-    """Weekly rytme: a week after the newest meeting, rolled forward past today."""
+def next_meeting(dates, closed=()):
+    """The first known meeting from today on that isn't closed; otherwise a week after the
+    newest, rolled forward past today and past closed meetings."""
+    dates = [d for d in dates if d]
+    up = sorted(d for d in dates if d >= today() and d not in closed)
+    if up:
+        return up[0]
     if not dates:
         return None
-    d = max(dates) + datetime.timedelta(days=7)
-    while d < today():
-        d += datetime.timedelta(days=7)
+    d = max(dates) + WEEK
+    while d < today() or d in closed:
+        d += WEEK
     return d
+
+
+def confirm(q, yes=False):
+    if yes:
+        return True
+    if not sys.stdin.isatty():
+        die("boardet og ADO er delt — bekreft med -y når det ikke er en terminal")
+    return input(f"{q} [j/N] ").strip().lower() in ("j", "ja", "y", "yes")
 
 
 # ── figma ───────────────────────────────────────────────────────────────────
@@ -216,45 +225,23 @@ def chars(n):
     return " ".join(c["characters"] for c in walk(n) if c is not n and c.get("characters"))
 
 
-def fill(n):
-    """First visible solid fill as (r, g, b), or None."""
-    for f in n.get("fills") or []:
-        if f.get("type") == "SOLID" and f.get("visible", True) and "color" in f:
-            c = f["color"]
-            return c["r"], c["g"], c["b"]
-    return None
-
-
-def colour(rgb):
-    """A fill → the nearest of the few colours a terminal has."""
-    if not rgb:
-        return "plain"
-    h, l, s = colorsys.rgb_to_hls(*rgb)
-    if s < 0.2 or l > 0.93:
-        return "plain"
-    deg = h * 360
-    return ("red" if deg < 20 or deg >= 330 else "orange" if deg < 45 else "yellow" if deg < 70
-            else "green" if deg < 165 else "cyan" if deg < 250 else "magenta")
-
-
 def table(n):
-    """TABLE node → rows of (text, fill), ordered by position."""
-    cells = [c for c in n.get("children", []) if c.get("type") == "TABLE_CELL"]
+    """TABLE node → rows of cell texts, ordered by position."""
     rows = {}
-    for c in cells:
-        x, y, _, _ = bbox(c)
-        rows.setdefault(round(y), []).append((x, chars(c).strip(), fill(c)))
-    return [[(t, f) for _, t, f in sorted(r)] for _, r in sorted(rows.items())]
+    for c in n.get("children", []):
+        if c.get("type") == "TABLE_CELL":
+            x, y, _, _ = bbox(c)
+            rows.setdefault(round(y), []).append((x, chars(c).strip()))
+    return [[t for _, t in sorted(r)] for _, r in sorted(rows.items())]
 
 
 class Board:
-    """The newest referat page, read geometrically: an område is a section no other section
-    contains (on this board a bolk's sub-sections are siblings inside its bounds, not children),
-    a sticky's seksjon is the smallest section around it."""
+    """A referat page, read geometrically: a tema is a section no other section contains
+    (on older pages a tema's sub-sections are siblings inside its bounds, on newer ones its
+    children — both read the same), a sticky's seksjon is the smallest section around it."""
 
-    def __init__(self, page, doc, people=None, pages=()):
+    def __init__(self, page, doc, people=None):
         self.page_id, self.page = page
-        self.pages = list(pages)
         self.date = meeting_date(self.page)
         self.people = people or {}
         nodes = list(walk(doc))
@@ -272,7 +259,7 @@ class Board:
         for n in nodes:
             if n.get("type") != "STICKY":
                 continue
-            st = {"id": n["id"], "text": chars(n).strip(), "colour": colour(fill(n)), "pos": bbox(n)[:2]}
+            st = {"id": n["id"], "text": chars(n).strip(), "pos": bbox(n)[:2]}
             around = [s for s in secs if contains(s, n)]
             if not around:
                 continue
@@ -286,20 +273,6 @@ class Board:
                 s["stickies"].sort(key=lambda st: (st["pos"][1], st["pos"][0]))
             a["secs"] = [s for s in a["secs"] if s["name"] or s["stickies"]]
         self.areas = [a for a in self.areas if a["secs"]]
-        self.traffic = []
-        for n in nodes:
-            if n.get("type") != "TABLE":
-                continue
-            rows = table(n)
-            near = [s for s in secs if contains(s, n)]
-            if rows and (any("trafikklys" in s["name"].lower() for s in near)
-                         or any(t.lower().startswith("salg") for t, _ in rows[0])):
-                for i, (label, _) in enumerate(rows[0]):
-                    below = [r[i] for r in rows[1:] if i < len(r)]
-                    hit = next(((t, f) for t, f in below if colour(f) != "plain" or t), ("", None))
-                    if label:
-                        self.traffic.append((label, colour(hit[1]), hit[0]))
-                break
 
     def find(self, area, sec=""):
         a = next((x for x in self.areas if x["name"].lower() == (area or "").lower()), None)
@@ -311,6 +284,12 @@ class Board:
     def vocabulary(self):
         return {a["name"]: [s["name"] for s in a["secs"] if s["name"]] for a in self.areas}
 
+    def stickies(self):
+        for a in self.areas:
+            for s in a["secs"]:
+                for st in s["stickies"]:
+                    yield a, s, st
+
     def url(self, node=None):
         return f"{BOARD}?node-id={urllib.parse.quote((node or self.page_id).replace(':', '-'))}"
 
@@ -321,24 +300,12 @@ def people_of(doc):
         if n.get("type") != "TABLE":
             continue
         rows = table(n)
-        head = [t.lower() for t, _ in rows[0]] if rows else []
+        head = [t.lower() for t in rows[0]] if rows else []
         if any("navn" in h for h in head) and any("post" in h for h in head):
             ni = next(i for i, h in enumerate(head) if "navn" in h)
             ei = next(i for i, h in enumerate(head) if "post" in h)
-            return {r[ni][0]: r[ei][0] for r in rows[1:] if len(r) > max(ni, ei) and r[ni][0]}
+            return {r[ni]: r[ei] for r in rows[1:] if len(r) > max(ni, ei) and r[ni]}
     return {}
-
-
-def load_board(page=None):
-    f = figma(f"files/{FILE}?depth=1")
-    version, pages = f["version"], [(p["id"], p["name"]) for p in f["document"]["children"]]
-    referat = [p for p in pages if p[1].lower().startswith("referat")]
-    if not referat:
-        raise RuntimeError("ingen «Referat …»-side på boardet")
-    target = next((p for p in referat if p[0] == page), referat[-1])  # appended last = newest
-    start = next((p for p in pages if p[1].strip().upper() == "STARTSIDE"), None)
-    people = people_of(page_doc(start[0], version)) if start else {}
-    return Board(target, page_doc(target[0], version), people, referat)
 
 
 # ── ado ─────────────────────────────────────────────────────────────────────
@@ -378,27 +345,30 @@ FIELDS = ["System.Id", "System.Title", "System.State", "System.WorkItemType", "S
           "Microsoft.VSTS.Scheduling.DueDate"]
 
 
-def load_ado():
-    """Operations Issues (open, or Done within DONE_DAYS) and the meeting epics."""
-    q = ("SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER '" + AREA + "' AND ("
-         "([System.WorkItemType] = 'Issue' AND ([System.State] <> 'Done' OR [System.ChangedDate] >= @Today - "
-         f"{DONE_DAYS})) OR [System.WorkItemType] = 'Epic') ORDER BY [System.Id]")
+def wiql(where):
+    q = f"SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER '{AREA}' AND {where} ORDER BY [System.Id]"
     ids = [w["id"] for w in api("wit/wiql", {"query": q})["workItems"]]
-    raw = []
+    out = []
     for i in range(0, len(ids), 200):
-        raw += api("wit/workitemsbatch", {"ids": ids[i:i + 200], "fields": FIELDS})["value"]
+        out += api("wit/workitemsbatch", {"ids": ids[i:i + 200], "fields": FIELDS})["value"]
+    return [w["fields"] for w in out]
+
+
+def load_ado():
+    """Open Operations Issues, and every meeting epic."""
+    raw = wiql("(([System.WorkItemType] = 'Issue' AND [System.State] <> 'Done' AND [System.State] <> 'Removed')"
+               " OR [System.WorkItemType] = 'Epic')")
     if not members:
         members.update(load_members())
     items, epics = [], []
-    for w in raw:
-        f = w["fields"]
+    for f in raw:
+        desc = f.get("System.Description") or ""
         if f["System.WorkItemType"] == "Epic":
-            epics.append({"id": f["System.Id"], "title": f["System.Title"], "date": meeting_date(f["System.Title"]),
-                          "stub": STUB in (f.get("System.Description") or "")})
+            epics.append({"id": f["System.Id"], "title": f["System.Title"], "state": f["System.State"],
+                          "date": meeting_date(f["System.Title"]), "stub": STUB in desc, "lukket": LUKKET in desc or STUB not in desc})
             continue
         if f.get("System.AssignedTo", {}).get("uniqueName"):  # people who aren't team members still get tiltak
             members.setdefault(f["System.AssignedTo"]["displayName"], f["System.AssignedTo"]["uniqueName"])
-        desc = f.get("System.Description") or ""
         eier = re.search(r"Eier:\s*(?:</b>)?\s*([^<]+)", desc)
         frist = re.search(r"Frist:\s*(?:</b>)?\s*([^<]+)", desc)
         due = f.get("Microsoft.VSTS.Scheduling.DueDate")
@@ -407,7 +377,6 @@ def load_ado():
             "who": (f.get("System.AssignedTo") or {}).get("displayName") or (eier and html.unescape(eier.group(1)).strip()) or "",
             "assigned": bool(f.get("System.AssignedTo")),
             "frist": frist and html.unescape(frist.group(1)).strip() or "",
-            "tags": [t.strip() for t in (f.get("System.Tags") or "").split(";") if t.strip()],
             "due": datetime.date.fromisoformat(due[:10]) if due else None,
             "created": datetime.date.fromisoformat(f["System.CreatedDate"][:10]),
             "parent": f.get("System.Parent"),
@@ -415,13 +384,13 @@ def load_ado():
     return items, epics
 
 
-members = {}  # ADO display name → uniqueName, filled by load_ado (never fetched from the UI thread)
+members = {}  # ADO display name → uniqueName, filled by load_ado
 
 
 def load_members():
     path = os.path.join(CACHE, "members.json")
     try:
-        if time.time() - os.path.getmtime(path) < 86400:
+        if datetime.datetime.now().timestamp() - os.path.getmtime(path) < 86400:
             with open(path) as f:
                 return json.load(f)
     except (OSError, ValueError):
@@ -437,13 +406,21 @@ def load_members():
     return out
 
 
-def set_state(id, state):
-    api(f"wit/workitems/{id}", [{"op": "add", "path": "/fields/System.State", "value": state}],
+def patch(id, fields):
+    api(f"wit/workitems/{id}", [{"op": "add", "path": f"/fields/{k}", "value": v} for k, v in fields.items()],
         method="PATCH", ctype="application/json-patch+json")
 
 
+def set_state(id, state):
+    patch(id, {"System.State": state})
+
+
+def set_due(id, d):
+    patch(id, {"Microsoft.VSTS.Scheduling.DueDate": d.isoformat()})
+
+
 def ensure_epic(d, epics):
-    """The meeting's epic, created as a stub when the meeting hasn't happened yet."""
+    """The meeting's epic, created as a stub when the meeting hasn't been written up yet."""
     t = epic_title(d)
     hit = next((x for x in epics if x["title"] == t), None)
     if hit:
@@ -452,23 +429,21 @@ def ensure_epic(d, epics):
         {"op": "add", "path": "/fields/System.Title", "value": t},
         {"op": "add", "path": "/fields/System.AreaPath", "value": AREA},
         {"op": "add", "path": "/fields/System.Description",
-         "value": f"{STUB} {today().isoformat()}, som forelder for innspill fra ops-innboksen. "
-                  "Referatet skrives hit av /operations-referat etter møtet."}],
+         "value": f"{STUB} {today().isoformat()}. Referatet skrives hit av `ops lukk` etter møtet."}],
         ctype="application/json-patch+json")["id"]
-    epics.append({"id": id, "title": t, "date": d, "stub": True})
+    epics.append({"id": id, "title": t, "state": "To Do", "date": d, "stub": True, "lukket": False})
     return id
 
 
-def create_issue(e, due, people, epic=None):
-    """An innboks entry → Issue, the way operations-referat writes them."""
-    c = e["c"]
+def create_issue(c, raw, due, people, epic, kilde):
+    """A tiltak → Issue: tagged, assigned when the eier resolves, due at the next meeting."""
     email = resolve(c.get("eier", ""), people)
     now = today().isoformat()
     tags = ["operations-mote", f"rapportert:{now}"] + (["Ikke satt"] if not c.get("frist") or c["frist"] == "Ikke satt" else [])
     desc = "<br>".join(f"<b>{k}:</b> {html.escape(v)}" for k, v in [
         ("Eier", c.get("eier") or "Ikke satt"), ("Frist", c.get("frist") or "Ikke satt"),
-        ("Kilde", f"ops-innboks {now}, {c['omraade']}{' › ' + c['seksjon'] if c.get('seksjon') else ''}"),
-        ("Rapportert inn", now)] + ([("Innspill", e["raw"])] if e["raw"].strip() != c["tittel"].strip() else [])
+        ("Kilde", kilde), ("Rapportert inn", now)]
+        + ([("Innspill", raw)] if raw.strip() != c["tittel"].strip() else [])
         + ([("Info", c["info"])] if c.get("info") else []))
     ops = [{"op": "add", "path": "/fields/System.Title", "value": c["tittel"]},
            {"op": "add", "path": "/fields/System.AreaPath", "value": AREA},
@@ -502,6 +477,36 @@ def resolve(eier, people):
     return None
 
 
+def tidy(dry=False):
+    """Close every epic whose meeting is over and whose Issues are all Done.
+    A meeting that was never written up (stub) and has no Issues is left alone."""
+    epics = [f for f in wiql("[System.WorkItemType] = 'Epic' AND [System.State] <> 'Done' AND [System.State] <> 'Removed'")]
+    if not epics:
+        return []
+    ids = ", ".join(str(f["System.Id"]) for f in epics)
+    kids = wiql(f"[System.WorkItemType] = 'Issue' AND [System.Parent] IN ({ids}) AND [System.State] <> 'Removed'")
+    closed = []
+    for f in epics:
+        d = meeting_date(f["System.Title"])
+        if not d or d >= today():
+            continue
+        mine = [k for k in kids if k.get("System.Parent") == f["System.Id"]]
+        if any(k["System.State"] != "Done" for k in mine):
+            continue
+        if not mine and STUB in (f.get("System.Description") or ""):
+            continue
+        if not dry:
+            set_state(f["System.Id"], "Done")
+        closed.append((f["System.Id"], f["System.Title"], len(mine)))
+    return closed
+
+
+def report_tidy(closed, dry=False):
+    for id, t, n in closed:
+        print(dim(f"rydding: {'ville lukket' if dry else 'lukket'} epic #{id} «{t}»"
+                  + (f" — alle {n} tiltak Done" if n else " — ingen tiltak")))
+
+
 # ── claude ──────────────────────────────────────────────────────────────────
 
 
@@ -526,13 +531,13 @@ def claude(system, prompt, schema, model=MODEL, tools=None):
 
 CLASSIFY = """Du sorterer innspill til Visense sitt ukentlige Operations-møte (FigJam-board, tiltak i Azure DevOps).
 
-Boardet har områder, hvert med seksjoner. Seksjoner med Utfall/Tiltak/Beslutninger i navnet holder tiltak
-(noen skylder noen noe: en handling med eier). Alle andre seksjoner holder notater (status, risiko, kontekst).
+Boardet har temaer, hvert med seksjoner. Seksjoner med Utfall/Tiltak/Beslutninger i navnet holder tiltak
+(noen skylder noen noe: en handling med eier). Andre seksjoner (Rapport) holder notater (status, tall, kontekst).
 
 For innspillet:
 - kind: "tiltak" hvis det er en handling noen skal gjøre, ellers "notat".
-- omraade: nøyaktig ett av områdenavnene.
-- seksjon: nøyaktig ett seksjonsnavn i det området. Tiltak går i områdets Utfall/Beslutninger-seksjon.
+- omraade: nøyaktig ett av temanavnene.
+- seksjon: nøyaktig ett seksjonsnavn i det temaet. Tiltak går i Utfall, notater i Rapport.
 - tittel: tiltak → én konsis imperativ norsk linje som står alene ut av kontekst (ta med det identifiserende
   substantivet, f.eks. «Fylle på lager: A-100 5pk mangler»). Notat → innspillet ryddet, uten å miste fakta.
 - eier: navn fra Representanter hvis innspillet nevner en person eller «jeg» (= Sander); ellers "".
@@ -543,17 +548,17 @@ For innspillet:
   hva som mangler (eier? frist? tall?), eller et konkret neste steg. Ikke gjenta tittelen. Ikke dikt opp fakta."""
 
 
-def classify(raw, board, items, epics):
-    vocab = board.vocabulary() if board and board.areas else {a: ["Utfall"] for a in AREAS}
+def classify(raw, ctx):
+    board = ctx.board
+    vocab = board.vocabulary() if board and board.areas else {a: ["Rapport", "Utfall"] for a in AREAS}
     people = board.people if board else {}
-    nxt = next_meeting(([board.date] if board and board.date else []) + [e["date"] for e in epics if e["date"]])
-    open_ = [t for t in items if t["state"] != "Done"]
+    nxt = ctx.next
     prompt = "\n".join([
         f"I dag: {day(today())} {today().isoformat()}. Neste møte: {day(nxt)} {nxt or ''}.",
-        "", "Områder og seksjoner:", json.dumps(vocab, ensure_ascii=False, indent=1),
+        "", "Temaer og seksjoner:", json.dumps(vocab, ensure_ascii=False, indent=1),
         "", "Representanter: " + (", ".join(people) or "(ukjent)"),
         "Andre i ADO: " + ", ".join(members),
-        "", "Åpne tiltak:", *[f"#{t['id']} [{t['state']}] {t['title']} — {t['who'] or 'uten eier'}" for t in open_],
+        "", "Åpne tiltak:", *[f"#{t['id']} [{t['state']}] {t['title']} — {t['who'] or 'uten eier'}" for t in ctx.items],
         "", "Innspill:", raw])
     schema = {"type": "object", "additionalProperties": False,
               "required": ["kind", "omraade", "seksjon", "tittel", "eier", "frist", "info", "relatert"],
@@ -565,16 +570,49 @@ def classify(raw, board, items, epics):
                   "info": {"type": "string"},
                   "relatert": {"type": "array", "items": {"type": "integer"}}}}
     c = claude(CLASSIFY, prompt, schema)
-    c["eier"] = "" if re.fullmatch(r"[\s\"'–-]*|(?i:ingen|ukjent|ikke satt)", c["eier"]) else c["eier"].strip()
-    known = {t["id"] for t in items}
+    c["eier"] = clean_eier(c["eier"])
+    known = {t["id"] for t in ctx.items}
     c["relatert"] = [i for i in c.get("relatert", []) if i in known]
     if c["seksjon"] not in vocab.get(c["omraade"], []):
         c["seksjon"] = default_section(vocab.get(c["omraade"], []), c["kind"])
     return c
 
 
+def same(title, items):
+    """An Issue that already is this tiltak: older pages' stickies don't carry their #id."""
+    best = max(items, key=lambda t: difflib.SequenceMatcher(None, fold(title), fold(t["title"])).ratio(), default=None)
+    if best and difflib.SequenceMatcher(None, fold(title), fold(best["title"])).ratio() >= 0.75:
+        return best
+    return None
+
+
+def clean_eier(s):
+    return "" if re.fullmatch(r"[\s\"'–-]*|(?i:ingen|ukjent|ikke satt)", s or "") else s.strip()
+
+
 def default_section(secs, kind):
     return next((s for s in secs if bool(COMMIT.search(s)) == (kind == "tiltak")), "")
+
+
+PARSE = """Du gjør stickies fra Utfall-seksjonene på Visense sitt Operations-board om til tiltak i Azure DevOps.
+Sticky-tekst er fri form og linjeskift kan mangle. Typisk: «Ansvarlig: Martin  Gjennomgå bruk av Varenavn  Ta et møte om 2 uker».
+
+For hver sticky, med samme id:
+- tittel: handlingen som én konsis imperativ norsk linje som står alene ut av kontekst; fold inn det identifiserende
+  substantivet. Uten «Ansvarlig:»-delen.
+- eier: teksten etter Ansvarlig:/Eier: (kan være flere, «Martin/Håkon»), ellers et navn som nevnes, ellers "".
+  Gjett aldri.
+- frist: eksplisitt frist i teksten («innen 16. sept», «om 2 uker», «snarest»), ellers "Ikke satt"."""
+
+REFERAT = """Du skriver møtereferatet for Visense sitt Operations-møte, som HTML til beskrivelsen av møtets epic
+i Azure DevOps (<h3>, <ul>/<li>, <b> og <br> fungerer).
+
+Start med <b>Operations-møte <dato></b><br>, så Kilde (FigJam-siden) og Neste møte, hver med <br>.
+Deretter én <h3> per tema som har innhold, i boardets rekkefølge. Skriv lesbar prosa, ikke en sticky-dump: slå
+sammen stickies som sier det samme, behold navn og tall ordrett (S-200, uke 39, 500 sensorer), dropp temaer
+uten innhold. Den som ikke var i møtet skal kunne lese dette og vite hva som skjedde.
+Avslutt med <h3>Tiltak</h3> og en <ul> med hvert tiltak som «#id tittel — eier».
+Ikke dikt opp noe som ikke står i stickies."""
 
 
 # ── innboks ─────────────────────────────────────────────────────────────────
@@ -606,18 +644,19 @@ def sticky_text(e):
     c = e["c"]
     if c["kind"] != "tiltak":
         return c["tittel"]
-    lines = [f"Ansvarlig: {c['eier']}" if c.get("eier") else "Ansvarlig: ?", c["tittel"]]
+    lines = [(f"#{e['ado']} " if e.get("ado") else "") + c["tittel"],
+             f"Ansvarlig: {c['eier']}" if c.get("eier") else "Ansvarlig: ?"]
     if c.get("frist") and c["frist"] != "Ikke satt":
-        lines.append(c["frist"])
-    if e.get("ado"):
-        lines.append(f"ADO #{e['ado']}")
+        lines.append(f"Frist: {c['frist']}")
     return "\n".join(lines)
 
 
-# Deterministic: Claude only relays this to the use_figma tool, it never writes code.
-# A sticky goes under the lowest sticky already in its section (section-relative when the
-# stickies are children of the section, page-absolute when they are siblings inside it),
-# and the section grows to fit.
+# ── figma writes ────────────────────────────────────────────────────────────
+# Deterministic: Claude only relays this JS to the use_figma tool, it never writes code.
+
+# A sticky goes to the right of the last sticky in its section, or starts a new row under
+# them; the section, and the tema around it, grow to fit. Section-relative when the stickies
+# are the section's children, page-absolute when they are loose inside it (older pages).
 WRITE_JS = """const items = %s;
 const page = await figma.getNodeByIdAsync(%s);
 await figma.setCurrentPageAsync(page);
@@ -634,15 +673,83 @@ for (const it of items) {
   await figma.loadFontAsync(s.text.fontName);
   s.text.characters = it.text;
   const all = kids.concat(loose).map(n => n.absoluteBoundingBox);
-  const ax = all.length ? Math.min(...all.map(b => b.x)) : sb.x + 40;
-  const ay = all.length ? Math.max(...all.map(b => b.y + b.height)) + 24 : sb.y + 80;
+  let ax = sb.x + 40, ay = sb.y + 80;
+  if (all.length) {
+    const top = Math.max(...all.map(b => b.y));
+    const row = all.filter(b => b.y > top - 40);
+    const last = row.reduce((a, b) => (b.x > a.x ? b : a));
+    ax = last.x + last.width + 24; ay = last.y;
+    if (ax + s.width > sb.x + sb.width - 24) { ax = Math.min(...all.map(b => b.x)); ay = Math.max(...all.map(b => b.y + b.height)) + 24; }
+  }
   if (loose.length && !kids.length) { s.x = ax; s.y = ay; }
   else { sec.appendChild(s); s.x = ax - sb.x; s.y = ay - sb.y; }
   const need = ay - sb.y + s.height + 40;
   if (need > sb.height) sec.resizeWithoutConstraints(sb.width, need);
+  const p = sec.parent;
+  if (p && p.type === "SECTION") {
+    const pb = p.absoluteBoundingBox, bottom = sb.y + Math.max(need, sb.height) + 80 - pb.y;
+    if (bottom > pb.height) p.resizeWithoutConstraints(pb.width, bottom);
+  }
   out.push({ key: it.key, id: s.id, error: "" });
 }
 return out;"""
+
+# lukk prefixes «#id» to the stickies it made Issues of, so a second run skips them.
+RETAG_JS = """const items = %s;
+const page = await figma.getNodeByIdAsync(%s);
+await figma.setCurrentPageAsync(page);
+let n = 0;
+for (const it of items) {
+  const s = await figma.getNodeByIdAsync(it.id);
+  if (!s || s.type !== "STICKY") continue;
+  const len = s.text.characters.length;
+  for (const f of (len ? s.text.getRangeAllFontNames(0, len) : [s.text.fontName])) await figma.loadFontAsync(f);
+  s.text.characters = it.text;
+  n++;
+}
+return { n };"""
+
+# The tiltakslogg section's table gets one row per open tiltak (id and title link to ADO),
+# the section grows to fit, and stickies of tiltak that are Done turn green.
+LOG_JS = """const rows = %s, sub = %s, done = %s;
+const page = await figma.getNodeByIdAsync(%s);
+await figma.setCurrentPageAsync(page);
+const load = async t => { const n = t.characters.length;
+  for (const f of (n ? t.getRangeAllFontNames(0, n) : [t.fontName])) await figma.loadFontAsync(f); };
+const sec = page.children.find(n => n.type === "SECTION" && /tiltakslogg/i.test(n.name));
+if (!sec) return { rows: 0, green: 0, error: "fant ingen tiltakslogg på siden" };
+const sb = sec.absoluteBoundingBox;
+const inside = n => { const b = n.absoluteBoundingBox; return b.x >= sb.x && b.y >= sb.y && b.x < sb.x + sb.width && b.y < sb.y + sb.height; };
+const table = sec.findOne(n => n.type === "TABLE") || page.children.find(n => n.type === "TABLE" && inside(n));
+const subt = sec.findOne(n => n.type === "TEXT" && n.name === "Undertittel") || page.children.find(n => n.type === "TEXT" && n.name === "Undertittel" && inside(n));
+if (!table) return { rows: 0, green: 0, error: "fant ingen tabell i tiltaksloggen" };
+if (subt && sub) { await load(subt); subt.characters = sub; }
+const pat = table.numRows > 2 ? [table.cellAt(1, 0).fills, table.cellAt(2, 0).fills] : null;
+while (table.numRows > Math.max(rows.length, 1) + 1) table.removeRow(table.numRows - 1);
+while (table.numRows < rows.length + 1) table.insertRow(table.numRows);
+for (let i = 0; i < Math.max(rows.length, 1); i++) {
+  for (let j = 0; j < 3; j++) {
+    const cell = table.cellAt(i + 1, j);
+    await load(cell.text);
+    cell.text.characters = rows[i] ? rows[i][j] || " " : " ";
+    if (rows[i] && j < 2) cell.text.hyperlink = { type: "URL", value: rows[i][3] };
+    if (pat) cell.fills = pat[i %% 2];
+  }
+}
+const tb = table.absoluteBoundingBox, need = tb.y + tb.height - sb.y + 64;
+if (need > sb.height) sec.resizeWithoutConstraints(sb.width, need);
+let green = 0;
+if (done.length) for (const s of page.findAllWithCriteria({ types: ["STICKY"] })) {
+  const m = s.text.characters.match(/#(\\d{3,})/);
+  if (m && done.includes(+m[1])) { s.fills = [{ type: "SOLID", color: { r: 0xcd / 255, g: 0xf4 / 255, b: 0xd3 / 255 } }]; green++; }
+}
+return { rows: table.numRows - 1, green, error: "" };"""
+
+CLONE_PAGE_JS = """const tpl = await figma.getNodeByIdAsync(%s);
+await figma.setCurrentPageAsync(tpl);
+const page = tpl.clone();
+page.name = %s;
+return { page: page.id, last: figma.root.children.indexOf(page) === figma.root.children.length - 1 };"""
 
 RELAY = """First call mcp__plugin_figma_figma__create_session with fileKey %s and a short task description.
 Then call the Figma MCP tool use_figma (mcp__plugin_figma_figma__use_figma) exactly once, on that fileKey and
@@ -667,23 +774,15 @@ def use_figma(js, schema):
     return r["result"]
 
 
-def writable(board, force=False):
-    """Stickies belong to a meeting still to come; a page whose meeting is over is closed."""
-    if not force and board.date and board.date < today():
-        raise RuntimeError(f"«{board.page}» er et møte som har vært — `ops ny` åpner neste møte"
-                           " (`ops sync --gammel` skriver dit likevel)")
-    return board
-
-
 def push(entries, board):
-    """Queued entries → stickies on the newest referat page, in one use_figma call."""
-    todo, out = [], []
+    """Queued entries → stickies on the board, in one use_figma call."""
+    todo = []
     for e in entries:
         if e["figma"] != "kø":
             continue
         a, s = board.find(e["c"]["omraade"], e["c"].get("seksjon"))
         if not a:
-            e["figma"] = f"feil: fant ikke området «{e['c']['omraade']}» på {board.page}"
+            e["figma"] = f"feil: fant ikke temaet «{e['c']['omraade']}» på {board.page}"
             continue
         todo.append({"key": e["key"], "section": (s or a)["id"], "text": sticky_text(e)})
     if not todo:
@@ -699,99 +798,114 @@ def push(entries, board):
     return sum(1 for x in done.values() if x.get("id"))
 
 
-# ── data snapshot ───────────────────────────────────────────────────────────
+def log_rows(items):
+    return [[str(t["id"]), t["title"], t["who"], f"{ITEM}{t['id']}"] for t in sorted(items, key=lambda t: t["id"])]
 
 
-class Data:
-    def __init__(self):
-        self.board, self.items, self.epics = None, [], []
-        self.board_err = self.ado_err = ""
-        self.board_at = self.ado_at = 0.0
-        self.page = None  # chosen referat page id; None = newest
+def write_log(page_id, d, items, done=()):
+    sub = f"Åpne tiltak per {long_day(d)} (To Do / Doing). Fylles fra ADO av ops."
+    return use_figma(LOG_JS % (json.dumps(log_rows(items), ensure_ascii=False), json.dumps(sub, ensure_ascii=False),
+                               json.dumps(sorted(done)), json.dumps(page_id)), {
+        "type": "object", "required": ["rows", "green", "error"],
+        "properties": {"rows": {"type": "integer"}, "green": {"type": "integer"}, "error": {"type": "string"}}})
 
-    def refresh_ado(self):
+
+# ── context ─────────────────────────────────────────────────────────────────
+
+
+class Ctx:
+    """Board pages, ADO tiltak and epics, and which meeting is next."""
+
+    def __init__(self, need_board=True):
+        self.items, self.epics = load_ado()
+        self.version, self.pages, self.board, self.board_err, self.people = None, [], None, "", {}
         try:
-            self.items, self.epics = load_ado()
-            self.ado_err = ""
-        except RuntimeError as e:
-            self.ado_err = str(e)
-        self.ado_at = time.time()
-
-    def refresh_board(self):
-        try:
-            self.board = load_board(self.page)
-            self.board_err = ""
+            f = figma(f"files/{FILE}?depth=1")
+            self.version = f["version"]
+            self.pages = [(p["id"], p["name"]) for p in f["document"]["children"]]
+            start = next((p for p in self.pages if p[1].strip().upper() == "STARTSIDE"), None)
+            self.people = people_of(page_doc(start[0], self.version)) if start else {}
         except RuntimeError as e:
             self.board_err = str(e)
-        self.board_at = time.time()
+        self.referat = [(i, n, meeting_date(n)) for i, n in self.pages if n.lower().startswith("referat")]
+        self.closed = {e["date"] for e in self.epics if e["lukket"] and e["date"]}
+        self.next = next_meeting([r[2] for r in self.referat] + [e["date"] for e in self.epics], self.closed)
+        if need_board and self.next:
+            self.board = self.board_for(self.next)
 
-    def next_meeting(self):
-        return next_meeting(([self.board.date] if self.board and self.board.date else [])
-                            + [e["date"] for e in self.epics if e["date"]])
+    def page_for(self, d):
+        return next(((i, n) for i, n, pd in self.referat if pd == d), None)
 
-    def newest_board(self):
-        """Writes always target the newest referat page, whichever page is on screen."""
-        if self.board and (self.page is None or (self.board.pages and self.board.pages[-1][0] == self.board.page_id)):
-            return self.board
-        return load_board(None)
+    def board_for(self, d):
+        p = self.page_for(d)
+        if not p:
+            return None
+        try:
+            return Board(p, page_doc(p[0], self.version), self.people)
+        except RuntimeError as e:
+            self.board_err = str(e)
+            return None
+
+    def epic(self, d):
+        return next((e for e in self.epics if e["date"] == d), None)
 
 
-# ── print ───────────────────────────────────────────────────────────────────
-
-
-def cmd_ls(a):
-    d = Data()
-    d.refresh_ado()
-    d.refresh_board()
-    if d.board:
-        b = d.board
-        print(bold(f"{b.page}") + dim(f"  ({day(b.date)})  {b.url()}"))
-        if b.traffic:
-            print("  " + "  ".join(f"{l}: {c if c != 'plain' else '–'}" for l, c, _ in b.traffic))
-        for ar in b.areas:
-            print(cyan(ar["name"]))
-            for s in ar["secs"]:
-                if s["stickies"]:
-                    print(dim(f"  {s['name'] or '–'}"))
-                for st in s["stickies"]:
-                    print("    • " + st["text"].replace("\n", " · "))
-    else:
-        print(dim(f"board: {d.board_err}"))
-    if d.ado_err:
-        die(d.ado_err)
-    print()
-    for state in ("To Do", "Doing"):
-        ts = [t for t in d.items if t["state"] == state]
-        print(bold(f"{state} ({len(ts)})"))
-        for t in ts:
-            late = t["due"] and t["due"] < today()
-            print(f"  #{t['id']}  {t['title'][:70]:70}  {t['who'] or '–':18} "
-                  + (red if late else dim)(f"frist {day(t['due'])}" if t["due"] else ""))
-    print(dim(f"\nNeste møte: {day(d.next_meeting())}"))
+# ── add ─────────────────────────────────────────────────────────────────────
 
 
 def cmd_add(a):
     raw = " ".join(a.text).strip()
     if not raw:
         die("ingen tekst")
-    d = Data()
-    d.refresh_ado()
-    d.refresh_board()
-    print(dim(f"… {MODEL} kategoriserer"), file=sys.stderr)
     try:
-        c = classify(raw, d.board, d.items, d.epics)
+        ctx = Ctx()
+        print(dim(f"… {MODEL} sorterer"), file=sys.stderr)
+        c = classify(raw, ctx)
     except RuntimeError as e:
         die(str(e))
+    if a.tiltak or a.notat:
+        c["kind"] = "tiltak" if a.tiltak else "notat"
+        vocab = ctx.board.vocabulary() if ctx.board else {x: ["Rapport", "Utfall"] for x in AREAS}
+        c["seksjon"] = default_section(vocab.get(c["omraade"], []), c["kind"])
+    who = resolve(c.get("eier"), ctx.people)
+    print(f"{bold(c['kind'])}  {cyan(c['omraade'])} › {c['seksjon'] or '–'}\n  {c['tittel']}")
+    print(dim(f"  eier {c['eier'] or '–'}" + (f" ({who})" if who else " (ingen ADO-match)" if c["eier"] else "")
+              + f" · frist {c['frist']}" + (f" · relatert {', '.join('#' + str(i) for i in c['relatert'])}" if c["relatert"] else "")))
+    if c["info"]:
+        print(dim("  " + c["info"]))
+    nxt = ctx.next
+    where = (f"«{ctx.board.page}»" if ctx.board else f"køen (ingen side for {day(nxt)} ennå — `ops neste`)")
+    plan = ([f"ADO-issue under «{epic_title(nxt)}», due {day(nxt)}"] if c["kind"] == "tiltak" else []) + [f"sticky på {where}"]
+    if a.dry:
+        print(dim("ville laget: " + " + ".join(plan)))
+        return
+    if not confirm("Lag " + " + ".join(plan) + "?", a.yes):
+        print("avbrutt")
+        return
     e = entry(raw, c)
-    e["figma"] = "kø" if not a.local else None
+    e["figma"] = "kø"
     es = inbox()
     es.append(e)
     save(es)
-    print(f"{bold(c['kind'])}  {cyan(c['omraade'])} › {c['seksjon']}\n  {c['tittel']}")
-    print(dim(f"  eier {c['eier'] or '–'} · frist {c['frist']}" + (f" · relatert {', '.join('#' + str(i) for i in c['relatert'])}" if c["relatert"] else "")))
-    if c["info"]:
-        print(dim("  " + c["info"]))
-    print(dim(f"lagret i innboks ({e['key']})" + (" · i kø for boardet — `ops sync`" if e["figma"] else "")))
+    try:
+        if c["kind"] == "tiltak":
+            e["ado"] = create_issue(c, raw, nxt, ctx.people, ensure_epic(nxt, ctx.epics),
+                                    f"ops add {today().isoformat()}, {c['omraade']}")
+            save(es)
+            print(green(f"#{e['ado']}") + f"  {ITEM}{e['ado']}")
+        if ctx.board:
+            print(dim(f"… skriver sticky til {ctx.board.page}"), file=sys.stderr)
+            if push([e], ctx.board):
+                print(green("sticky") + f"  {ctx.board.url(e['figma'])}")
+            else:
+                print(red(e["figma"]))
+        else:
+            print(yellow(f"sticky i kø — skrives når `ops neste` lager siden for {day(nxt)}"))
+    except RuntimeError as err:
+        print(red(str(err)), file=sys.stderr)
+        print(dim("ligger i køen — `ops sync` prøver igjen"), file=sys.stderr)
+    finally:
+        save(es)
 
 
 def cmd_sync(a):
@@ -799,77 +913,31 @@ def cmd_sync(a):
     if not any(e["figma"] == "kø" for e in es):
         print("ingenting i kø")
         return
+    ctx = Ctx()
+    if not ctx.board:
+        die(f"ingen side for neste møte ({day(ctx.next)}) — `ops neste` lager den" + (f" ({ctx.board_err})" if ctx.board_err else ""))
     try:
-        b = writable(load_board(None), a.gammel)
-    except RuntimeError as e:
-        die(str(e))
-    print(dim(f"… skriver til {b.page} via Figma-MCP"), file=sys.stderr)
-    try:
-        n = push(es, b)
+        n = push(es, ctx.board)
     except RuntimeError as e:
         die(str(e))
     finally:
         save(es)
-    print(f"{n} sticky(er) skrevet til {b.page}")
-    for e in es:
-        if str(e["figma"]).startswith("feil"):
-            print(red(f"  {e['c']['tittel'][:60]}: {e['figma']}"))
+    print(f"{n} sticky(er) skrevet til {ctx.board.page}")
 
 
-# ── ny ──────────────────────────────────────────────────────────────────────
-# The same steps as /operations-nytt-referat, deterministic: clone the template page (it
-# lands last, which is how everything finds the newest referat), then clone the previous
-# page's tiltakslogg bolk onto it and refill its table from ADO.
-
-CLONE_PAGE_JS = """const tpl = await figma.getNodeByIdAsync(%s);
-await figma.setCurrentPageAsync(tpl);
-const page = tpl.clone();
-page.name = %s;
-return { page: page.id, last: figma.root.children.indexOf(page) === figma.root.children.length - 1 };"""
-
-# A bolk is not a container: the section, its texts and the table are page children inside
-# its bounds, so they are cloned one by one at the same position.
-TILTAKSLOGG_JS = """const ids = %s, rows = %s, sub = %s, tname = %s;
-const dst = await figma.getNodeByIdAsync(%s);
-await figma.setCurrentPageAsync(dst);
-const load = async t => { const n = t.characters.length;
-  for (const f of (n ? t.getRangeAllFontNames(0, n) : [t.fontName])) await figma.loadFontAsync(f); };
-let table = null;
-for (const id of ids) {
-  const src = await figma.getNodeByIdAsync(id);
-  const c = src.clone();
-  dst.appendChild(c);
-  c.x = src.x; c.y = src.y;
-  if (c.type === "TABLE") table = c;
-  if (c.type === "TEXT" && c.name === "Undertittel") { await load(c); c.characters = sub; }
-}
-if (!table) return { table: "", rows: 0, error: "fant ingen tabell i tiltaksloggen" };
-table.name = tname;
-const pat = table.numRows > 2 ? [table.cellAt(1, 0).fills, table.cellAt(2, 0).fills] : null;
-while (table.numRows > rows.length + 1 && table.numRows > 2) table.removeRow(table.numRows - 1);
-while (table.numRows < rows.length + 1) table.insertRow(table.numRows);
-for (let i = 0; i < rows.length; i++) {
-  for (let j = 0; j < 3; j++) {
-    const cell = table.cellAt(i + 1, j);
-    await load(cell.text);
-    cell.text.characters = rows[i][j] || " ";
-    if (j < 2) cell.text.hyperlink = { type: "URL", value: rows[i][3] };
-    if (pat) cell.fills = pat[i %% 2];
-  }
-}
-const probe = table.numRows > 1 ? table.cellAt(1, 1).text : null;
-return { table: table.id, rows: table.numRows, error: "",
-         probe: probe ? probe.characters + " → " + JSON.stringify(probe.hyperlink) : "" };"""
+# ── neste ───────────────────────────────────────────────────────────────────
 
 
-def cmd_ny(a):
+def cmd_neste(a):
     try:
-        f = figma(f"files/{FILE}?depth=1")
-        items, epics = load_ado()
+        ctx = Ctx(need_board=False)
+        closed = tidy(dry=a.dry)
     except RuntimeError as e:
         die(str(e))
-    version, pages = f["version"], [(p["id"], p["name"]) for p in f["document"]["children"]]
-    referat = [(i, n, meeting_date(n)) for i, n in pages if n.lower().startswith("referat")]
+    report_tidy(closed, a.dry)
+    if ctx.board_err:
+        die(ctx.board_err)
+    referat, pages = ctx.referat, ctx.pages
     dated = [r for r in referat if r[2]]
     if not dated:
         die("ingen daterte «Referat …»-sider å regne ut fra")
@@ -888,631 +956,374 @@ def cmd_ny(a):
         if d < today():
             skipped = d
             while d < today():
-                d += datetime.timedelta(days=7)
-            warn.append(f"ingen side for {day(skipped)}" + (f"–{day(d - datetime.timedelta(days=7))}"
-                        if d - skipped > datetime.timedelta(days=7) else "") + " — møte uten referat?")
+                d += WEEK
+            warn.append(f"ingen side for {day(skipped)}" + (f"–{day(d - WEEK)}" if d - skipped > WEEK else "")
+                        + " — møte uten referat?")
     if any(r[2] == d for r in referat):
         die(f"«{next(r[1] for r in referat if r[2] == d)}» finnes allerede")
     kind = cadence(d)
     tpl = next((p for p in pages if p[1].strip().lower() == kind.lower()), None)
     if not tpl:
         die(f"fant ikke malen «{kind}»")
+    if kind == "Kvartalsvis":
+        warn.append("kvartalsregelen (siste fredag i mars/juni/sept/des) er antatt, står ikke på STARTSIDE")
     name = f"Referat {d.day}. {PAGE_MONTHS[d.month - 1]}"
+    if newest[2] and newest[2] < d:
+        ep = ctx.epic(newest[2])
+        if not ep or not ep["lukket"]:
+            warn.append(f"«{newest[1]}» er ikke lukket — tiltakene derfra mangler i ADO; kjør `ops lukk {newest[2].day}."
+                        f" {PAGE_MONTHS[newest[2].month - 1]}` først")
+    queued = [e for e in inbox() if e["figma"] == "kø"]
 
-    weekly = next((p for p in pages if p[1].strip().lower() == "ukentlig"), None)
-    extra = []
-    if kind != "Ukentlig" and weekly:
-        base = {n["name"] for n in page_doc(weekly[0], version)["children"] if n["type"] == "SECTION"}
-        extra = [n["name"] for n in page_doc(tpl[0], version)["children"] if n["type"] == "SECTION" and n["name"] not in base]
-        if not extra:
-            warn.append(f"malen «{kind}» er fortsatt en kopi av Ukentlig")
-        start = next((p for p in pages if p[1].strip().upper() == "STARTSIDE"), None)
-        text = " ".join(chars(n) for n in walk(page_doc(start[0], version))) if start else ""
-        q = (d.month - 1) // 3 + 1
-        if not re.search(rf"Mål Q{q} {d.year}", text):
-            warn.append(f"Mål Q{q} {d.year} står ikke på STARTSIDE — ingenting å måle mot")
-        if "salgstall" not in text.lower():
-            warn.append("Salgstall er ikke definert på STARTSIDE — avklar i møtet")
-        if kind == "Kvartalsvis":
-            warn.append("kvartalsregelen (siste fredag i mars/juni/sept/des) er antatt, står ikke på STARTSIDE")
-
-    if newest[2]:
-        ep = next((e for e in epics if e["date"] == newest[2]), None)
-        if not ep or ep["stub"]:
-            warn.append(f"«{newest[1]}» er ikke behandlet ({'bare stub-' if ep else 'ingen '}epic) — tiltakene derfra"
-                        " mangler i ADO; kjør /operations-referat på den først")
-
-    open_ = sorted((t for t in items if t["state"] != "Done"), key=lambda t: t["id"])
-    rows = [[str(t["id"]), t["title"], t["who"], f"{ITEM}{t['id']}"] for t in open_]
-    doc = page_doc(newest[0], version)
-    log = next((n for n in doc["children"] if n["type"] == "SECTION" and "tiltakslogg" in n["name"].lower()), None)
-    ids, sub = [], ""
-    if log:
-        ids = [n["id"] for n in doc["children"] if n is log or contains(log, n)]
-        old = next((chars(n) for n in doc["children"] if n["type"] == "TEXT" and n["name"] == "Undertittel" and contains(log, n)), "")
-        sub = re.sub(r"per \d{1,2}\.\s*\w+ \d{4}", f"per {long_day(d)}", old)
-    else:
-        warn.append(f"ingen tiltakslogg på «{newest[1]}» å klone — siden får ingen")
-
-    states = {s: sum(1 for t in open_ if t["state"] == s) for s in ("To Do", "Doing")}
     print(f"Neste møte: {bold(day(d) + ' ' + str(d.year))}  ({kind.lower()})")
-    print(f"Ny side:    «{name}», duplisert fra malen «{tpl[1]}»" + (f" (+ {', '.join(extra)})" if extra else ""))
-    if log:
-        print(f"Tiltakslogg: {len(open_)} åpne tiltak ({states['To Do']} To Do, {states['Doing']} Doing)"
-              + (f", eldste #{open_[0]['id']} fra {day(open_[0]['created'])}" if open_ else ""))
+    print(f"Ny side:    «{name}», fra malen «{tpl[1]}»")
+    print(f"Tiltakslogg: {len(ctx.items)} åpne tiltak"
+          + (f" ({sum(t['state'] == 'To Do' for t in ctx.items)} To Do, {sum(t['state'] == 'Doing' for t in ctx.items)} Doing)" if ctx.items else ""))
+    print(f"Epic:       «{epic_title(d)}»" + (" (finnes)" if ctx.epic(d) else " (ny)"))
+    if queued:
+        print(f"Kø:         {len(queued)} sticky(er) skrives til siden")
     for w in warn:
         print(yellow(f"  ! {w}"))
-    if not a.yes:
-        if not sys.stdin.isatty():
-            die("boardet er delt — bekreft med -y når det ikke er en terminal")
-        if input("Opprett siden? [j/N] ").strip().lower() not in ("j", "ja", "y", "yes"):
-            print("avbrutt")
-            return
+    if a.dry:
+        print(dim("--dry: ingenting skrevet"))
+        return
+    if not confirm("Opprett siden?", a.yes):
+        print("avbrutt")
+        return
 
-    print(dim("… kloner malen via Figma-MCP"), file=sys.stderr)
     try:
+        ensure_epic(d, ctx.epics)
+        print(dim("… kloner malen via Figma-MCP"), file=sys.stderr)
         r = use_figma(CLONE_PAGE_JS % (json.dumps(tpl[0]), json.dumps(name)), {
             "type": "object", "required": ["page", "last"],
             "properties": {"page": {"type": "string"}, "last": {"type": "boolean"}}})
     except RuntimeError as e:
         die(str(e))
     pid = r["page"]
-    url = f"{BOARD}?node-id={pid.replace(':', '-')}"
-    print(f"Opprettet «{name}» ({kind.lower()})\n  {url}")
+    print(f"Opprettet «{name}» ({kind.lower()})\n  {BOARD}?node-id={pid.replace(':', '-')}")
     if not r["last"]:
-        print(red("  ! siden havnet ikke sist — flytt den sist, ellers finner ops og skillene feil side"))
-    if not ids:
-        return
-    print(dim(f"… fyller tiltaksloggen ({len(rows)} rader)"), file=sys.stderr)
+        print(red("  ! siden havnet ikke sist — flytt den sist, ellers finner ops feil side"))
+    print(dim(f"… fyller tiltaksloggen ({len(ctx.items)} rader)"), file=sys.stderr)
     try:
-        t = use_figma(TILTAKSLOGG_JS % (json.dumps(ids), json.dumps(rows, ensure_ascii=False),
-                                        json.dumps(sub, ensure_ascii=False),
-                                        json.dumps(f"Tiltakslogg {d.day}. {PAGE_MONTHS[d.month - 1]}"),
-                                        json.dumps(pid)), {
-            "type": "object", "required": ["table", "rows", "error"],
-            "properties": {"table": {"type": "string"}, "rows": {"type": "integer"},
-                           "error": {"type": "string"}, "probe": {"type": "string"}}})
+        t = write_log(pid, d, ctx.items)
+        print(red(f"  ! tiltakslogg: {t['error']}") if t["error"] else f"Tiltakslogg: {t['rows']} åpne tiltak ført videre")
     except RuntimeError as e:
-        die(f"siden finnes, men tiltaksloggen feilet: {e}")
-    if t["error"] or t["rows"] != len(rows) + 1:
-        got = t["error"] or f"{t['rows']} rader, ventet {len(rows) + 1}"
-        print(red(f"  ! tiltakslogg: {got}"))
-    else:
-        print(f"Tiltakslogg: {len(rows)} åpne tiltak ført videre" + dim(f"  ({t.get('probe', '')[:90]})"))
-    unowned = [f"#{x['id']}" for x in open_ if not x["assigned"]]
+        print(red(f"  ! tiltakslogg feilet: {e}"))
+    unowned = [f"#{x['id']}" for x in ctx.items if not x["assigned"]]
     if unowned:
         print(dim(f"  uten ansvarlig i ADO: {', '.join(unowned)}"))
+    if queued:
+        es = inbox()
+        try:
+            board = Board((pid, name), page_doc(pid, figma(f"files/{FILE}?depth=1")["version"]), ctx.people)
+            print(f"{push(es, board)} sticky(er) fra køen skrevet")
+        except RuntimeError as e:
+            print(red(f"  ! køen: {e} — `ops sync` prøver igjen"))
+        finally:
+            save(es)
 
 
-# ── tui ─────────────────────────────────────────────────────────────────────
+# ── lukk ────────────────────────────────────────────────────────────────────
 
 
-def wrap(text, w):
-    out = []
-    for para in (text or "").split("\n"):
-        out += textwrap.wrap(para, max(4, w)) or [""]
-    return out
+def cmd_lukk(a):
+    try:
+        ctx = Ctx(need_board=False)
+    except RuntimeError as e:
+        die(str(e))
+    if ctx.board_err:
+        die(ctx.board_err)
+    if a.dato:
+        d = meeting_date(a.dato)
+        if not d or not ctx.page_for(d):
+            die(f"fant ingen referat-side for «{a.dato}»")
+    else:
+        held = [r[2] for r in ctx.referat if r[2] and r[2] <= today()]
+        if not held:
+            die("ingen referat-side for et møte som har vært")
+        d = max(held)
+    if d in ctx.closed and not a.igjen:
+        die(f"møtet {day(d)} er allerede lukket (`--igjen` skriver referatet på nytt)")
+    board = ctx.board_for(d)
+    if not board:
+        die(ctx.board_err or f"kunne ikke lese siden for {day(d)}")
+    nxt = next_meeting([r[2] for r in ctx.referat] + [e["date"] for e in ctx.epics] + [d + WEEK], ctx.closed | {d})
+    ep = ctx.epic(d)
+    known = ctx.items + ([{"id": f["System.Id"], "title": f["System.Title"]} for f in
+                          wiql(f"[System.WorkItemType] = 'Issue' AND [System.Parent] = {ep['id']}")] if ep else [])
+
+    new = [(ar, s, st) for ar, s, st in board.stickies() if s["name"] and COMMIT.search(s["name"]) and not TAGGED.search(st["text"])]
+    tagged = [(ar, s, st) for ar, s, st in board.stickies() if TAGGED.search(st["text"])]
+    print(f"{bold(board.page)}  ({day(d)})  {dim(board.url())}")
+    print(dim(f"… {MODEL} leser {len(new)} tiltak fra Utfall"), file=sys.stderr)
+    try:
+        parsed = {}
+        if new:
+            r = claude(PARSE, json.dumps([{"id": st["id"], "tema": ar["name"], "tekst": st["text"]} for ar, s, st in new],
+                                         ensure_ascii=False),
+                       {"type": "object", "required": ["tiltak"], "properties": {"tiltak": {"type": "array", "items": {
+                           "type": "object", "required": ["id", "tittel", "eier", "frist"],
+                           "properties": {k: {"type": "string"} for k in ("id", "tittel", "eier", "frist")}}}}})
+            parsed = {t["id"]: t for t in r["tiltak"]}
+    except RuntimeError as e:
+        die(str(e))
+    todo, found = [], []
+    for ar, s, st in new:
+        p = parsed.get(st["id"]) or {"tittel": st["text"].split("\n")[0], "eier": "", "frist": "Ikke satt"}
+        c = {"tittel": p["tittel"].strip(), "eier": clean_eier(p["eier"]), "frist": p.get("frist") or "Ikke satt"}
+        hit = same(c["tittel"], known)
+        (found.append((st, hit)) if hit else todo.append((ar, s, st, c)))
+
+    print(f"\nNye tiltak → ADO (due {day(nxt)}, under «{epic_title(d)}»):" if todo else "\nIngen nye tiltak i Utfall.")
+    for i, (ar, s, st, c) in enumerate(todo, 1):
+        who = resolve(c["eier"], ctx.people)
+        print(f"  {i:2}. {c['tittel'][:64]:64} {c['eier'] or '–':14} {dim(who or ('ingen ADO-match' if c['eier'] else ''))}"
+              + (yellow(f"  [{c['frist']}]") if c["frist"] != "Ikke satt" else ""))
+    for st, hit in found:
+        print(dim(f"  = #{hit['id']} {hit['title'][:60]} — finnes i ADO, stickyen får #{hit['id']}"))
+    if tagged:
+        print(dim(f"  + {len(tagged)} sticky(er) som allerede er tiltak: "
+                  + ", ".join("#" + TAGGED.search(st["text"]).group(1) for _, _, st in tagged)))
+    notes = sum(1 for _, s, _ in board.stickies() if not (s["name"] and COMMIT.search(s["name"])))
+    print(f"Referat: {notes} notater fra {len(board.areas)} temaer → beskrivelsen til «{epic_title(d)}»")
+    if a.dry:
+        closed = tidy(dry=True)
+        report_tidy(closed, True)
+        print(dim("--dry: ingenting skrevet"))
+        return
+    if not confirm("Opprett tiltakene og lukk møtet?", a.yes):
+        print("avbrutt")
+        return
+
+    try:
+        epic = ensure_epic(d, ctx.epics)
+        made, retag = [], [{"id": st["id"], "text": f"#{hit['id']} {st['text']}"} for st, hit in found]
+        for ar, s, st, c in todo:
+            id = create_issue(c, st["text"], nxt, ctx.people, epic,
+                              f"{epic_title(d)}, {ar['name']} › {s['name']}")
+            made.append((id, c))
+            retag.append({"id": st["id"], "text": f"#{id} {st['text']}"})
+            print(green(f"  #{id}") + f"  {c['tittel']}")
+        tiltak = [f"#{id} {c['tittel']} — {c['eier'] or 'uten eier'}" for id, c in made]
+        tiltak += [f"#{TAGGED.search(st['text']).group(1)} {st['text'].splitlines()[0]}" for _, _, st in tagged]
+        tiltak += [f"#{hit['id']} {hit['title']}" for _, hit in found]
+        stickies = [{"tema": ar["name"], "seksjon": s["name"] or "–", "tekst": st["text"]} for ar, s, st in board.stickies()]
+        print(dim(f"… {REFERAT_MODEL} skriver referatet"), file=sys.stderr)
+        ref = claude(REFERAT, "\n".join([
+            f"Møte: {epic_title(d)}. FigJam-side: «{board.page}» ({board.url()}). Neste møte: {nxt.isoformat()}.",
+            "", "Stickies:", json.dumps(stickies, ensure_ascii=False, indent=1),
+            "", "Tiltak:", *tiltak]), {"type": "object", "required": ["html"], "properties": {"html": {"type": "string"}}},
+            model=REFERAT_MODEL)["html"]
+        patch(epic, {"System.Description": ref + f"<br><br><i>{LUKKET} {today().isoformat()}.</i>"})
+        print(f"Referat skrevet til epic #{epic}  {ITEM}{epic}")
+        if retag:
+            print(dim("… merker stickies med #id"), file=sys.stderr)
+            use_figma(RETAG_JS % (json.dumps(retag, ensure_ascii=False), json.dumps(board.page_id)),
+                      {"type": "object", "required": ["n"], "properties": {"n": {"type": "integer"}}})
+        closed = tidy()
+    except RuntimeError as e:
+        die(str(e))
+    report_tidy(closed)
+    unowned = [f"#{id}" for id, c in made if not resolve(c["eier"], ctx.people)]
+    if unowned:
+        print(yellow(f"Uten assignee: {', '.join(unowned)}"))
+    print(f"Møtet {day(d)} er lukket. Neste: `ops neste`")
 
 
-def tui(scr, a):
+# ── log ─────────────────────────────────────────────────────────────────────
+
+
+def sort_key(t):
+    return (t["due"] or datetime.date.max, t["id"])
+
+
+def print_log(ctx):
+    for t in sorted(ctx.items, key=sort_key):
+        late = t["due"] and t["due"] < today()
+        print((red if late else dim)(f"{day(t['due']) if t['due'] else '–':11}") + f" #{t['id']}  {t['title'][:64]:64} "
+              + dim(f"{t['who'] or '–':16} {t['state']}"))
+
+
+def cmd_log(a):
+    try:
+        ctx = Ctx(need_board=False)
+        closed = tidy()
+    except RuntimeError as e:
+        die(str(e))
+    report_tidy(closed)
+    if not (TTY and sys.stdin.isatty()):
+        print_log(ctx)
+        return
+    locale.setlocale(locale.LC_ALL, "")
+    os.environ.setdefault("ESCDELAY", "25")
+    done = set()
+    curses.wrapper(log_tui, ctx, done)
+    if done and not a.ingen_board:
+        page = ctx.page_for(ctx.next)
+        if page:
+            print(dim(f"… oppdaterer tiltaksloggen på «{page[1]}»"), file=sys.stderr)
+            try:
+                left = [t for t in ctx.items if t["state"] != "Done"]
+                r = write_log(page[0], ctx.next, left, done)
+                print(red(r["error"]) if r["error"] else f"tiltakslogg: {r['rows']} åpne · {r['green']} sticky(er) grønne")
+            except RuntimeError as e:
+                print(red(str(e)))
+
+
+def log_tui(scr, ctx, done):
     curses.curs_set(0)
     curses.use_default_colors()
-    pal = {}
-    for i, (name, col) in enumerate([("green", curses.COLOR_GREEN), ("red", curses.COLOR_RED),
-                                     ("yellow", curses.COLOR_YELLOW), ("cyan", curses.COLOR_CYAN),
-                                     ("magenta", curses.COLOR_MAGENTA), ("blue", curses.COLOR_BLUE)], 1):
+    for i, col in enumerate([curses.COLOR_RED, curses.COLOR_YELLOW, curses.COLOR_GREEN, curses.COLOR_CYAN], 1):
         curses.init_pair(i, col, -1)
-        pal[name] = curses.color_pair(i)
-    orange = 208 if curses.COLORS >= 256 else curses.COLOR_RED
-    curses.init_pair(7, orange, -1)
-    pal.update(orange=curses.color_pair(7), plain=0, dim=curses.A_DIM, bold=curses.A_BOLD)
+    RED, YEL, GRN, CYA = (curses.color_pair(i) for i in range(1, 5))
     scr.timeout(250)
+    items = sorted(ctx.items, key=sort_key)
+    sel, top, msg, busy = 0, 0, "", []
+    ask = None
 
-    def put(y, x, txt, n, attr=0):
-        if n <= 0:
-            return
+    def put(y, x, s, n, attr=0):
         try:
-            scr.addnstr(y, x, re.sub(r"[\x00-\x1f\x7f]", " ", txt), n, attr)
+            scr.addnstr(y, x, re.sub(r"[\x00-\x1f\x7f]", " ", s), max(0, n), attr)
         except curses.error:
             pass
 
-    d = Data()
-    es = inbox()
-    lock = threading.Lock()
-    view, col, row, colscroll = 0, 0, {}, 0
-    msg, err, busy = "", False, ""
-    edit = None      # [label, text, fn(text)]
-    ask = None       # (question, fn)
-    draft = None     # entry awaiting a decision
-    detail = None    # lines of the open details box
-    wake = threading.Event()
-
-    def note(m, e=False):
-        nonlocal msg, err
-        msg, err = m, e
-
-    def act(label, fn):
-        """fn runs off the UI thread; its return is the message."""
-        nonlocal busy
-
-        def run():
-            nonlocal busy
+    def run(label, fn):
+        def go():
+            nonlocal msg
             try:
-                r = fn()
-                if r:
-                    note(r)
+                msg = fn() or ""
             except RuntimeError as e:
-                note(str(e), True)
+                msg = "! " + str(e)
             finally:
-                busy = ""
-        busy = label
-        threading.Thread(target=run, daemon=True).start()
+                busy.remove(label)
+        busy.append(label)
+        threading.Thread(target=go, daemon=True).start()
 
-    def loader():
-        while True:
-            if time.time() - d.ado_at > ADO_EVERY:
-                d.refresh_ado()
-            if time.time() - d.board_at > FIGMA_EVERY:
-                d.refresh_board()
-            wake.wait(5)
-            wake.clear()
+    def toggle(t):
+        to = "To Do" if t["state"] == "Done" else "Done"
 
-    threading.Thread(target=loader, daemon=True).start()
-
-    def persist():
-        with lock:
-            save(es)
-
-    # ── cards: every view is columns of cards {lines: [(text, attr)], bar, ref} ──
-
-    def board_cols(cw):
-        b = d.board
-        if not b:
-            return [("Board", [{"lines": [(d.board_err or "henter board …", pal["dim"])], "bar": pal["dim"], "ref": None}])]
-        cols = []
-        for ar in b.areas:
-            cards = []
-            for s in ar["secs"]:
-                if s["name"]:
-                    cards.append({"head": s["name"], "commit": bool(COMMIT.search(s["name"]))})
-                for st in s["stickies"]:
-                    cards.append({"lines": [(t, 0) for t in wrap(st["text"], cw - 3)],
-                                  "bar": pal.get(st["colour"], 0) | curses.A_BOLD, "ref": ("sticky", st, ar, s)})
-                for e in es:
-                    if (e["figma"] == "kø" or str(e["figma"]).startswith("feil")) \
-                            and e["c"]["omraade"] == ar["name"] and (e["c"].get("seksjon") or "") == s["name"]:
-                        cards.append({"lines": [(t, pal["dim"]) for t in wrap("⇡ " + sticky_text(e), cw - 3)],
-                                      "bar": pal["red" if e["figma"] != "kø" else "dim"], "ref": ("entry", e)})
-            cols.append((ar["name"], cards))
-        return cols
-
-    def item_card(t, cw):
-        late = t["due"] and t["due"] < today() and t["state"] != "Done"
-        sub = " · ".join(x for x in [t["who"] or "uten eier", f"due {day(t['due'])}" if t["due"] else "",
-                                     f"fra {day(t['created'])}"] if x)
-        bar = pal["red"] if late else {"Doing": pal["yellow"], "Done": pal["green"]}.get(t["state"], pal["cyan"])
-        return {"lines": [(x, pal["dim"] if t["state"] == "Done" else 0) for x in wrap(f"#{t['id']} {t['title']}", cw - 3)]
-                         + [(x, pal["red"] if late else pal["dim"]) for x in wrap(sub, cw - 3)],
-                "bar": bar | curses.A_BOLD, "ref": ("item", t)}
-
-    def item_cols(cw):
-        if d.ado_err and not d.items:
-            return [("Tiltak", [{"lines": [(d.ado_err, pal["red"])], "bar": pal["red"], "ref": None}])]
-        cols = []
-        for state in ("To Do", "Doing", "Done"):
-            ts = [t for t in d.items if t["state"] == state]
-            ts.sort(key=lambda t: (t["due"] or datetime.date.max, t["id"]) if state != "Done" else (-t["id"],))
-            cols.append((f"{state} ({len(ts)})", [item_card(t, cw) for t in ts]))
-        return cols
-
-    def entry_card(e, cw):
-        c = e["c"]
-        status = ("⇡ i kø for board" if e["figma"] == "kø" else str(e["figma"]) if str(e["figma"]).startswith("feil")
-                  else "✓ på board" if e["figma"] else "lokal")
-        status += f" · ADO #{e['ado']}" if e["ado"] else ""
-        rel = ", ".join(f"#{i}" for i in c.get("relatert", []))
-        lines = [(x, curses.A_BOLD) for x in wrap(c["tittel"], cw - 3)]
-        lines += [(f"{c['kind']} · {c['omraade']} › {c.get('seksjon') or '–'}", pal["cyan"])]
-        lines += [(x, pal["dim"]) for x in wrap(" · ".join(y for y in [
-            f"eier {c['eier']}" if c.get("eier") else "", f"frist {c['frist']}" if c.get("frist") else "",
-            f"relatert {rel}" if rel else ""] if y), cw - 3)]
-        lines += [(x, pal["dim"]) for x in wrap(c.get("info", ""), cw - 3)]
-        lines += [(f"{status} · {e['at'][:16].replace('T', ' ')}", pal["red"] if status.startswith("feil") else pal["green"] if "✓" in status else pal["yellow"])]
-        return {"lines": lines, "bar": pal["magenta"] | curses.A_BOLD, "ref": ("entry", e)}
-
-    def inbox_cols(cw):
-        return [(f"Innboks ({len(es)})", [entry_card(e, cw) for e in reversed(es)] or
-                 [{"lines": [("tomt — n for nytt innspill", pal["dim"])], "bar": pal["dim"], "ref": None}])]
-
-    def columns(w):
-        if view == 2:
-            return inbox_cols(min(w - 2, 100)), min(w - 2, 100)
-        n = len(d.board.areas) if view == 0 and d.board else 3
-        per = max(1, min(n, w // 30))
-        cw = max(20, (w - 1) // per)
-        return (board_cols if view == 0 else item_cols)(cw), cw
-
-    def selected(cols):
-        if not cols:
-            return None
-        c = min(col, len(cols) - 1)
-        cards = [x for x in cols[c][1] if "head" not in x and x.get("ref")]
-        if not cards:
-            return None
-        return cards[min(row.get((view, c), 0), len(cards) - 1)]
-
-    def draw_cols(cols, cw, y0, h, w):
-        nonlocal colscroll
-        per = max(1, w // cw)
-        c = min(col, len(cols) - 1)
-        if c < colscroll:
-            colscroll = c
-        if c >= colscroll + per:
-            colscroll = c - per + 1
-        colscroll = max(0, min(colscroll, max(0, len(cols) - per)))
-        for i, (name, cards) in enumerate(cols[colscroll:colscroll + per]):
-            ci = colscroll + i
-            x = i * cw
-            cur = ci == c
-            put(y0, x, f" {name} "[:cw - 1], cw - 1, (curses.A_REVERSE if cur else 0) | curses.A_BOLD | pal["cyan"])
-            # layout, then scroll so the selected card is visible
-            lines, k, want = [], 0, min(row.get((view, ci), 0), max(0, sum(1 for x in cards if "head" not in x and x.get("ref")) - 1))
-            sel_top = sel_bot = 0
-            for card in cards:
-                if "head" in card:
-                    lines.append((f"─ {card['head']} ", pal["yellow"] if card["commit"] else pal["dim"], None, False))
-                    continue
-                is_sel = cur and card.get("ref") and k == want
-                if is_sel:
-                    sel_top = len(lines)
-                for j, (t, at) in enumerate(card["lines"]):
-                    lines.append((t, at, card["bar"], is_sel))
-                if is_sel:
-                    sel_bot = len(lines)
-                lines.append(("", 0, None, False))
-                if card.get("ref"):
-                    k += 1
-            room = h - 1
-            top = 0
-            if cur and sel_bot > room:
-                top = min(sel_top, sel_bot - room)
-            for j, (t, at, bar, is_sel) in enumerate(lines[top:top + room]):
-                yy = y0 + 1 + j
-                if bar is not None:
-                    put(yy, x, "▌", 1, bar)
-                    put(yy, x + 2, t.ljust(cw - 3) if is_sel else t, cw - 3, at | (curses.A_REVERSE if is_sel else 0))
-                else:
-                    put(yy, x, (t + "─" * cw)[:cw - 1] if t else "", cw - 1, at)
-            if top + room < len(lines):
-                put(y0 + h - 1, x + cw - 3, "↓", 1, pal["dim"])
-
-    def draw_box(lines, title, h, w):
-        bw = min(w - 4, 90)
-        body = []
-        for t, at in lines:
-            body += [(x, at) for x in wrap(t, bw - 4)]
-        bh = min(h - 4, len(body) + 3)
-        y0, x0 = max(1, (h - bh) // 2), (w - bw) // 2
-        for j in range(bh):
-            put(y0 + j, x0, " " * bw, bw, 0)
-        put(y0, x0, "┌" + "─" * (bw - 2) + "┐", bw, pal["cyan"])
-        put(y0, x0 + 2, f" {title} ", bw - 4, pal["cyan"] | curses.A_BOLD)
-        for j in range(1, bh - 1):
-            put(y0 + j, x0, "│", 1, pal["cyan"])
-            put(y0 + j, x0 + bw - 1, "│", 1, pal["cyan"])
-        put(y0 + bh - 1, x0, "└" + "─" * (bw - 2) + "┘", bw, pal["cyan"])
-        for j, (t, at) in enumerate(body[:bh - 2]):
-            put(y0 + 1 + j, x0 + 2, t, bw - 4, at)
-
-    def draft_lines(e):
-        c = e["c"]
-        people = d.board.people if d.board else {}
-        email = resolve(c.get("eier"), people)
-        rel = [t for t in d.items if t["id"] in c.get("relatert", [])]
-        return ([(c["tittel"], curses.A_BOLD), ("", 0),
-                 (f"type     {c['kind']}", pal["yellow"] if c["kind"] == "tiltak" else 0),
-                 (f"område   {c['omraade']} › {c.get('seksjon') or '–'}", pal["cyan"]),
-                 (f"eier     {c.get('eier') or '–'}" + (f"  ({email})" if email else "  (ingen ADO-match)" if c.get("eier") else ""), 0),
-                 (f"frist    {c.get('frist') or '–'}", 0)]
-                + ([("", 0), ("info     " + c["info"], pal["green"])] if c.get("info") else [])
-                + ([("", 0), ("relatert", pal["dim"])] + [(f"  #{t['id']} {t['title']} ({t['state']}, {t['who'] or '–'})", pal["dim"]) for t in rel] if rel else [])
-                + [("", 0), ("innspill " + e["raw"], pal["dim"]), ("", 0),
-                   ("enter lagre + kø til board · a + ADO-issue · l bare lokalt · t type · o/O område · u seksjon · e rediger · esc forkast", pal["yellow"])])
-
-    def detail_of(ref):
-        kind = ref[0]
-        if kind == "sticky":
-            _, st, ar, s = ref
-            return f"{ar['name']} › {s['name'] or '–'}", [(st["text"], 0), ("", 0), ("o åpne i Figma", pal["dim"])]
-        if kind == "item":
-            t = ref[1]
-            return f"#{t['id']} · {t['state']}", [
-                (t["title"], curses.A_BOLD), ("", 0),
-                (f"eier     {t['who'] or '–'}" + ("" if t["assigned"] or not t["who"] else "  (ikke tildelt i ADO)"), 0),
-                (f"frist    {t['frist'] or '–'} · due {day(t['due'])}", 0),
-                (f"opprettet {day(t['created'])}" + (f" · epic #{t['parent']}" if t["parent"] else ""), 0),
-                (f"tags     {', '.join(t['tags'])}", pal["dim"]), ("", 0),
-                ("o åpne i ADO · > neste state · < forrige", pal["dim"])]
-        e = ref[1]
-        return "Innspill", draft_lines(e)[:-1] + [("o åpne · f kø til board · a ADO-issue · x slett", pal["dim"])]
-
-    def cycle_area(e, step):
-        vocab = d.board.vocabulary() if d.board and d.board.areas else {x: ["Utfall"] for x in AREAS}
-        names = list(vocab)
-        i = names.index(e["c"]["omraade"]) if e["c"]["omraade"] in names else -1
-        e["c"]["omraade"] = names[(i + step) % len(names)]
-        e["c"]["seksjon"] = default_section(vocab[e["c"]["omraade"]], e["c"]["kind"])
-
-    def cycle_section(e):
-        vocab = d.board.vocabulary() if d.board and d.board.areas else {x: ["Utfall"] for x in AREAS}
-        secs = vocab.get(e["c"]["omraade"], [])
-        if secs:
-            i = secs.index(e["c"]["seksjon"]) if e["c"].get("seksjon") in secs else -1
-            e["c"]["seksjon"] = secs[(i + 1) % len(secs)]
-
-    def classify_bg(raw):
-        nonlocal draft
-
-        def run():
-            nonlocal draft
-            draft = entry(raw, classify(raw, d.board, d.items, d.epics))
-        act(f"{MODEL} kategoriserer …", run)
-
-    def keep(e, queue=True):
-        e["figma"] = "kø" if queue else e["figma"]
-        with lock:
-            if e not in es:
-                es.append(e)
-        persist()
-
-    def make_issue(e):
-        def run():
-            due = d.next_meeting()
-            epic = ensure_epic(due, d.epics) if due else None
-            id = create_issue(e, due, d.board.people if d.board else {}, epic)
-            e["ado"] = id
-            persist()
-            d.refresh_ado()
-            return f"opprettet #{id} — {ITEM}{id}"
-        who = resolve(e["c"].get("eier"), d.board.people if d.board else {})
-        return (f"Opprett ADO Issue «{e['c']['tittel'][:50]}» → {who or 'uten assignee'}, due {day(d.next_meeting())},"
-                f" under «{epic_title(d.next_meeting()) if d.next_meeting() else '–'}»?",
-                lambda: act("oppretter i ADO …", run))
-
-    def sync():
-        def run():
-            b = writable(d.newest_board())
-            n = push(es, b)
-            persist()
-            d.board_at = 0
-            wake.set()
-            fails = sum(1 for e in es if str(e["figma"]).startswith("feil"))
-            return f"{n} sticky(er) skrevet til {b.page}" + (f" · {fails} feilet" if fails else "")
-        if not any(e["figma"] == "kø" for e in es):
-            note("ingenting i kø")
-            return
-        if not d.board:
-            note("boardet er ikke lest — trenger Figma-token for å vite hvor stickies skal", True)
-            return
-        act("skriver til board via Figma-MCP …", run)
-
-    def move(t, step):
-        order = ["To Do", "Doing", "Done"]
-        i = order.index(t["state"]) if t["state"] in order else 0
-        to = order[max(0, min(2, i + step))]
-        if to == t["state"]:
-            return
-
-        def run():
+        def fn():
             set_state(t["id"], to)
             t["state"] = to
-            d.refresh_ado()
+            (done.add if to == "Done" else done.discard)(t["id"])
             return f"#{t['id']} → {to}"
-        nonlocal ask
-        ask = (f"#{t['id']} {t['state']} → {to}?", lambda: act("oppdaterer …", run))
+        run("oppdaterer", fn)
+
+    def doing(t):
+        to = "To Do" if t["state"] == "Doing" else "Doing"
+
+        def fn():
+            set_state(t["id"], to)
+            t["state"] = to
+            return f"#{t['id']} → {to}"
+        run("oppdaterer", fn)
+
+    def shift(t, weeks):
+        base = t["due"] or ctx.next or today()
+        to = base + weeks * WEEK
+
+        def fn():
+            set_due(t["id"], to)
+            t["due"] = to
+            return f"#{t['id']} due {day(to)}"
+        run("oppdaterer", fn)
 
     while True:
         h, w = scr.getmaxyx()
         scr.erase()
-        b = d.board
-        queued = sum(1 for e in es if e["figma"] == "kø")
-        nxt = d.next_meeting()
-        head = " · ".join(x for x in [
-            "ops", f"{b.page} ({day(b.date)})" if b else "board: " + (d.board_err[:50] if d.board_err else "henter …"),
-            f"neste møte {day(nxt)}" if nxt else "",
-            f"{sum(1 for t in d.items if t['state'] != 'Done')} åpne tiltak" if d.items else (d.ado_err[:40] or "henter ADO …"),
-            f"⇡{queued} i kø" if queued else ""] if x)
-        put(0, 0, head, w - 1, curses.A_BOLD)
-        x = 0
-        for i, name in enumerate(["1 Board", "2 Tiltak", "3 Innboks"]):
-            put(1, x, f" {name} ", w - x - 1, curses.A_REVERSE | curses.A_BOLD if i == view else pal["dim"])
-            x += len(name) + 3
-        if b and b.traffic and view == 0:
-            x += 2
-            for label, c, t in b.traffic:
-                put(1, x, "●", 1, pal.get(c, 0) | curses.A_BOLD if c != "plain" else pal["dim"])
-                put(1, x + 2, label, w - x - 3, pal["dim"])
-                x += len(label) + 4
-
-        cols, cw = columns(w)
-        draw_cols(cols, cw, 3, h - 5, w)
-        cur = selected(cols)
-
-        if draft:
-            draw_box(draft_lines(draft), "Nytt innspill", h, w)
-        elif detail:
-            draw_box(detail[1], detail[0], h, w)
-
-        keys = "n nytt · 1/2/3 visning · ←→↑↓ flytt · enter detaljer · o åpne · S synk board · r oppdater · q avslutt"
-        if edit:
-            put(h - 1, 0, f"{edit[0]}: {edit[1]}"[-(w - 2):] + "█", w - 1, pal["cyan"] | curses.A_BOLD)
-        elif ask:
-            put(h - 1, 0, ask[0] + "  y/n", w - 1, pal["yellow"] | curses.A_BOLD)
+        open_ = [t for t in items if t["state"] != "Done"]
+        late = sum(1 for t in open_ if t["due"] and t["due"] < today())
+        put(0, 0, f"Tiltak — {len(open_)} åpne · {late} forfalt · neste møte {day(ctx.next)}", w - 1, curses.A_BOLD)
+        room = h - 3
+        sel = max(0, min(sel, len(items) - 1))
+        top = min(max(top, sel - room + 1), sel)
+        for i, t in enumerate(items[top:top + room]):
+            y, cur = 2 + i, top + i == sel
+            isdone = t["state"] == "Done"
+            overdue = t["due"] and t["due"] < today() and not isdone
+            attr = curses.A_REVERSE if cur else 0
+            put(y, 0, " " * (w - 1), w - 1, attr)
+            put(y, 0, f"{day(t['due']) if t['due'] else '–':11}", 11, attr | (RED if overdue else curses.A_DIM))
+            put(y, 12, ("✓ " if isdone else "▸ " if t["state"] == "Doing" else "  "), 2,
+                attr | (GRN if isdone else YEL))
+            put(y, 14, f"#{t['id']} {t['title']}", w - 34, attr | (curses.A_DIM if isdone else 0))
+            put(y, w - 19, f"{(t['who'] or '–')[:18]}", 18, attr | curses.A_DIM)
+        if ask:
+            put(h - 1, 0, ask[0] + "  j/n", w - 1, YEL | curses.A_BOLD)
         elif busy:
-            put(h - 1, 0, "… " + busy, w - 1, pal["yellow"])
+            put(h - 1, 0, "… " + busy[0], w - 1, YEL)
         else:
-            put(h - 1, 0, msg or keys, w - 1, (pal["red"] if err else pal["green"]) if msg else pal["dim"])
+            put(h - 1, 0, msg or "x løst · u +1 uke · U −1 uke · d doing · o åpne · r oppdater · q avslutt",
+                w - 1, (RED if msg.startswith("!") else GRN) if msg else curses.A_DIM)
         scr.refresh()
-
-        if edit:
-            try:
-                c = scr.get_wch()
-            except curses.error:
-                continue
-            if c in ("\n", "\r", curses.KEY_ENTER):
-                (_, text, fn), edit = edit, None
-                if text.strip():
-                    fn(text.strip())
-            elif c == "\x1b":
-                edit = None
-            elif c in (curses.KEY_BACKSPACE, "\x7f", "\b"):
-                edit[1] = edit[1][:-1]
-            elif c == "\x15":
-                edit[1] = ""
-            elif c == "\x17":
-                edit[1] = re.sub(r"\S*$", "", edit[1].rstrip())
-            elif isinstance(c, str) and c.isprintable():
-                edit[1] += c
-            continue
 
         k = scr.getch()
         if k == -1:
             continue
-        msg, err = "", False
-        ch = chr(k) if 32 <= k < 256 else "\0"  # "" would be `in` every key string
+        ch = chr(k) if 32 <= k < 256 else "\0"
         if ask:
-            _, fn = ask
-            ask = None
-            if ch in "yYj":
+            fn, ask = ask[1], None
+            if ch in "jJyY":
                 fn()
             continue
-        if draft:
-            e = draft
-            if k in (10, 13, curses.KEY_ENTER):
-                keep(e)
-                draft = None
-                note("lagret · i kø for boardet (S for å synke)")
-            elif ch == "a":
-                keep(e)
-                draft = None
-                ask = make_issue(e)
-            elif ch == "l":
-                keep(e, queue=False)
-                draft = None
-                note("lagret lokalt i innboksen")
-            elif ch == "t":
-                e["c"]["kind"] = "notat" if e["c"]["kind"] == "tiltak" else "tiltak"
-                cycle_area(e, 0)
-            elif ch in "oO":
-                cycle_area(e, 1 if ch == "o" else -1)
-            elif ch == "u":
-                cycle_section(e)
-            elif ch == "e":
-                draft = None
-                edit = ["nytt", e["raw"], classify_bg]
-            elif k == 27:
-                draft = None
-                note("forkastet")
-            continue
-        if detail:
-            if ch == "o" and cur:
-                k = ord("o")
-                detail = None
-            elif k in (27, 10, 13, ord("q")):
-                detail = None
+        msg = ""
+        t = items[sel] if items else None
+        if ch == "q" or k == 27:
+            if busy:
+                msg = "venter på ADO …"
                 continue
-            else:
-                detail = None
-        ncols = len(cols)
-        if ch == "q":
             return
-        elif ch in "123":
-            view = int(ch) - 1
-            col = 0
-        elif k == 9:
-            view = (view + 1) % 3
-            col = 0
-        elif k in (curses.KEY_RIGHT, ord("l")):
-            col = min(ncols - 1, col + 1)
-        elif k in (curses.KEY_LEFT, ord("h")):
-            col = max(0, col - 1)
         elif k in (curses.KEY_DOWN, ord("j")):
-            row[(view, col)] = row.get((view, col), 0) + 1
-            n = sum(1 for x in cols[min(col, ncols - 1)][1] if x.get("ref")) if cols else 0
-            row[(view, col)] = min(row[(view, col)], max(0, n - 1))
+            sel += 1
         elif k in (curses.KEY_UP, ord("k")):
-            row[(view, col)] = max(0, row.get((view, col), 0) - 1)
-        elif ch in ("n", "/", "i"):
-            edit = ["nytt", "", classify_bg]
+            sel -= 1
+        elif k == curses.KEY_NPAGE:
+            sel += room
+        elif k == curses.KEY_PPAGE:
+            sel -= room
+        elif t and ch == "x":
+            toggle(t)
+        elif t and ch == "d" and t["state"] != "Done":
+            doing(t)
+        elif t and ch in "uU":
+            shift(t, 1 if ch == "u" else -1)
+        elif t and ch == "o":
+            subprocess.Popen(["open", f"{ITEM}{t['id']}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         elif ch == "r":
-            d.ado_at = d.board_at = 0
-            wake.set()
-            note("oppdaterer …")
-        elif ch == "S":
-            sync()
-        elif ch in "[]" and d.board and d.board.pages:
-            ids = [p[0] for p in d.board.pages]
-            i = ids.index(d.board.page_id) if d.board.page_id in ids else len(ids) - 1
-            i = max(0, min(len(ids) - 1, i + (1 if ch == "]" else -1)))
-            d.page = None if i == len(ids) - 1 else ids[i]
-            d.board_at = 0
-            wake.set()
-            note(f"henter {d.board.pages[i][1]} …")
-        elif cur and k in (10, 13, curses.KEY_ENTER):
-            detail = detail_of(cur["ref"])
-        elif cur and ch == "o":
-            ref = cur["ref"]
-            url = (d.board.url(ref[1]["id"]) if ref[0] == "sticky" and d.board else
-                   f"{ITEM}{ref[1]['id']}" if ref[0] == "item" else
-                   f"{ITEM}{ref[1]['ado']}" if ref[1].get("ado") else
-                   d.board.url(ref[1]["figma"]) if d.board and ref[1].get("figma") and ":" in str(ref[1]["figma"]) else None)
-            if url:
-                subprocess.Popen(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:
-                note("ingen lenke ennå", True)
-        elif cur and ch in "<>" and cur["ref"][0] == "item":
-            move(cur["ref"][1], 1 if ch == ">" else -1)
-        elif cur and ch == "f" and cur["ref"][0] == "entry":
-            cur["ref"][1]["figma"] = "kø"
-            persist()
-            note("i kø for boardet (S for å synke)")
-        elif cur and ch == "a" and cur["ref"][0] == "entry":
-            e = cur["ref"][1]
-            if e.get("ado"):
-                note(f"har allerede ADO #{e['ado']}", True)
-            else:
-                ask = make_issue(e)
-        elif cur and ch == "x" and cur["ref"][0] == "entry":
-            e = cur["ref"][1]
-
-            def drop(e=e):
-                with lock:
-                    es.remove(e)
-                persist()
-                note("slettet fra innboksen (ikke fra board/ADO)")
-            ask = (f"Slett «{e['c']['tittel'][:50]}» fra innboksen?", drop)
-
-
-def cmd_live(a):
-    locale.setlocale(locale.LC_ALL, "")
-    os.environ.setdefault("ESCDELAY", "25")
-    curses.wrapper(tui, a)
+            def fn():
+                nonlocal items
+                fresh, _ = load_ado()
+                keep = [t for t in items if t["state"] == "Done"]
+                items = sorted(fresh + [t for t in keep if t["id"] not in {f["id"] for f in fresh}], key=sort_key)
+                return "oppdatert"
+            run("henter", fn)
 
 
 def main():
-    p = argparse.ArgumentParser(prog="ops", description="Operations-boardet og tiltakene i terminalen.")
+    p = argparse.ArgumentParser(prog="ops", description="Operations-møtet: boardet i FigJam, tiltakene i ADO.")
     sub = p.add_subparsers(dest="cmd")
-    sub.add_parser("ls", help="board og åpne tiltak, skrevet ut én gang")
-    ad = sub.add_parser("add", help="kategoriser ett innspill og lagre det i innboksen")
+    ne = sub.add_parser("neste", aliases=["ny"], help="før møtet: ny referat-side fra riktig mal, med tiltakslogg")
+    ne.add_argument("dato", nargs="?", help="møtedato, f.eks. «30. okt» (utelat for å regne den ut)")
+    ne.add_argument("--dry", action="store_true", help="vis planen, skriv ingenting")
+    ne.add_argument("-y", "--yes", action="store_true", help="ikke spør")
+    ad = sub.add_parser("add", help="nytt innspill: tiltak → ADO + sticky i Utfall, notat → sticky i Rapport")
     ad.add_argument("text", nargs="+")
-    ad.add_argument("-l", "--local", action="store_true", help="ikke legg i kø for boardet")
-    sy = sub.add_parser("sync", help="skriv innspill i kø til boardet som stickies")
-    sy.add_argument("--gammel", action="store_true", help="skriv selv om nyeste side er et møte som har vært")
-    ny = sub.add_parser("ny", help="åpne neste møte: ny referat-side fra riktig mal, med åpne tiltak")
-    ny.add_argument("dato", nargs="?", help="møtedato, f.eks. «23. okt» (utelat for å regne den ut)")
-    ny.add_argument("-y", "--yes", action="store_true", help="ikke spør før siden opprettes")
+    ad.add_argument("-t", "--tiltak", action="store_true", help="det er et tiltak, uansett hva modellen mener")
+    ad.add_argument("-n", "--notat", action="store_true", help="det er et notat")
+    ad.add_argument("--dry", action="store_true", help="bare vis sorteringen")
+    ad.add_argument("-y", "--yes", action="store_true", help="ikke spør")
+    lg = sub.add_parser("log", help="åpne tiltak etter frist: x løst, u +1 uke")
+    lg.add_argument("--ingen-board", action="store_true", help="ikke oppdater tiltaksloggen på boardet etterpå")
+    lu = sub.add_parser("lukk", help="etter møtet: Utfall → ADO, referat → epic, møtet lukkes")
+    lu.add_argument("dato", nargs="?", help="møtedato (utelat for siste møte som ikke er lukket)")
+    lu.add_argument("--dry", action="store_true", help="vis planen, skriv ingenting")
+    lu.add_argument("--igjen", action="store_true", help="lukk et møte som allerede er lukket på nytt")
+    lu.add_argument("-y", "--yes", action="store_true", help="ikke spør")
+    sub.add_parser("sync", help="skriv stickies som ligger i kø til siden for neste møte")
     a = p.parse_args()
-    {"ls": cmd_ls, "add": cmd_add, "sync": cmd_sync, "ny": cmd_ny}.get(a.cmd, cmd_live)(a)
+    if a.cmd is None:
+        a = p.parse_args(["log"])
+    {"neste": cmd_neste, "ny": cmd_neste, "add": cmd_add, "log": cmd_log, "lukk": cmd_lukk, "sync": cmd_sync}[a.cmd](a)
 
 
 if __name__ == "__main__":
