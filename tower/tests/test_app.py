@@ -409,3 +409,16 @@ async def test_utkast_feiler_og_avbrutt_utkast_tas_opp_ved_omstart(config):
         await a.agenter.ferdig()
         assert r.kall == [] and len(r.utkast_kall) == 1
         assert [(v.versjon, v.status) for v in a.db.versjoner(NORDLYS)] == [(1, "utdatert"), (2, "klart")]
+
+
+async def test_trådfil_borte_fjerner_raden(config):
+    a = app(config)
+    async with a.run_test() as pilot:
+        await a.poll()
+        await pilot.pause()
+        assert "mail:AAQkADMock-takk-passer" in a.tråder
+        (config.rot / "mail" / "AAQkADMock-takk-passer.json").unlink()
+        await a.poll()
+        await pilot.pause()
+        assert "mail:AAQkADMock-takk-passer" not in a.tråder
+        assert a.query_one(DataTable).row_count == len(a.tråder)

@@ -13,6 +13,8 @@ from tower.kanal import Kanal, Person
 STANDARD = {
     "meg": {"navn": "Sander Hurlen", "adresse": "sander@visense.no"},
     "kanaler": ["mail", "teams"],
+    "graph": [],
+    "synk_sekunder": 60,
     "dager": 7,
     "poll_sekunder": 2,
     "modell": "sonnet",
@@ -32,6 +34,8 @@ class Config:
     dager: int = 7  # Tråder eldre enn dette ved første syn blir `gammel`
     poll_sekunder: float = 2
     modell: str = "sonnet"  # for triage og utkast
+    graph: tuple[str, ...] = ()  # ekte Graph (`tower login`): svar blir utkast i Outlook, aldri sendt
+    synk_sekunder: float = 60
     kilder: tuple[Path, ...] = ()  # Utkast-agenten kan lese her (og i Kunnskapsbasen) ved regenerering med instruks
 
     @property
@@ -70,6 +74,8 @@ def last(rot: Path | None = None) -> Config:
         dager=int(data["dager"]),
         poll_sekunder=float(data["poll_sekunder"]),
         modell=str(data["modell"]),
+        graph=tuple(data["graph"]),
+        synk_sekunder=float(data["synk_sekunder"]),
         kilder=tuple(Path(k).expanduser() for k in data["kilder"]),
     )
 
@@ -84,9 +90,18 @@ def lag_kanaler(config: Config) -> list[Kanal]:
         katalog = config.rot / navn
         katalog.mkdir(parents=True, exist_ok=True)
         if navn == "mail":
-            kanaler.append(MailKanal(GraphFil(katalog, config.outbox), config.meg))
+            graph = None
+            if "mail" in config.graph:
+                from tower.graph import Graph
+                from tower.kanal.mail_graph import MailGraph
+
+                graph = MailGraph(Graph(), katalog)
+            kanaler.append(MailKanal(GraphFil(katalog, config.outbox), config.meg, graph, config.dager,
+                                     config.synk_sekunder))
         elif navn == "teams":
             kanaler.append(TeamsKanal(GraphFil(katalog, config.outbox), config.meg))
         else:
             raise ValueError(f"ukjent kanal i config: {navn}")
+    if ukjent := set(config.graph) - {"mail"}:
+        raise ValueError(f"graph støtter bare mail ennå, ikke: {', '.join(sorted(ukjent))}")
     return kanaler

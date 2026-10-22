@@ -38,6 +38,19 @@ class Tråd:
         return self.meldinger[-1]
 
 
+def kladdtekst(tekst: str) -> str:
+    """Tekst slik den sammenlignes med en Kladd: Outlook endrer linjeskift og blanke på slutten."""
+    return "\n".join(l.rstrip() for l in tekst.replace("\r\n", "\n").split("\n")).strip()
+
+
+@dataclass(frozen=True)
+class Kladd:
+    """Svar-alle-utkast i Outlook-kladdene: tower lager, erstatter og sletter dem, jeg sender selv."""
+    id: str
+    lenke: str
+    tekst: str  # bare svaret, uten sitert tråd, gjennom `kladdtekst`
+
+
 class Kanal(Protocol):
     navn: str
 
@@ -45,6 +58,28 @@ class Kanal(Protocol):
         """Tråder endret siden forrige kall, fullt innhold. Første kall gir alle."""
         ...
 
+    def fjernede(self) -> list[str]:
+        """Id-er til Tråder som er borte siden forrige `hent` (f.eks. slettet i Outlook)."""
+        ...
+
     async def svar(self, tråd_id: str, tekst: str) -> None:
         """Sender svar på Tråden. Kaster ved feil."""
+        ...
+
+
+class Kladder(Protocol):
+    """Kanaler med ekte Graph (`config.graph`): svar blir Kladder, aldri sendt herfra."""
+
+    async def lag_kladd(self, tråd_id: str, tekst: str) -> Kladd:
+        ...
+
+    async def slett_kladd(self, kladd_id: str) -> None:
+        """Borte allerede er ok."""
+        ...
+
+    def kladder(self) -> dict[str, Kladd] | None:
+        """Kladdene slik de var ved siste synk, eller None når de ikke er hentet på nytt siden forrige kall.
+
+        Hentes før meldingene: en kladd som er borte mens svaret ennå ikke synes, ser slettet ut én synk.
+        """
         ...

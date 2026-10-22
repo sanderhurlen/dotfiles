@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import html
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from tower.kanal import Melding, Person, Tråd
+from tower.kanal import Kladd, Melding, Person, Tråd, kladdtekst
 from tower.kanal.graph_fil import GraphFil
+from tower.kanal.mail_graph import MailGraph
 from tower.kanal.tekst import body_til_tekst
 
 NAVN = "mail"
@@ -59,16 +62,26 @@ def tråd_fra_graph(data: dict, meg: Person) -> Tråd | None:
 class MailKanal:
     navn = NAVN
 
-    def __init__(self, transport: GraphFil, meg: Person) -> None:
+    def __init__(self, transport: GraphFil, meg: Person, graph: MailGraph | None = None, dager: int = 7,
+                 synk_sekunder: float = 60) -> None:
         self.transport = transport
         self.meg = meg
+        self.graph = graph  # None: bare filene (mock)
+        self.dager = dager
+        self.synk_sekunder = synk_sekunder
+        self._neste_synk = 0.0
         self._filer: dict[str, Path] = {}
         self._siste: dict[str, dict] = {}
+        self._kladder: dict[str, Kladd] | None = None
 
     async def hent(self) -> list[Tråd]:
         return await asyncio.to_thread(self._hent)
 
     def _hent(self) -> list[Tråd]:
+        if self.graph and time.monotonic() >= self._neste_synk:
+            self._neste_synk = time.monotonic() + self.synk_sekunder
+            self._kladder = self.graph.kladder()  # før meldingene, se `Kladder.kladder`
+            self.graph.synk(self.dager)
         ut = []
         for sti, data in self.transport.endrede():
             tråd = tråd_fra_graph(data, self.meg)
@@ -79,10 +92,42 @@ class MailKanal:
             ut.append(tråd)
         return ut
 
+    def fjernede(self) -> list[str]:
+        borte = set(self.transport.fjernede())
+        ids = [id for id, sti in self._filer.items() if sti in borte]
+        for id in ids:
+            del self._filer[id]
+            getattr(self, "_siste", {}).pop(id, None)
+        return ids
+
+    def kladder(self) -> dict[str, Kladd] | None:
+        kladder, self._kladder = self._kladder, None
+        return kladder
+
+    async def lag_kladd(self, tråd_id: str, tekst: str) -> Kladd:
+        return await asyncio.to_thread(self._lag_kladd, tråd_id, tekst)
+
+    def _lag_kladd(self, tråd_id: str, tekst: str) -> Kladd:
+        if not self.graph:
+            raise RuntimeError("kladder krever ekte Graph")
+        if tråd_id not in self._filer:
+            raise KeyError(f"ukjent Tråd: {tråd_id}")
+        # Svar-alle på siste Melding. `comment` tolkes som HTML, så linjeskift må bli <br>.
+        m = self.graph.graph.kall("POST", f"/me/messages/{self._siste[tråd_id]['id']}/createReplyAll",
+                                  {"comment": html.escape(tekst).replace("\n", "<br>")})
+        return Kladd(m["id"], m.get("webLink") or "", kladdtekst(tekst))
+
+    async def slett_kladd(self, kladd_id: str) -> None:
+        if not self.graph:
+            raise RuntimeError("kladder krever ekte Graph")
+        await asyncio.to_thread(self.graph.slett, kladd_id)
+
     async def svar(self, tråd_id: str, tekst: str) -> None:
         await asyncio.to_thread(self._svar, tråd_id, tekst)
 
     def _svar(self, tråd_id: str, tekst: str) -> None:
+        if self.graph:
+            raise RuntimeError("ekte mail sendes aldri fra tower, bare som kladd")
         if tråd_id not in self._filer:
             raise KeyError(f"ukjent Tråd: {tråd_id}")
         mål = self._siste[tråd_id]

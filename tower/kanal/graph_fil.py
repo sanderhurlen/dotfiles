@@ -48,6 +48,13 @@ class GraphFil:
             ut.append((sti, data))
         return ut
 
+    def fjernede(self) -> list[Path]:
+        """Trådfiler sett av `endrede` som ikke finnes lenger."""
+        borte = [sti for sti in self._mtimes if not sti.exists()]
+        for sti in borte:
+            del self._mtimes[sti]
+        return borte
+
     def skriv_outbox(self, kanal: str, tråd_id: str, request: dict) -> Path:
         nå = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         trygg = re.sub(r"[^A-Za-z0-9._-]+", "_", tråd_id)

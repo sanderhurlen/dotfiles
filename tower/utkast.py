@@ -56,6 +56,9 @@ class Utkast:
     instruks: str | None = None  # regenereringsinstruks
     redigert: str | None = None  # min redigering; `tekst` beholdes som agenten skrev den (Kurator-diff)
     research: tuple[Research, ...] = ()
+    kladd: str | None = None  # Graph-id til Kladden i Outlook; satt = tower tror den finnes
+    lenke: str | None = None  # Kladdens webLink
+    kladd_tekst: str | None = None  # teksten Kladden hadde sist tower så den (endret der = min redigering)
 
     @property
     def gjeldende(self) -> str:

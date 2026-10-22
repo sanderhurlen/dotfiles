@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from tower.kanal import Tråd
+from tower.kanal import Kladd, Tråd
 from tower.kurator import KuratorJobb
 from tower.triage import Triage
 from tower.utkast import ÅPNE, FEILET, FORKASTET, GENERERER, KLART, SENDT, Research, Utkast
@@ -66,8 +66,10 @@ NYE_KOLONNER = {
     "triage_feil": "TEXT",
     "utsatt_til": "TEXT",  # ISO UTC, bare i `utsatt`
 }
-NYE_U_KOLONNER = {"redigert": "TEXT", "research": "TEXT"}  # research: JSON-liste av {faktum, kilde}
-U_KOLONNER = "trad, versjon, melding_id, status, tekst, sjekk, feil, instruks, redigert, research"
+NYE_U_KOLONNER = {"redigert": "TEXT", "research": "TEXT",  # research: JSON-liste av {faktum, kilde}
+                  "kladd": "TEXT", "lenke": "TEXT", "kladd_tekst": "TEXT"}  # Kladden i Outlook
+U_KOLONNER = ("trad, versjon, melding_id, status, tekst, sjekk, feil, instruks, redigert, research, kladd, lenke, "
+              "kladd_tekst")
 KOLONNER = ("id, kanal, status, siste_melding_id, kategori, haster, sammendrag, begrunnelse, triage_melding_id, "
             "triage_feil, utsatt_til")
 
@@ -134,9 +136,10 @@ def synlig(versjoner: list[Utkast]) -> tuple[Utkast | None, str | None]:
 
 
 def _utkast(r: tuple) -> Utkast:
-    trad, versjon, melding_id, status, tekst, sjekk, feil, instruks, redigert, research = r
+    trad, versjon, melding_id, status, tekst, sjekk, feil, instruks, redigert, research, kladd, lenke, kladd_tekst = r
     funn = tuple(Research(f["faktum"], f["kilde"]) for f in json.loads(research or "[]"))
-    return Utkast(trad, versjon, melding_id, status, tekst, tuple(json.loads(sjekk)), feil, instruks, redigert, funn)
+    return Utkast(trad, versjon, melding_id, status, tekst, tuple(json.loads(sjekk)), feil, instruks, redigert, funn,
+                  kladd, lenke, kladd_tekst)
 
 
 def ny_status(forrige: Rad | None, tråd: Tråd, nå: datetime, dager: int) -> str | None:
@@ -275,6 +278,50 @@ class Db:
             self.con.execute("UPDATE utkast SET status = ?, feil = NULL, endret = ? WHERE trad = ? AND versjon = ?",
                              (SENDT, nå.isoformat(), u.tråd_id, u.versjon))
             self._forkast(u.tråd_id, nå)
+        return self._versjon(u)
+
+    # Kladder i Outlook
+
+    def med_kladd(self, kanal: str) -> list[Utkast]:
+        """Versjoner tower tror har en Kladd i Outlook."""
+        return [_utkast(r) for r in self.con.execute(
+            f"SELECT {', '.join('u.' + k for k in U_KOLONNER.split(', '))} FROM utkast u "
+            "JOIN trad t ON t.id = u.trad WHERE t.kanal = ? AND u.kladd IS NOT NULL ORDER BY u.trad, u.versjon",
+            (kanal,))]
+
+    def lagre_kladd(self, u: Utkast, kladd: Kladd) -> Utkast:
+        with self.con:
+            self.con.execute("UPDATE utkast SET kladd = ?, lenke = ?, kladd_tekst = ? WHERE trad = ? AND versjon = ?",
+                             (kladd.id, kladd.lenke, kladd.tekst, u.tråd_id, u.versjon))
+        return self._versjon(u)
+
+    def fjern_kladd(self, u: Utkast) -> Utkast:
+        """Kladden er slettet (av tower eller i Outlook)."""
+        with self.con:
+            self.con.execute("UPDATE utkast SET kladd = NULL, lenke = NULL, kladd_tekst = NULL "
+                             "WHERE trad = ? AND versjon = ?", (u.tråd_id, u.versjon))
+        return self._versjon(u)
+
+    def kladd_endret(self, u: Utkast, tekst: str, nå: datetime) -> Utkast:
+        """Jeg redigerte Kladden i Outlook: teksten blir min redigering (eller agentens igjen, hvis lik den)."""
+        with self.con:
+            self.con.execute("UPDATE utkast SET redigert = ?, kladd_tekst = ?, endret = ? WHERE trad = ? AND versjon = ?",
+                             (None if tekst == u.tekst else tekst, tekst, nå.isoformat(), u.tråd_id, u.versjon))
+        return self._versjon(u)
+
+    def kladd_sendt(self, u: Utkast, nå: datetime) -> Utkast:
+        """Jeg sendte Kladden fra Outlook. Kurator-jobben `registrer` laget uten diff får versjonen og teksten."""
+        tekst = u.kladd_tekst if u.kladd_tekst is not None else u.gjeldende
+        with self.con:
+            self.con.execute(
+                "UPDATE utkast SET status = ?, feil = NULL, redigert = ?, kladd = NULL, kladd_tekst = NULL, "
+                "endret = ? WHERE trad = ? AND versjon = ?",
+                (SENDT, None if tekst == u.tekst else tekst, nå.isoformat(), u.tråd_id, u.versjon))
+            self._forkast(u.tråd_id, nå)
+            self.con.execute(
+                "UPDATE kurator SET sendt = ?, sendt_versjon = ?, endret = ? WHERE id = (SELECT MAX(id) FROM kurator "
+                "WHERE trad = ? AND sendt_versjon IS NULL AND status = ?)",
+                (tekst, u.versjon, nå.isoformat(), u.tråd_id, VENTER))
         return self._versjon(u)
 
     def lagre_sendefeil(self, u: Utkast, feil: str, nå: datetime) -> Utkast:

@@ -6,6 +6,7 @@ import asyncio
 import subprocess
 import sys
 import tempfile
+import webbrowser
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,7 +24,7 @@ from tower.agent import AgentFeil, Agenter, ClaudeRunner, Jobb, Runner
 from tower.config import Config
 from tower.db import AVVIST, BESVART, FEILET as K_FEILET, GAMMEL, UTSATT, VENTER, Db, Rad
 from tower.handlinger import UTSETT_VALG, editor_argv, første_plassholder, katalog_argv, utsett_til
-from tower.kanal import Kanal, Tråd
+from tower.kanal import Kanal, Kladd, Tråd, kladdtekst
 from tower.kunnskapsbase import oppslag
 from tower.kurator import KuratorJobb, commit_manuelt, kurater, sikre_repo, siste_commit, skriv_og_commit
 from tower.triage import triager
@@ -119,7 +120,7 @@ def utkast_merke(rad: Rad, jobb: str | None = None) -> str:
     if u.status == GENERERER:
         return "[magenta]✎ skriver…[/]" if jobb == "kjører" else "[dim]i kø[/]"
     return {
-        KLART: ("[red]✗ sending[/]" if u.feil else "[green]✔ klart[/]")
+        KLART: ("[red]✗ sending[/]" if u.feil else "[green]✔ i Outlook[/]" if u.kladd else "[green]✔ klart[/]")
         + (f" [dim]v{u.versjon}[/]" if u.versjon > 1 else ""),
         FEILET: "[red]✗ feilet[/]",
         UTDATERT: "[yellow]↻ utdatert[/]",
@@ -259,15 +260,22 @@ class Tower(App):
         Binding("r", "regenerer", "Regenerer"),
         Binding("a", "avvis", "Avvis"),
         Binding("u", "utsett", "Utsett"),
+        Binding("o", "åpne", "Åpne i Outlook"),
         Binding("k", "kunnskapsbase", "Kunnskapsbase"),
         Binding("q", "quit", "Avslutt"),
     ]
 
     def __init__(self, config: Config, kanaler: list[Kanal], db: Db, runner: Runner,
                  nå: Callable[[], datetime] = nå_utc, poll: bool = True,
-                 editor: Callable[[str], str | None] | None = None) -> None:
+                 editor: Callable[[str], str | None] | None = None,
+                 åpne: Callable[[str], object] = webbrowser.open) -> None:
         super().__init__()
         self.editor = editor or self.rediger_i_editor  # tekst inn, redigert tekst ut (None = avbrutt)
+        self.åpne = åpne  # lenke i nettleseren
+        self._kladd_lås = asyncio.Lock()  # Outlook-kladdene: én synk av gangen, inn eller ut
+        self._kladd_venter = False
+        self._hentet: set[str] = set()  # kanaler hentet minst én gang: før det er ingen Kladd uønsket
+        self._savnet: dict[str, int] = {}  # Kladd-id → synker på rad den har vært borte uten at Tråden er besvart
         self._hold: set[str] = set()  # Tråder med min redigering av et utdatert Utkast: ingen auto-utkast
         self._sender: set[str] = set()
         self.config = config
@@ -336,12 +344,21 @@ class Tower(App):
                     self.hentfeil[kanal.navn] = str(e) or type(e).__name__
                     continue
                 self.hentfeil.pop(kanal.navn, None)
+                self._hentet.add(kanal.navn)
+                for id in kanal.fjernede():  # slettet eller arkivert utenfor tower
+                    if self.tråder.pop(id, None):
+                        for nøkkel in (("triage", id), ("utkast", id)):
+                            if self.agenter.venter(nøkkel):
+                                self.agenter.avbryt(nøkkel)
+                        endret = True
                 nå = self.nå()
                 for t in tråder:
                     self.tråder[t.id] = t
                     self.rader[t.id] = self.db.registrer(t, nå, self.config.dager)
                     self.planlegg(t)
                     endret = True
+                if kanal.navn in self.config.graph and (kladder := kanal.kladder()) is not None:
+                    endret |= await self.kladder_inn(kanal, kladder)
             for id in self.db.vekk(self.nå()):  # utsatt-tiden er ute
                 self.rader[id] = self.db.rad(id)
                 if id in self.tråder:
@@ -351,6 +368,7 @@ class Tower(App):
                 self.tegn_tabell()
             self.planlegg_kurator()
             self.oppdater_status()
+            self.utløs_kladder()  # også når ingenting er endret: en feilet synk prøves igjen
         finally:
             self._poller = False
 
@@ -359,6 +377,90 @@ class Tower(App):
         while self._poller:
             await asyncio.sleep(0.01)
         await self.poll()
+
+    # Outlook-kladdene (kanaler i `config.graph`): ett Utkast klart = én Kladd, begge veier
+
+    def ønsket_kladd(self, tråd_id: str) -> Utkast | None:
+        """Versjonen som skal ligge i Outlook: siste klare, så lenge Tråden er aktiv eller utsatt.
+
+        Under regenerering står forrige versjon til den nye er klar; utdatert (ny Melding) slettes med en gang.
+        """
+        rad = self.rader.get(tråd_id)
+        if tråd_id not in self.tråder or rad is None or rad.status in (BESVART, GAMMEL, AVVIST):
+            return None
+        return next((v for v in reversed(self.db.versjoner(tråd_id)) if v.status == KLART), None)
+
+    async def kladder_inn(self, kanal: Kanal, kladder: dict[str, Kladd]) -> bool:
+        """Det jeg har gjort i Outlook: redigert (blir min redigering), sendt eller slettet (Tråden avvises).
+
+        Borte uten at svaret synes ennå kan være sending på vei: slettet først når den er borte to synker på rad.
+        """
+        endret = False
+        async with self._kladd_lås:
+            for u in self.db.med_kladd(kanal.navn):
+                if (k := kladder.get(u.kladd)) is not None:
+                    self._savnet.pop(u.kladd, None)
+                    if k.tekst != u.kladd_tekst:
+                        self.db.kladd_endret(u, k.tekst, self.nå())
+                        self.rader[u.tråd_id] = self.db.rad(u.tråd_id)
+                        endret = True
+                    continue
+                rad = self.rader.get(u.tråd_id)
+                if rad and rad.status == BESVART:
+                    self.db.kladd_sendt(u, self.nå())
+                else:
+                    self._savnet[u.kladd] = self._savnet.get(u.kladd, 0) + 1
+                    if self._savnet[u.kladd] < 2:
+                        continue
+                    ønsket = self.ønsket_kladd(u.tråd_id)
+                    self.db.fjern_kladd(u)
+                    if ønsket and ønsket.versjon == u.versjon:
+                        self._hold.discard(u.tråd_id)
+                        self.db.avvis(u.tråd_id, self.nå())
+                        if t := self.tråder.get(u.tråd_id):
+                            self.rader[t.id] = self.db.rad(t.id)
+                            self.planlegg(t)
+                            self.notify(f"Kladden til {motpart(t)} ble slettet i Outlook, tråden er avvist")
+                self._savnet.pop(u.kladd, None)
+                self.rader[u.tråd_id] = self.db.rad(u.tråd_id)
+                endret = True
+        return endret
+
+    def utløs_kladder(self) -> None:
+        if not self._kladd_venter and any(k.navn in self.config.graph for k in self.kanaler):
+            self._kladd_venter = True
+            self.run_worker(self.kladder_ut(), group="kladder", exit_on_error=False)
+
+    async def kladder_ut(self) -> None:
+        """Outlook følger tower: ønsket Kladd lages, alle andre slettes. Feil står i statuslinja til neste forsøk."""
+        async with self._kladd_lås:
+            self._kladd_venter = False
+            endret = False
+            for kanal in self.kanaler:
+                if kanal.navn not in self.config.graph or kanal.navn not in self._hentet:
+                    continue
+                feil_nøkkel = f"{kanal.navn} kladd"
+                try:
+                    for u in self.db.med_kladd(kanal.navn):
+                        ønsket = self.ønsket_kladd(u.tråd_id)
+                        if ønsket and ønsket.versjon == u.versjon and kladdtekst(ønsket.gjeldende) == u.kladd_tekst:
+                            continue
+                        await kanal.slett_kladd(u.kladd)
+                        self.db.fjern_kladd(u)
+                        self.rader[u.tråd_id] = self.db.rad(u.tråd_id)
+                        endret = True
+                    for tråd_id in [id for id, r in self.rader.items() if r.kanal == kanal.navn]:
+                        if (ønsket := self.ønsket_kladd(tråd_id)) and ønsket.kladd is None:
+                            self.db.lagre_kladd(ønsket, await kanal.lag_kladd(tråd_id, ønsket.gjeldende))
+                            self.rader[tråd_id] = self.db.rad(tråd_id)
+                            endret = True
+                except Exception as e:
+                    self.hentfeil[feil_nøkkel] = str(e) or type(e).__name__
+                else:
+                    self.hentfeil.pop(feil_nøkkel, None)
+            if endret:
+                self.tegn_tabell()
+            self.oppdater_status()
 
     def kunnskap(self, t: Tråd) -> str:
         return oppslag(self.config.kunnskapsbase, t, self.config.meg)
@@ -522,6 +624,7 @@ class Tower(App):
         if valgt in self.tråder:
             dt.move_cursor(row=dt.get_row_index(valgt), animate=False)
         self.vis_detalj()
+        self.utløs_kladder()  # tabellen tegnes etter hver endring i tower
 
     def valgt_id(self) -> str | None:
         try:
@@ -566,7 +669,7 @@ class Tower(App):
         u = rad.utkast
         w.update(innhold)
         w.border_title = "Utkast" + (f" v{u.versjon}" if u and u.status != GENERERER else "") + (
-            " · redigert" if u and u.redigert is not None else "")
+            " · redigert" if u and u.redigert is not None else "") + (" · i Outlook" if u and u.kladd else "")
         w.set_class(bool(u and u.status == KLART), "klart")
 
     # Handlinger
@@ -602,6 +705,9 @@ class Tower(App):
 
     def prøv_send(self, tråd_id: str) -> None:
         t, rad = self.tråder[tråd_id], self.rader[tråd_id]
+        if t.kanal in self.config.graph:
+            self.notify("Mail sendes fra Outlook, o åpner kladden", severity="warning")
+            return
         if grunn := self.ikke_klart(t, rad):
             self.notify(grunn, severity="warning")
             return
@@ -635,6 +741,16 @@ class Tower(App):
             self.gå_til(indeks)
         finally:
             self._sender.discard(t.id)
+
+    def action_åpne(self) -> None:
+        """Kladden i Outlook (under regenerering: forrige versjon sin)."""
+        if not (valgt := self.valgt()):
+            return
+        u = next((v for v in reversed(self.db.versjoner(valgt[0].id)) if v.kladd and v.lenke), None)
+        if u is None:
+            self.notify("Ingen kladd i Outlook for denne tråden", severity="warning")
+            return
+        self.åpne(u.lenke)
 
     def action_avvis(self) -> None:
         if not (valgt := self.valgt()) or valgt[1].status == AVVIST:
@@ -808,8 +924,14 @@ def main(argv: list[str] | None = None) -> None:
         from tower.mock import main as mock
 
         sys.exit(mock(argv[1:]))
+    if argv[:1] == ["login"]:
+        from tower.graph import Graph
+
+        Graph().login()
+        print("logget inn")
+        return
     if argv:
-        sys.exit(f"bruk: tower [mock …]\n(ukjent argument: {' '.join(argv)})")
+        sys.exit(f"bruk: tower [login | mock …]\n(ukjent argument: {' '.join(argv)})")
     config = cfg.last()
     db = Db(config.db)
     try:

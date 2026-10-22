@@ -6,7 +6,7 @@ from datetime import timedelta
 import pytest
 
 from tower.db import AVVIST, BESVART, GAMMEL, NY, TRIAGERT, UTSATT, Db, Rad, ny_status
-from tower.kanal import Melding, Person, Tråd
+from tower.kanal import Kladd, Melding, Person, Tråd
 from tower.tests.conftest import MEG, NÅ
 from tower.triage import Triage
 
@@ -185,3 +185,28 @@ def test_utsett_uten_triage_vekkes_som_ny_og_ny_melding_vekker_tidlig(tmp_path):
     rad = db.registrer(tråd(False, False), NÅ, 7)
     assert rad.status == NY and rad.utsatt_til is None
     assert db.vekk(NÅ + timedelta(days=2)) == []
+
+
+def test_kladd_redigert_i_outlook_og_sendt_gir_kurator_diff(tmp_path):
+    db = Db(tmp_path / "tower.db")
+    u = db.lagre_kladd(klart(db, False), Kladd("k1", "https://owa/k1", "Hei [[dato]]"))
+    assert [v.kladd for v in db.med_kladd("mail")] == ["k1"] and db.med_kladd("teams") == []
+    u = db.kladd_endret(u, "Hei 12. okt", NÅ)
+    assert (u.redigert, u.kladd_tekst) == ("Hei 12. okt", "Hei 12. okt")
+    assert db.kladd_endret(u, "Hei [[dato]]", NÅ).redigert is None  # tilbake til agentens tekst
+
+    db.kladd_endret(u, "Hei 12. okt", NÅ)
+    db.registrer(tråd(False, True), NÅ, 7)  # svaret ligger i Sendte elementer
+    [jobb] = db.kurator_jobber("venter")
+    assert jobb.sendt_versjon is None
+    u = db.kladd_sendt(db.versjoner("mail:x")[0], NÅ)
+    assert (u.status, u.gjeldende, u.kladd) == ("sendt", "Hei 12. okt", None)
+    [jobb] = db.kurator_jobber("venter")
+    assert (jobb.sendt_versjon, jobb.sendt) == (1, "Hei 12. okt")
+    assert db.med_kladd("mail") == []
+
+
+def test_fjern_kladd(tmp_path):
+    db = Db(tmp_path / "tower.db")
+    u = db.fjern_kladd(db.lagre_kladd(klart(db, False), Kladd("k1", "https://owa/k1", "Hei")))
+    assert (u.kladd, u.lenke, u.kladd_tekst, u.status) == (None, None, None, "klart")

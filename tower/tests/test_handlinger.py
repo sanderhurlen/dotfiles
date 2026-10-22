@@ -56,8 +56,9 @@ class App(Tower):
 
     def __init__(self, config, runner=None, editor=None, kanaler=None):
         self.klokke = NÅ
+        self.åpnet: list[str] = []
         super().__init__(config, kanaler or lag_kanaler(config), Db(config.db), runner or FalskRunner(bare_nordlys),
-                         nå=lambda: self.klokke, poll=False, editor=editor)
+                         nå=lambda: self.klokke, poll=False, editor=editor, åpne=self.åpnet.append)
         self.varsler: list[tuple[str, str]] = []
 
     def notify(self, melding, *, severity="information", **kw):
@@ -117,6 +118,9 @@ async def test_send_feiler_lar_utkastet_stå_med_feil(config):
 
         async def hent(self):
             return await self.ekte.hent()
+
+        def fjernede(self):
+            return self.ekte.fjernede()
 
         async def svar(self, tråd_id, tekst):
             if self.feil:

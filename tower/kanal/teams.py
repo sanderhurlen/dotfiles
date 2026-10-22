@@ -85,6 +85,14 @@ class TeamsKanal:
             ut.append(tråd)
         return ut
 
+    def fjernede(self) -> list[str]:
+        borte = set(self.transport.fjernede())
+        ids = [id for id, sti in self._filer.items() if sti in borte]
+        for id in ids:
+            del self._filer[id]
+            getattr(self, "_siste", {}).pop(id, None)
+        return ids
+
     async def svar(self, tråd_id: str, tekst: str) -> None:
         await asyncio.to_thread(self._svar, tråd_id, tekst)
 
