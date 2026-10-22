@@ -12,6 +12,7 @@
 #                              kind. Without text: type one innspill after another, the queue shows
 #   ops kø [--igjen]           the queue and how far each innspill has come; --igjen retries errors
 #   ops log                    the open tiltak by due date: x = løst, u = +1 uke
+#   ops åpne (o)               open the next meeting's page on the board
 #   ops lukk [dato] [--dry]    after the meeting: Utfall stickies without #id become Issues, the
 #                              rest becomes the referat in the epic, and the meeting is closed
 #
@@ -1208,6 +1209,24 @@ def cmd_neste(a):
         print(f"{len(queued)} sticky(er) fra køen skrives i bakgrunnen — `ops kø`")
 
 
+# ── åpne ────────────────────────────────────────────────────────────────────
+
+
+def cmd_apne(a):
+    try:
+        ctx = Ctx(need_board=False)
+    except RuntimeError as e:
+        die(str(e))
+    if ctx.board_err:
+        die(ctx.board_err)
+    page = ctx.page_for(ctx.next)
+    if not page:
+        print(yellow(f"ingen side for {day(ctx.next)} ennå — `ops neste` lager den; åpner boardet"), file=sys.stderr)
+    url = f"{BOARD}?node-id={page[0].replace(':', '-')}" if page else BOARD
+    print(f"{bold(page[1]) if page else 'Operations'}  {dim(url)}")
+    subprocess.Popen(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 # ── lukk ────────────────────────────────────────────────────────────────────
 
 
@@ -1504,13 +1523,14 @@ def main():
     lu.add_argument("--dry", action="store_true", help="vis planen, skriv ingenting")
     lu.add_argument("--igjen", action="store_true", help="lukk et møte som allerede er lukket på nytt")
     lu.add_argument("-y", "--yes", action="store_true", help="ikke spør")
+    sub.add_parser("åpne", aliases=["o"], help="åpne siden for neste møte på boardet")
     sub.add_parser("sync", help="samme som `ops kø --igjen`")
     sub.add_parser("_worker")
     a = p.parse_args()
     if a.cmd is None:
         a = p.parse_args(["log"])
     {"neste": cmd_neste, "ny": cmd_neste, "add": cmd_add, "log": cmd_log, "lukk": cmd_lukk, "sync": cmd_sync,
-     "kø": cmd_ko, "_worker": cmd_worker}[a.cmd](a)
+     "kø": cmd_ko, "åpne": cmd_apne, "o": cmd_apne, "_worker": cmd_worker}[a.cmd](a)
 
 
 if __name__ == "__main__":
