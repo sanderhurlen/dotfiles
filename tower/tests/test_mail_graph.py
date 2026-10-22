@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import urllib.parse
 from datetime import datetime, timezone
 
 import pytest
@@ -43,6 +44,10 @@ class FalskGraph:
         if path.startswith("/me/mailFolders/drafts/messages"):
             assert "uniqueBody" in path and "text" in headers["Prefer"]
             return self.kladder
+        if path.startswith("/me/mailFolders/inbox/messages?$filter="):
+            samtale = urllib.parse.unquote(path.split("=", 1)[1].split("&")[0]).split("'")[1]
+            return [{"id": m["id"], "isRead": m.get("isRead", False)} for m in self.meldinger
+                    if m["parentFolderId"] == "INN" and m["conversationId"] == samtale]
         if path.startswith("/me/mailFolders/inbox/messages"):
             return [{"conversationId": m["conversationId"]} for m in self.meldinger if m["parentFolderId"] == "INN"]
         assert "$filter=receivedDateTime%20ge%20" in path
@@ -121,3 +126,23 @@ def test_eldre_tråd_i_innboksen_beholdes(tmp_path):
         [{"conversationId": "A"}] if "inbox/messages" in path else [])  # utenfor vinduet, men fortsatt i innboksen
     mg.synk(7, NÅ)
     assert (tmp_path / "A.json").exists()
+
+
+async def test_arkiver_markerer_lest_og_flytter_til_slettede(tmp_path):
+    graph = FalskGraph([
+        melding("a1", "A", "INN"),
+        melding("a2", "A", "INN", isRead=True, tid="2026-10-22T09:00:00Z"),
+        melding("a3", "A", "SENDT", fra=MEG.adresse),  # ikke i innboksen: blir der den er
+        melding("b1", "B", "INN"),
+    ])
+    (tmp_path / "mail").mkdir()
+    kanal = MailKanal(GraphFil(tmp_path / "mail", tmp_path / "outbox"), MEG, MailGraph(graph, tmp_path / "mail"))
+    await kanal.hent()
+    graph.kall_logg.clear()
+    await kanal.arkiver("mail:A")
+    assert graph.kall_logg == [
+        ("PATCH", "/me/messages/a1", {"isRead": True}),
+        ("POST", "/me/messages/a1/move", {"destinationId": "deleteditems"}),
+        ("POST", "/me/messages/a2/move", {"destinationId": "deleteditems"}),
+    ]
+    assert kanal.fjernede() == ["mail:A"]

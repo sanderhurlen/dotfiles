@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -121,6 +122,29 @@ class MailKanal:
         if not self.graph:
             raise RuntimeError("kladder krever ekte Graph")
         await asyncio.to_thread(self.graph.slett, kladd_id)
+
+    async def arkiver(self, tråd_id: str) -> None:
+        await asyncio.to_thread(self._arkiver, tråd_id)
+
+    def _arkiver(self, tråd_id: str) -> None:
+        if self.graph:
+            self.graph.arkiver(tråd_id.removeprefix(f"{NAVN}:"))
+            return
+        if tråd_id not in self._filer:
+            raise KeyError(f"ukjent Tråd: {tråd_id}")
+        # Mock: requestene som én Graph-batch i outbox, og samtalen er borte fra innboksen.
+        sti = self._filer[tråd_id]
+        requests = []
+        for m in json.loads(sti.read_text())["value"]:
+            requests += [{"method": "PATCH", "url": f"/me/messages/{m['id']}", "body": {"isRead": True}},
+                         {"method": "POST", "url": f"/me/messages/{m['id']}/move",
+                          "body": {"destinationId": "deleteditems"}}]
+        for i, r in enumerate(requests, 1):
+            r["id"] = str(i)
+            r["headers"] = {"Content-Type": "application/json"}
+        self.transport.skriv_outbox(NAVN, tråd_id, {"method": "POST", "path": "/$batch",
+                                                   "body": {"requests": requests}})
+        sti.unlink(missing_ok=True)
 
     async def svar(self, tråd_id: str, tekst: str) -> None:
         await asyncio.to_thread(self._svar, tråd_id, tekst)

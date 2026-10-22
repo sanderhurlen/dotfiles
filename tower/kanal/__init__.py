@@ -67,6 +67,14 @@ class Kanal(Protocol):
         ...
 
 
+class Arkiv(Protocol):
+    """Kanaler med innboks (mail): arkivert er lest og flyttet til Slettede elementer."""
+
+    async def arkiver(self, tråd_id: str) -> None:
+        """Tråden ut av innboksen. Kaster ved feil."""
+        ...
+
+
 class Kladder(Protocol):
     """Kanaler med ekte Graph (`config.graph`): svar blir Kladder, aldri sendt herfra."""
 

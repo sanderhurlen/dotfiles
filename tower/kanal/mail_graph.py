@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -56,6 +57,17 @@ class MailGraph:
         except GraphFeil as e:
             if "Graph 404" not in str(e):
                 raise
+
+    def arkiver(self, samtale: str) -> int:
+        """Samtalen ut av innboksen: hver Melding lest, så til Slettede elementer. Gir antall flyttet."""
+        filter_ = urllib.parse.quote("conversationId eq '" + samtale.replace("'", "''") + "'")
+        meldinger = self.graph.alle(f"/me/mailFolders/inbox/messages?$filter={filter_}&$select=id,isRead")
+        for m in meldinger:
+            if not m.get("isRead"):
+                self.graph.kall("PATCH", f"/me/messages/{m['id']}", {"isRead": True})
+            self.graph.kall("POST", f"/me/messages/{m['id']}/move", {"destinationId": "deleteditems"})
+        (self.katalog / _filnavn(samtale)).unlink(missing_ok=True)
+        return len(meldinger)
 
     def synk(self, dager: int, nå: datetime | None = None) -> int:
         """Skriver endrede samtaler. Gir antall filer skrevet."""

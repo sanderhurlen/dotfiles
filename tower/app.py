@@ -260,6 +260,8 @@ class Tower(App):
         Binding("r", "regenerer", "Regenerer"),
         Binding("a", "avvis", "Avvis"),
         Binding("u", "utsett", "Utsett"),
+        Binding("space", "merk", "Merk"),
+        Binding("x", "arkiver", "Arkiver"),
         Binding("o", "åpne", "Åpne i Outlook"),
         Binding("k", "kunnskapsbase", "Kunnskapsbase"),
         Binding("q", "quit", "Avslutt"),
@@ -278,6 +280,8 @@ class Tower(App):
         self._savnet: dict[str, int] = {}  # Kladd-id → synker på rad den har vært borte uten at Tråden er besvart
         self._hold: set[str] = set()  # Tråder med min redigering av et utdatert Utkast: ingen auto-utkast
         self._sender: set[str] = set()
+        self.merket: set[str] = set()  # Tråder merket for arkivering
+        self._taster: tuple | None = None  # siste check_action for merk/arkiver
         self.config = config
         self.kanaler = kanaler
         self.db = db
@@ -346,11 +350,7 @@ class Tower(App):
                 self.hentfeil.pop(kanal.navn, None)
                 self._hentet.add(kanal.navn)
                 for id in kanal.fjernede():  # slettet eller arkivert utenfor tower
-                    if self.tråder.pop(id, None):
-                        for nøkkel in (("triage", id), ("utkast", id)):
-                            if self.agenter.venter(nøkkel):
-                                self.agenter.avbryt(nøkkel)
-                        endret = True
+                    endret |= self.glem(id)
                 nå = self.nå()
                 for t in tråder:
                     self.tråder[t.id] = t
@@ -371,6 +371,16 @@ class Tower(App):
             self.utløs_kladder()  # også når ingenting er endret: en feilet synk prøves igjen
         finally:
             self._poller = False
+
+    def glem(self, id: str) -> bool:
+        """Tråden er borte fra innboksen: ut av tabellen, ventende agenter avbrytes."""
+        self.merket.discard(id)
+        if self.tråder.pop(id, None) is None:
+            return False
+        for nøkkel in (("triage", id), ("utkast", id)):
+            if self.agenter.venter(nøkkel):
+                self.agenter.avbryt(nøkkel)
+        return True
 
     async def poll_nå(self) -> None:
         """Poll med en gang, etter en eventuell poll som allerede går."""
@@ -618,13 +628,17 @@ class Tower(App):
         for t in self.sortert():
             rad = self.rader[t.id]
             dim = "[dim]" if rad.status in FERDIG else ""
-            dt.add_row(KANAL_IKON.get(t.kanal, "?"), dim + escape(motpart(t)), dim + escape(emne_kort(t)),
+            dt.add_row(KANAL_IKON.get(t.kanal, "?"), self.fra_celle(t), dim + escape(emne_kort(t)),
                        triage_merke(rad, self.jobb_status(t.id)),
                        utkast_merke(rad, self.jobb_status(t.id, "utkast")), alder(t.siste.tid, nå), key=t.id)
         if valgt in self.tråder:
             dt.move_cursor(row=dt.get_row_index(valgt), animate=False)
         self.vis_detalj()
         self.utløs_kladder()  # tabellen tegnes etter hver endring i tower
+
+    def fra_celle(self, t: Tråd) -> str:
+        merke = "[b yellow]●[/] " if t.id in self.merket else ""
+        return merke + ("[dim]" if self.rader[t.id].status in FERDIG else "") + escape(motpart(t))
 
     def valgt_id(self) -> str | None:
         try:
@@ -637,6 +651,7 @@ class Tower(App):
 
     @on(DataTable.RowHighlighted)
     def vis_detalj(self, *_) -> None:
+        self.oppdater_taster()
         t = self.tråder.get(self.valgt_id() or "")
         if not t:
             return
@@ -780,6 +795,73 @@ class Tower(App):
 
         self.push_screen(UtsettValg(), valgt_tid)
 
+    def kan_arkiveres(self, t: Tråd) -> bool:
+        """Bare kanaler med innboks (mail). Teams-chatter har ingenting å rydde."""
+        return any(k.navn == t.kanal and hasattr(k, "arkiver") for k in self.kanaler)
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        """Merk og arkiver er grået ut på rader som ikke kan arkiveres."""
+        if action not in ("merk", "arkiver"):
+            return True
+        if action == "arkiver" and self.merket:
+            return True
+        valgt = self.valgt()
+        return True if valgt and self.kan_arkiveres(valgt[0]) else None
+
+    def oppdater_taster(self) -> None:
+        """Footeren tegnes på nytt bare når merk/arkiver skifter mellom tilgjengelig og grået ut."""
+        tilstand = tuple(self.check_action(a, ()) for a in ("merk", "arkiver"))
+        if tilstand != self._taster and self.screen_stack:  # skjermen kan være revet ned
+            self._taster = tilstand
+            self.refresh_bindings()
+
+    def action_merk(self) -> None:
+        """Merker raden for arkivering (eller fjerner merket) og går til neste."""
+        if not (valgt := self.valgt()) or not self.kan_arkiveres(valgt[0]):
+            return
+        t = valgt[0]
+        self.merket ^= {t.id}
+        dt = self.query_one(DataTable)
+        dt.update_cell(t.id, "fra", self.fra_celle(t))
+        self.gå_til(dt.cursor_row + 1)
+        self.oppdater_taster()
+        self.oppdater_status()
+
+    def action_arkiver(self) -> None:
+        """Merkede Tråder, ellers den valgte: lest og flyttet til Slettede elementer."""
+        ids = [t.id for t in self.sortert() if t.id in self.merket]
+        if not ids and (valgt := self.valgt()) and self.kan_arkiveres(valgt[0]):
+            ids = [valgt[0].id]
+        if ids:
+            self.run_worker(self.arkiver(ids), group="arkiver", exit_on_error=False)
+
+    async def arkiver(self, ids: list[str]) -> None:
+        kanaler = {k.navn: k for k in self.kanaler}
+        indeks, valgt = self.query_one(DataTable).cursor_row, self.valgt_id()
+        arkivert, feil = 0, []
+        for id in ids:
+            if (t := self.tråder.get(id)) is None:
+                continue
+            if not hasattr(kanal := kanaler.get(t.kanal), "arkiver"):
+                feil.append(f"{motpart(t)}: {t.kanal} kan ikke arkiveres")
+                continue
+            try:
+                await kanal.arkiver(id)
+            except Exception as e:
+                feil.append(f"{motpart(t)}: {str(e) or type(e).__name__}")
+                continue
+            self.glem(id)
+            arkivert += 1
+        if arkivert:
+            self.tegn_tabell()  # markøren blir på valgt rad, eller samme plass når den ble arkivert
+            if valgt not in self.tråder:
+                self.gå_til(indeks)
+            self.notify(f"{arkivert} tråd{'er' if arkivert > 1 else ''} arkivert")
+        if feil:
+            self.notify("Arkivering feilet:\n" + "\n".join(escape(f) for f in feil), severity="error", timeout=10)
+        self.oppdater_taster()
+        self.oppdater_status()
+
     async def action_rediger(self) -> None:
         if not (valgt := self.valgt()):
             return
@@ -905,15 +987,17 @@ class Tower(App):
             deler.append(f"[magenta]{SPINNER[self._tikk % len(SPINNER)]}[/] {escape(' · '.join(kjører))}{kø}")
         elif not deler:
             deler.append("[dim]agenter i ro[/]")
-        aktive = sum(1 for r in self.rader.values() if r.status not in FERDIG)
-        klare = sum(1 for r in self.rader.values() if r.status not in FERDIG and r.utkast and r.utkast.status == KLART)
+        rader = [r for id, r in self.rader.items() if id in self.tråder]  # arkiverte har fortsatt rad i Db
+        aktive = sum(1 for r in rader if r.status not in FERDIG)
+        klare = sum(1 for r in rader if r.status not in FERDIG and r.utkast and r.utkast.status == KLART)
+        merket = f"   [dim]│[/]  [b yellow]● {len(self.merket)} merket[/]" if self.merket else ""
         kb = ""
         if self.kb_siste:
             emne, tid = self.kb_siste
             kb = f"   [dim]│  kb: {escape(emne.removeprefix('kurator: ')[:30])} {alder(tid, self.nå())}[/]"
         self.query_one("#status", Static).update(
             f"{'  '.join(deler)}   [dim]│[/]  {aktive} tråder venter   [dim]│[/]  {klare} utkast klare"
-            f"   [dim]│[/]  ${self.kost:.3f} i dag{kb}")
+            f"{merket}   [dim]│[/]  ${self.kost:.3f} i dag{kb}")
 
 
 def main(argv: list[str] | None = None) -> None:

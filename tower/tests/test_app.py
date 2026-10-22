@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 
@@ -422,3 +423,59 @@ async def test_trådfil_borte_fjerner_raden(config):
         await pilot.pause()
         assert "mail:AAQkADMock-takk-passer" not in a.tråder
         assert a.query_one(DataTable).row_count == len(a.tråder)
+
+
+async def test_merk_og_arkiver(config):
+    a = app(config)
+    async with a.run_test(size=(160, 40)) as pilot:
+        await a.poll()
+        await pilot.pause()
+        første, andre, tredje = (t.id for t in a.sortert()[:3])
+        await pilot.press("space", "space")
+        assert a.merket == {første, andre} and a.valgt_id() == tredje
+        assert "● 2 merket" in tekst(a, "#status")
+        await pilot.press("x")
+        await a.workers.wait_for_complete()
+        await pilot.pause()
+        assert første not in a.tråder and andre not in a.tråder and not a.merket
+        assert a.valgt_id() == tredje
+        batcher = [json.loads(p.read_text()) for p in sorted(config.outbox.glob("*.json"))]
+        assert [b["path"] for b in batcher] == ["/$batch", "/$batch"]
+        assert {r["url"] for b in batcher for r in b["body"]["requests"] if r["method"] == "PATCH"}
+        assert all(r["body"] == {"destinationId": "deleteditems"} for b in batcher for r in b["body"]["requests"]
+                   if r["method"] == "POST")
+
+        await pilot.press("x")  # ingen merket: den valgte
+        await a.workers.wait_for_complete()
+        await pilot.pause()
+        assert tredje not in a.tråder
+
+        await a.poll()  # filene er borte: ingenting kommer tilbake
+        await pilot.pause()
+        assert {første, andre, tredje}.isdisjoint(a.tråder)
+        assert a.query_one(DataTable).row_count == len(a.tråder)
+
+
+async def test_teams_kan_ikke_merkes_eller_arkiveres(config):
+    config = dataclasses.replace(config, kanaler=("mail", "teams"))
+    a = app(config)
+    async with a.run_test(size=(160, 40)) as pilot:
+        await a.poll()
+        await pilot.pause()
+        teams = next(t for t in a.sortert() if t.kanal == "teams")
+        mail = next(t for t in a.sortert() if t.kanal == "mail")
+        velg(a, teams.id)
+        await pilot.pause()
+        assert a.check_action("merk", ()) is None and a.check_action("arkiver", ()) is None
+        await pilot.press("space", "x")
+        await a.workers.wait_for_complete()
+        assert not a.merket and teams.id in a.tråder
+
+        velg(a, mail.id)
+        await pilot.press("space")
+        velg(a, teams.id)
+        await pilot.pause()
+        assert a.check_action("arkiver", ()) is True  # det merkede arkiveres, uansett valgt rad
+        await pilot.press("x")
+        await a.workers.wait_for_complete()
+        assert mail.id not in a.tråder and teams.id in a.tråder
