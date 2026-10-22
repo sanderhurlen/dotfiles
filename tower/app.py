@@ -55,6 +55,14 @@ def alder(tid: datetime, nå: datetime) -> str:
     return f"{min_ // (24 * 60)}d"
 
 
+def macos_varsel(tittel: str, undertittel: str, tekst: str) -> None:
+    """Notification Center via osascript, uten å vente på det."""
+    subprocess.Popen(["osascript", "-e", "on run argv", "-e",
+                      "display notification (item 3 of argv) with title (item 1 of argv) subtitle (item 2 of argv)",
+                      "-e", "end run", tittel, undertittel, tekst],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def motpart(t: Tråd) -> str:
     m = next((m for m in reversed(t.meldinger) if not m.fra_meg), t.siste)
     return m.fra.navn
@@ -275,10 +283,12 @@ class Tower(App):
                  nå: Callable[[], datetime] = nå_utc, poll: bool = True,
                  editor: Callable[[str], str | None] | None = None,
                  åpne: Callable[[str], object] = webbrowser.open,
-                 kopier: Callable[[str], object] | None = None) -> None:
+                 kopier: Callable[[str], object] | None = None,
+                 varsle: Callable[[str, str, str], object] = lambda *_: None) -> None:
         super().__init__()
         self.editor = editor or self.rediger_i_editor  # tekst inn, redigert tekst ut (None = avbrutt)
         self.åpne = åpne  # lenke i nettleseren
+        self.varsle = varsle  # (tittel, undertittel, tekst) når triagen sier haster
         self.kopier = kopier or (lambda tekst: subprocess.run(["pbcopy"], input=tekst.encode(), check=True))
         self._kladd_lås = asyncio.Lock()  # Outlook-kladdene: én synk av gangen, inn eller ut
         self._kladd_venter = False
@@ -558,6 +568,11 @@ class Tower(App):
             self.rader[t.id] = rad
         if self._triage_for.get(t.id) == t.siste.id:
             del self._triage_for[t.id]
+        if rad and rad.triage and rad.triage.haster and rad.status not in FERDIG:
+            try:
+                self.varsle("tower: haster", f"{motpart(t)} · {t.emne}", rad.triage.sammendrag)
+            except Exception:  # varselet er pynt, triagen står uansett
+                pass
         if rad:
             self.foreslå(self.tråder.get(t.id, t))
             self.planlegg(self.tråder.get(t.id, t))  # svar → utkast
@@ -1085,6 +1100,7 @@ def main(argv: list[str] | None = None) -> None:
     config = cfg.last()
     db = Db(config.db)
     try:
-        Tower(config, cfg.lag_kanaler(config), db, ClaudeRunner(config.modell, config.agent_cwd)).run()
+        Tower(config, cfg.lag_kanaler(config), db, ClaudeRunner(config.modell, config.agent_cwd),
+              varsle=macos_varsel).run()
     finally:
         db.lukk()

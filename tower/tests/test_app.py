@@ -170,6 +170,21 @@ async def test_triage_sorterer_og_vises(config):
         assert "agenter i ro" in status and "$0.110 i dag" in status  # 7 triage + 4 utkast
 
 
+async def test_haster_gir_varsel_én_gang(config):
+    varsler = []
+    a = app(config, FalskRunner(triage_etter_emne), varsle=lambda *v: varsler.append(v))
+    async with a.run_test(size=(160, 40)) as pilot:
+        await a.poll()
+        await a.agenter.ferdig()
+        await pilot.pause()
+        [(tittel, undertittel, tekst)] = varsler
+        assert tittel == "tower: haster" and "URGENT: API returning 500" in undertittel
+        assert tekst == "Om URGENT: API returning 500 errors since 07:00"
+        await a.poll()  # ingen ny Melding: ingen ny triage, ikke noe nytt varsel
+        await a.agenter.ferdig()
+        assert len(varsler) == 1
+
+
 async def test_besvart_og_gammel_triageres_ikke(config):
     from dataclasses import replace
 

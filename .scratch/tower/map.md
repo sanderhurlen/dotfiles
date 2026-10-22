@@ -44,13 +44,20 @@ Label: wayfinder:map
 - [Regenerer med instruks og Research](issues/16-regenerer-research.md): bygd (`3e27107`); `r` → instruks-prompt, `Verktøy` på runneren; deny-mønstre må være absolutte (`//**/…`); mislykket regenerering lar forrige klare versjon stå (`Rad.regenerering_feil`)
 - [Kurator](issues/17-kurator.md): bygd (`f8dc649`); kø per besvart Melding (send og poll dedupes), egen `Agenter(1)`, bare gyldige KB-stier, forfatter `tower kurator`; feilede jobber prøves igjen ved oppstart
 
+Etter v1 (uten egne issues, se commitene):
+
+- Ekte mail: bygd (`00df163`); `tower login` (PKCE, app-reg `sander-cli`), `config.graph`; `MailGraph.synk` → trådfiler, klart Utkast = Outlook-kladd begge veier, `o` åpner kladden. Aldri `Mail.Send`, `Graph.kall` sperrer send-stier
+- Arkivering og rydd: bygd (`36877a5`, `9b1c34d`); `space`/`x` merker og arkiverer mail (lest → Slettede elementer), triagen foreslår rydd og forhåndsmerker; logg per avsender
+- `login --ved-behov`: bygd (`6dd4921`); nytt token også når `SCOPES` endres (lagres i `token.json`)
+- Ekte Teams-chatter: bygd (`c454920`); `Chat.Read`, `TeamsGraph.synk` (1:1 + grupper med aktivitet siste `dager`, meldinger bare ved ny siste melding); ingen kladder i Teams: `c` kopierer Utkastet, `o` åpner chatten, tower sender aldri (sperret i `Graph.kall`); besvarte Teams-tråder skjules; historikk nyeste øverst
+- Haster-varsel: macOS-varsel (osascript) når triagen sier haster, én gang per Melding
+
 ## Not yet specified
 
 _(tomt: veien er kartlagt, resten er task-tickets)_
 
 ## Out of scope
 
-- Teams-kanalmeldinger (`ChannelMessage.Read.All` krever admin-consent): bare chats i v1. Se [Hvilke Graph-felt må mock-formatet speile?](issues/01-graph-meldingsform.md).
-- Ekte Graph-integrasjon (mail/Teams): mangler tilgang. Bare sømmen er med.
-- Bakgrunnsdaemon (launchd), varsler, flere brukere, vedlegg i svar, kalenderinvitasjoner: ute av v1 (valgt ved charting).
+- Teams-kanalmeldinger (`ChannelMessage.Read.All` krever admin-consent): bare chats. Møtechatter er også utelatt. Se [Hvilke Graph-felt må mock-formatet speile?](issues/01-graph-meldingsform.md).
+- Bakgrunnsdaemon (launchd), flere brukere, vedlegg i svar, kalenderinvitasjoner: ute av v1 (valgt ved charting).
 - Bla/søk i Kunnskapsbasen inne i TUI-en: v1 åpner den i $EDITOR. Se [Hvordan deles byggingen av v1 i task-tickets?](issues/09-bygg-slicing.md).
