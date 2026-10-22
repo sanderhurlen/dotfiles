@@ -5,9 +5,12 @@
 #
 #   ops neste [dato] [--dry]   before the meeting: clone the right template as «Referat <dato>»,
 #                              fill its tiltakslogg with the open tiltak, create the meeting epic
-#   ops add "<tekst>"          any time: Haiku sorts the line into a tema; a tiltak becomes an ADO
-#                              Issue right away, and either kind lands on the board as a sticky
-#                              (tiltak in the tema's Utfall, notat in its Rapport)
+#   ops add ["<tekst>"]        any time: the line goes in a queue and ops returns at once; a worker
+#                              in the background has Haiku sort it into a tema, makes a tiltak an
+#                              ADO Issue, and puts either kind on the board as a sticky (tiltak in
+#                              the tema's Utfall, notat in its Rapport). «t: …» / «n: …» force the
+#                              kind. Without text: type one innspill after another, the queue shows
+#   ops kø [--igjen]           the queue and how far each innspill has come; --igjen retries errors
 #   ops log                    the open tiltak by due date: x = løst, u = +1 uke
 #   ops lukk [dato] [--dry]    after the meeting: Utfall stickies without #id become Issues, the
 #                              rest becomes the referat in the epic, and the meeting is closed
@@ -18,8 +21,8 @@
 # Each tema on a referat page holds a Rapport and an Utfall section. A sticky with «#1234»
 # is tiltak 1234 in ADO; lukk skips those, log turns them green when they're done.
 # The meeting epic «Operations-møte <dato>» is closed for writing once lukk has written its
-# referat (LUKKET marker); add then targets the next meeting, and waits in a queue until
-# `ops neste` has made its page.
+# referat (LUKKET marker); add then targets the next meeting, and its stickies wait in the
+# queue until `ops neste` has made that page.
 #
 # Reading the board needs a Figma personal access token (file_content:read), in
 # FIGMA_TOKEN or the keychain:
@@ -33,6 +36,8 @@
 import argparse
 import curses
 import datetime
+import concurrent.futures
+import fcntl
 import difflib
 import html
 import importlib.machinery
@@ -67,7 +72,7 @@ ITEM = f"https://dev.azure.com/Hussoppen/{PROJECT}/_workitems/edit/"
 MODEL = os.environ.get("OPS_MODEL", "haiku")
 REFERAT_MODEL = os.environ.get("OPS_REFERAT_MODEL", "sonnet")
 CACHE = os.path.expanduser("~/.cache/ops")
-INBOX = os.path.expanduser("~/.local/state/ops/inbox.json")
+INBOX = os.path.join(os.environ.get("OPS_STATE") or os.path.expanduser("~/.local/state/ops"), "inbox.json")
 
 # The temaer as the templates have them; used until the board itself has been read.
 AREAS = ["Salg -> Leveranse", "Support og henvendelser", "Økonomi", "Produktoppfølging",
@@ -548,7 +553,7 @@ For innspillet:
   hva som mangler (eier? frist? tall?), eller et konkret neste steg. Ikke gjenta tittelen. Ikke dikt opp fakta."""
 
 
-def classify(raw, ctx):
+def classify(raw, ctx, kind=None):
     board = ctx.board
     vocab = board.vocabulary() if board and board.areas else {a: ["Rapport", "Utfall"] for a in AREAS}
     people = board.people if board else {}
@@ -573,7 +578,9 @@ def classify(raw, ctx):
     c["eier"] = clean_eier(c["eier"])
     known = {t["id"] for t in ctx.items}
     c["relatert"] = [i for i in c.get("relatert", []) if i in known]
-    if c["seksjon"] not in vocab.get(c["omraade"], []):
+    if kind and kind != c["kind"]:
+        c["kind"], c["seksjon"] = kind, ""
+    if c["seksjon"] not in vocab.get(c["omraade"], []) or bool(COMMIT.search(c["seksjon"])) != (c["kind"] == "tiltak"):
         c["seksjon"] = default_section(vocab.get(c["omraade"], []), c["kind"])
     return c
 
@@ -616,7 +623,33 @@ Ikke dikt opp noe som ikke står i stickies."""
 
 
 # ── innboks ─────────────────────────────────────────────────────────────────
-# Every entry: {key, at, raw, c: classification, figma: None|"kø"|<node id>|"feil: …", ado: None|<id>}
+# Every entry: {key, at, raw, kind: None|"tiltak"|"notat" (forced by «t:»/«n:»), c: classification,
+# ado: None|<id>, figma: None|"kø"|<node id>|"feil: …", err: ""}
+# `ops add` only appends; the worker (`ops _worker`, started detached) does the slow part:
+# sort with Haiku, create the Issue, write the stickies — every entry under one lock, so
+# any number of `ops add` can run while it works.
+
+
+class locked:
+    """flock on a file next to the innboks; `with locked("inbox"):` around every read-modify-write."""
+
+    def __init__(self, name, block=True):
+        self.path, self.block = os.path.join(os.path.dirname(INBOX), name + ".lock"), block
+
+    def __enter__(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self.f = open(self.path, "w")
+        try:
+            fcntl.flock(self.f, fcntl.LOCK_EX | (0 if self.block else fcntl.LOCK_NB))
+        except BlockingIOError:
+            self.f.close()
+            return False
+        return True
+
+    def __exit__(self, *_):
+        if not self.f.closed:
+            fcntl.flock(self.f, fcntl.LOCK_UN)
+            self.f.close()
 
 
 def inbox():
@@ -635,9 +668,54 @@ def save(entries):
     os.replace(tmp, INBOX)
 
 
-def entry(raw, c):
+def update(key, **fields):
+    with locked("inbox"):
+        es = inbox()
+        for e in es:
+            if e["key"] == key:
+                e.update(fields)
+        save(es)
+
+
+def entry(raw, c=None):
+    kind = None
+    m = re.match(r"(?i)\s*([tn]):\s*", raw)
+    if m:
+        kind, raw = ("tiltak" if m.group(1).lower() == "t" else "notat"), raw[m.end():]
     return {"key": uuid.uuid4().hex[:8], "at": datetime.datetime.now().isoformat(timespec="seconds"),
-            "raw": raw, "c": c, "figma": None, "ado": None}
+            "raw": raw.strip(), "kind": kind, "c": c, "figma": None, "ado": None, "err": ""}
+
+
+def enqueue(raw):
+    e = entry(raw)
+    with locked("inbox"):
+        es = inbox()
+        es.append(e)
+        save(es)
+    spawn_worker()
+    return e
+
+
+def spawn_worker():
+    os.makedirs(os.path.dirname(INBOX), exist_ok=True)
+    log = open(os.path.join(os.path.dirname(INBOX), "worker.log"), "a")
+    subprocess.Popen([os.path.realpath(__file__), "_worker"], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                     start_new_session=True)
+
+
+def stage(e):
+    """Where an entry is: sorterer → ADO → board → ferdig, or feil / venter på side."""
+    if e.get("err"):
+        return "feil"
+    if not e.get("c"):
+        return "sorterer"
+    if e["c"]["kind"] == "tiltak" and not e.get("ado"):
+        return "ADO"
+    if e.get("figma") == "kø":
+        return "board"
+    if str(e.get("figma")).startswith("feil"):
+        return "feil"
+    return "ferdig"
 
 
 def sticky_text(e):
@@ -855,74 +933,187 @@ class Ctx:
 
 def cmd_add(a):
     raw = " ".join(a.text).strip()
-    if not raw:
-        die("ingen tekst")
-    try:
-        ctx = Ctx()
-        print(dim(f"… {MODEL} sorterer"), file=sys.stderr)
-        c = classify(raw, ctx)
-    except RuntimeError as e:
-        die(str(e))
-    if a.tiltak or a.notat:
-        c["kind"] = "tiltak" if a.tiltak else "notat"
-        vocab = ctx.board.vocabulary() if ctx.board else {x: ["Rapport", "Utfall"] for x in AREAS}
-        c["seksjon"] = default_section(vocab.get(c["omraade"], []), c["kind"])
-    who = resolve(c.get("eier"), ctx.people)
-    print(f"{bold(c['kind'])}  {cyan(c['omraade'])} › {c['seksjon'] or '–'}\n  {c['tittel']}")
-    print(dim(f"  eier {c['eier'] or '–'}" + (f" ({who})" if who else " (ingen ADO-match)" if c["eier"] else "")
-              + f" · frist {c['frist']}" + (f" · relatert {', '.join('#' + str(i) for i in c['relatert'])}" if c["relatert"] else "")))
-    if c["info"]:
-        print(dim("  " + c["info"]))
-    nxt = ctx.next
-    where = (f"«{ctx.board.page}»" if ctx.board else f"køen (ingen side for {day(nxt)} ennå — `ops neste`)")
-    plan = ([f"ADO-issue under «{epic_title(nxt)}», due {day(nxt)}"] if c["kind"] == "tiltak" else []) + [f"sticky på {where}"]
     if a.dry:
-        print(dim("ville laget: " + " + ".join(plan)))
+        if not raw:
+            die("ingen tekst")
+        e = entry(raw)
+        try:
+            ctx = Ctx()
+            c = classify(e["raw"], ctx, e["kind"])
+        except RuntimeError as err:
+            die(str(err))
+        print(f"{bold(c['kind'])}  {cyan(c['omraade'])} › {c['seksjon'] or '–'}\n  {c['tittel']}")
+        print(dim(f"  eier {c['eier'] or '–'} · frist {c['frist']}"))
+        if c["info"]:
+            print(dim("  " + c["info"]))
         return
-    if not confirm("Lag " + " + ".join(plan) + "?", a.yes):
-        print("avbrutt")
+    if raw:
+        e = enqueue(raw)
+        waiting = sum(1 for x in inbox() if stage(x) not in ("ferdig", "feil") and x["key"] != e["key"])
+        print(f"i kø{f' ({waiting} foran)' if waiting else ''} — `ops kø` viser hvordan det går")
         return
-    e = entry(raw, c)
-    e["figma"] = "kø"
+    if not (TTY and sys.stdin.isatty()):
+        die("ingen tekst")
+    locale.setlocale(locale.LC_ALL, "")
+    os.environ.setdefault("ESCDELAY", "25")
+    curses.wrapper(add_tui)
+
+
+def entry_line(e):
+    """(icon, colour name, text) for one innboks entry."""
+    st, c = stage(e), e.get("c") or {}
+    kind = c.get("kind") or e.get("kind") or ""
+    what = (f"#{e['ado']} " if e.get("ado") else "") + (c.get("tittel") or e["raw"])
+    where = f"{c['omraade']} › {c.get('seksjon') or '–'}" if c else ""
+    who = c.get("eier") if kind == "tiltak" and c.get("eier") else ""
+    tail = {"sorterer": "sorterer …", "ADO": "lager ADO-issue …", "board": "venter på board",
+            "feil": e.get("err") or str(e.get("figma")), "ferdig": "på board"}[st]
+    icon, col = {"sorterer": ("…", "dim"), "ADO": ("…", "yellow"), "board": ("⇡", "yellow"),
+                 "feil": ("!", "red"), "ferdig": ("✓", "green")}[st]
+    return icon, col, f"{kind or '?':6} {what}" + (f"  — {who}" if who else ""), f"{where}  {tail}".strip()
+
+
+def cmd_ko(a):
     es = inbox()
-    es.append(e)
-    save(es)
-    try:
-        if c["kind"] == "tiltak":
-            e["ado"] = create_issue(c, raw, nxt, ctx.people, ensure_epic(nxt, ctx.epics),
-                                    f"ops add {today().isoformat()}, {c['omraade']}")
+    if a.igjen:
+        with locked("inbox"):
+            es = inbox()
+            for e in es:
+                if stage(e) == "feil":
+                    e["err"] = ""
+                    if str(e.get("figma")).startswith("feil"):
+                        e["figma"] = "kø"
             save(es)
-            print(green(f"#{e['ado']}") + f"  {ITEM}{e['ado']}")
-        if ctx.board:
-            print(dim(f"… skriver sticky til {ctx.board.page}"), file=sys.stderr)
-            if push([e], ctx.board):
-                print(green("sticky") + f"  {ctx.board.url(e['figma'])}")
-            else:
-                print(red(e["figma"]))
-        else:
-            print(yellow(f"sticky i kø — skrives når `ops neste` lager siden for {day(nxt)}"))
-    except RuntimeError as err:
-        print(red(str(err)), file=sys.stderr)
-        print(dim("ligger i køen — `ops sync` prøver igjen"), file=sys.stderr)
-    finally:
-        save(es)
+        spawn_worker()
+        print("feilede innspill prøves igjen")
+        return
+    shown = [e for e in es if stage(e) != "ferdig"] + [e for e in es if stage(e) == "ferdig"][-a.antall:]
+    shown.sort(key=lambda e: e["at"])
+    if not shown:
+        print("køen er tom")
+    for e in shown:
+        icon, col, text, tail = entry_line(e)
+        paint = {"dim": dim, "yellow": yellow, "red": red, "green": green}[col]
+        print(f"{paint(icon)} {text[:80]}  {dim(tail)}")
+    with locked("worker", block=False) as free:
+        if not free:
+            print(dim("worker jobber …"))
+        elif any(stage(e) in ("sorterer", "ADO") for e in es):
+            print(yellow("worker kjører ikke — `ops kø --igjen` starter den"))
+
+
+def add_tui(scr):
+    curses.curs_set(1)
+    curses.use_default_colors()
+    for i, col in enumerate([curses.COLOR_RED, curses.COLOR_YELLOW, curses.COLOR_GREEN, curses.COLOR_CYAN], 1):
+        curses.init_pair(i, col, -1)
+    pal = {"red": curses.color_pair(1), "yellow": curses.color_pair(2), "green": curses.color_pair(3),
+           "cyan": curses.color_pair(4), "dim": curses.A_DIM}
+    scr.timeout(400)
+    since = datetime.datetime.now().isoformat(timespec="seconds")
+    text = ""
+
+    def put(y, x, s, n, attr=0):
+        try:
+            scr.addnstr(y, x, re.sub(r"[\x00-\x1f\x7f]", " ", s), max(0, n), attr)
+        except curses.error:
+            pass
+
+    while True:
+        h, w = scr.getmaxyx()
+        scr.erase()
+        es = inbox()
+        mine = [e for e in es if e["at"] >= since or stage(e) not in ("ferdig",)]
+        busy = sum(1 for e in mine if stage(e) in ("sorterer", "ADO", "board"))
+        put(0, 0, f"ops add — {len(mine)} innspill" + (f", {busy} under arbeid" if busy else ""), w - 1, curses.A_BOLD)
+        put(1, 0, "enter = i kø · t: tiltak · n: notat · esc avslutter (køen jobber videre)", w - 1, curses.A_DIM)
+        room = h - 5
+        y = 3
+        for e in mine[-(room // 2):]:
+            icon, col, line, tail = entry_line(e)
+            put(y, 0, icon, 1, pal[col] | curses.A_BOLD)
+            put(y, 2, line, w - 3)
+            put(y + 1, 4, tail, w - 5, pal["red"] if col == "red" else curses.A_DIM)
+            y += 2
+        put(h - 1, 0, "> " + text[-(w - 4):], w - 1, pal["cyan"] | curses.A_BOLD)
+        try:
+            scr.move(h - 1, min(w - 1, 2 + len(text[-(w - 4):])))
+        except curses.error:
+            pass
+        scr.refresh()
+        try:
+            c = scr.get_wch()
+        except curses.error:
+            continue
+        if c in ("\n", "\r", curses.KEY_ENTER):
+            if text.strip():
+                enqueue(text.strip())
+            text = ""
+        elif c == "\x1b" or (c == "\x04" and not text):
+            return
+        elif c in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+            text = text[:-1]
+        elif c == "\x15":
+            text = ""
+        elif c == "\x17":
+            text = re.sub(r"\S*$", "", text.rstrip())
+        elif isinstance(c, str) and c.isprintable():
+            text += c
+
+
+# ── worker ──────────────────────────────────────────────────────────────────
+
+
+def cmd_worker(a):
+    """Drain the innboks: sort, create Issues, write stickies. One worker at a time; a second
+    one waits for the lock and then picks up whatever arrived meanwhile."""
+    with locked("worker"):
+        ctx = None
+        while True:
+            es = inbox()
+            if not any(stage(e) in ("sorterer", "ADO", "board") for e in es):
+                return
+            if ctx is None:
+                try:
+                    ctx = Ctx()
+                except RuntimeError as err:
+                    print(f"{datetime.datetime.now():%F %T} {err}", flush=True)
+                    return
+            new = [e for e in es if stage(e) == "sorterer"]
+
+            def sort(e):
+                try:
+                    return e["key"], classify(e["raw"], ctx, e.get("kind")), ""
+                except RuntimeError as err:
+                    return e["key"], None, str(err)
+            with concurrent.futures.ThreadPoolExecutor(4) as ex:
+                for key, c, err in ex.map(sort, new):
+                    update(key, c=c, err=err, figma="kø" if c else None)
+
+            for e in [e for e in inbox() if stage(e) == "ADO"]:
+                try:
+                    nxt = ctx.next
+                    id = create_issue(e["c"], e["raw"], nxt, ctx.people, ensure_epic(nxt, ctx.epics),
+                                      f"ops add {e['at'][:10]}, {e['c']['omraade']}")
+                    update(e["key"], ado=id)
+                except RuntimeError as err:
+                    update(e["key"], err=str(err))
+
+            queued = [e for e in inbox() if stage(e) == "board"]
+            if queued and ctx.board:
+                try:
+                    push(queued, ctx.board)
+                    for e in queued:
+                        update(e["key"], figma=e["figma"])
+                except RuntimeError as err:
+                    for e in queued:
+                        update(e["key"], figma=f"feil: {err}")
+            if not any(stage(e) in ("sorterer", "ADO") for e in inbox()):
+                return  # what's left waits for a board page (`ops neste`) or for `ops kø --igjen`
 
 
 def cmd_sync(a):
-    es = inbox()
-    if not any(e["figma"] == "kø" for e in es):
-        print("ingenting i kø")
-        return
-    ctx = Ctx()
-    if not ctx.board:
-        die(f"ingen side for neste møte ({day(ctx.next)}) — `ops neste` lager den" + (f" ({ctx.board_err})" if ctx.board_err else ""))
-    try:
-        n = push(es, ctx.board)
-    except RuntimeError as e:
-        die(str(e))
-    finally:
-        save(es)
-    print(f"{n} sticky(er) skrevet til {ctx.board.page}")
+    cmd_ko(argparse.Namespace(igjen=True, antall=0))
 
 
 # ── neste ───────────────────────────────────────────────────────────────────
@@ -973,7 +1164,7 @@ def cmd_neste(a):
         if not ep or not ep["lukket"]:
             warn.append(f"«{newest[1]}» er ikke lukket — tiltakene derfra mangler i ADO; kjør `ops lukk {newest[2].day}."
                         f" {PAGE_MONTHS[newest[2].month - 1]}` først")
-    queued = [e for e in inbox() if e["figma"] == "kø"]
+    queued = [e for e in inbox() if stage(e) == "board"]
 
     print(f"Neste møte: {bold(day(d) + ' ' + str(d.year))}  ({kind.lower()})")
     print(f"Ny side:    «{name}», fra malen «{tpl[1]}»")
@@ -1013,14 +1204,8 @@ def cmd_neste(a):
     if unowned:
         print(dim(f"  uten ansvarlig i ADO: {', '.join(unowned)}"))
     if queued:
-        es = inbox()
-        try:
-            board = Board((pid, name), page_doc(pid, figma(f"files/{FILE}?depth=1")["version"]), ctx.people)
-            print(f"{push(es, board)} sticky(er) fra køen skrevet")
-        except RuntimeError as e:
-            print(red(f"  ! køen: {e} — `ops sync` prøver igjen"))
-        finally:
-            save(es)
+        spawn_worker()
+        print(f"{len(queued)} sticky(er) fra køen skrives i bakgrunnen — `ops kø`")
 
 
 # ── lukk ────────────────────────────────────────────────────────────────────
@@ -1306,12 +1491,12 @@ def main():
     ne.add_argument("dato", nargs="?", help="møtedato, f.eks. «30. okt» (utelat for å regne den ut)")
     ne.add_argument("--dry", action="store_true", help="vis planen, skriv ingenting")
     ne.add_argument("-y", "--yes", action="store_true", help="ikke spør")
-    ad = sub.add_parser("add", help="nytt innspill: tiltak → ADO + sticky i Utfall, notat → sticky i Rapport")
-    ad.add_argument("text", nargs="+")
-    ad.add_argument("-t", "--tiltak", action="store_true", help="det er et tiltak, uansett hva modellen mener")
-    ad.add_argument("-n", "--notat", action="store_true", help="det er et notat")
-    ad.add_argument("--dry", action="store_true", help="bare vis sorteringen")
-    ad.add_argument("-y", "--yes", action="store_true", help="ikke spør")
+    ad = sub.add_parser("add", help="nytt innspill i kø (uten tekst: skriv mange etter hverandre)")
+    ad.add_argument("text", nargs="*", help="«t: …» = tiltak, «n: …» = notat, ellers bestemmer Haiku")
+    ad.add_argument("--dry", action="store_true", help="bare vis sorteringen, legg ingenting i kø")
+    ko = sub.add_parser("kø", help="innspillene og hvor langt de har kommet")
+    ko.add_argument("--igjen", action="store_true", help="prøv feilede innspill igjen")
+    ko.add_argument("-n", "--antall", type=int, default=10, help="ferdige innspill som vises (10)")
     lg = sub.add_parser("log", help="åpne tiltak etter frist: x løst, u +1 uke")
     lg.add_argument("--ingen-board", action="store_true", help="ikke oppdater tiltaksloggen på boardet etterpå")
     lu = sub.add_parser("lukk", help="etter møtet: Utfall → ADO, referat → epic, møtet lukkes")
@@ -1319,11 +1504,13 @@ def main():
     lu.add_argument("--dry", action="store_true", help="vis planen, skriv ingenting")
     lu.add_argument("--igjen", action="store_true", help="lukk et møte som allerede er lukket på nytt")
     lu.add_argument("-y", "--yes", action="store_true", help="ikke spør")
-    sub.add_parser("sync", help="skriv stickies som ligger i kø til siden for neste møte")
+    sub.add_parser("sync", help="samme som `ops kø --igjen`")
+    sub.add_parser("_worker")
     a = p.parse_args()
     if a.cmd is None:
         a = p.parse_args(["log"])
-    {"neste": cmd_neste, "ny": cmd_neste, "add": cmd_add, "log": cmd_log, "lukk": cmd_lukk, "sync": cmd_sync}[a.cmd](a)
+    {"neste": cmd_neste, "ny": cmd_neste, "add": cmd_add, "log": cmd_log, "lukk": cmd_lukk, "sync": cmd_sync,
+     "kø": cmd_ko, "_worker": cmd_worker}[a.cmd](a)
 
 
 if __name__ == "__main__":
