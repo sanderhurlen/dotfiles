@@ -1009,13 +1009,21 @@ def main(argv: list[str] | None = None) -> None:
 
         sys.exit(mock(argv[1:]))
     if argv[:1] == ["login"]:
-        from tower.graph import Graph
+        from tower.graph import Graph, GraphFeil
 
-        Graph().login()
+        graph = Graph()
+        if argv[1:] == ["--ved-behov"]:  # start-workday: nettleser bare når refresh-tokenet ikke virker lenger
+            try:
+                graph.token()
+                print("allerede logget inn")
+                return
+            except GraphFeil:
+                pass
+        graph.login()
         print("logget inn")
         return
     if argv:
-        sys.exit(f"bruk: tower [login | mock …]\n(ukjent argument: {' '.join(argv)})")
+        sys.exit(f"bruk: tower [login [--ved-behov] | mock …]\n(ukjent argument: {' '.join(argv)})")
     config = cfg.last()
     db = Db(config.db)
     try:
