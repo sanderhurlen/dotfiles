@@ -99,6 +99,8 @@ def triage_merke(rad: Rad, jobb: str | None = None) -> str:
         return ""
     if tr.haster:
         return "[b red]● haster[/]"
+    if tr.rydd:
+        return "[dim]○ rydd[/]"
     if tr.kategori == "info":
         return "[dim]○ info[/]"
     return "[yellow]● svar[/]"
@@ -281,6 +283,7 @@ class Tower(App):
         self._hold: set[str] = set()  # Tråder med min redigering av et utdatert Utkast: ingen auto-utkast
         self._sender: set[str] = set()
         self.merket: set[str] = set()  # Tråder merket for arkivering
+        self._foreslått: dict[str, str] = {}  # Tråd-id → Melding-id triagen forhåndsmerket: avmerking varer
         self._taster: tuple | None = None  # siste check_action for merk/arkiver
         self.config = config
         self.kanaler = kanaler
@@ -353,8 +356,11 @@ class Tower(App):
                     endret |= self.glem(id)
                 nå = self.nå()
                 for t in tråder:
+                    if (forrige := self.tråder.get(t.id)) and forrige.siste.id != t.siste.id:
+                        self.merket.discard(t.id)  # ny Melding: merket gjaldt det jeg hadde sett
                     self.tråder[t.id] = t
                     self.rader[t.id] = self.db.registrer(t, nå, self.config.dager)
+                    self.foreslå(t)
                     self.planlegg(t)
                     endret = True
                 if kanal.navn in self.config.graph and (kladder := kanal.kladder()) is not None:
@@ -531,7 +537,8 @@ class Tower(App):
 
     async def kjør_triage(self, t: Tråd) -> None:
         try:
-            triage, usd = await triager(self.runner, t, self.kunnskap(t))
+            triage, usd = await triager(self.runner, t, self.kunnskap(t),
+                                        self.db.ryddet([m.fra.adresse for m in t.meldinger if not m.fra_meg]))
         except AgentFeil as e:
             self.db.logg_kjøring("triage", t.id, e.usd, self.nå(), feil=str(e))
             rad = self.db.lagre_triage_feil(t.id, t.siste.id, str(e), self.nå())
@@ -544,6 +551,7 @@ class Tower(App):
         if self._triage_for.get(t.id) == t.siste.id:
             del self._triage_for[t.id]
         if rad:
+            self.foreslå(self.tråder.get(t.id, t))
             self.planlegg(self.tråder.get(t.id, t))  # svar → utkast
         self.tegn_tabell()
 
@@ -815,6 +823,14 @@ class Tower(App):
             self._taster = tilstand
             self.refresh_bindings()
 
+    def foreslå(self, t: Tråd) -> None:
+        """Triagen sier rydd for siste Melding: merket for arkivering, én gang per Melding."""
+        rad = self.rader[t.id]
+        if (rad.triage and rad.triage.rydd and rad.triage_melding_id == t.siste.id and rad.status not in FERDIG
+                and self._foreslått.get(t.id) != t.siste.id and self.kan_arkiveres(t)):
+            self._foreslått[t.id] = t.siste.id
+            self.merket.add(t.id)
+
     def action_merk(self) -> None:
         """Merker raden for arkivering (eller fjerner merket) og går til neste."""
         if not (valgt := self.valgt()) or not self.kan_arkiveres(valgt[0]):
@@ -850,6 +866,8 @@ class Tower(App):
             except Exception as e:
                 feil.append(f"{motpart(t)}: {str(e) or type(e).__name__}")
                 continue
+            avsender = next((m.fra.adresse for m in reversed(t.meldinger) if not m.fra_meg), "")
+            self.db.arkivert(id, avsender, self._foreslått.get(id) == t.siste.id, self.nå())
             self.glem(id)
             arkivert += 1
         if arkivert:

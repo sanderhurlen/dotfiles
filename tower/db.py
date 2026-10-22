@@ -58,6 +58,13 @@ CREATE TABLE IF NOT EXISTS kurator (
     endret TEXT NOT NULL,
     UNIQUE (trad, svar_pa)
 );
+-- Tråder jeg har arkivert i tower. Triagen ser hvor mange per avsender, og om forslaget traff.
+CREATE TABLE IF NOT EXISTS arkivert (
+    trad TEXT NOT NULL,
+    avsender TEXT NOT NULL,  -- adressen til motparten, små bokstaver
+    foreslatt INTEGER NOT NULL,  -- triagen hadde merket den
+    tid TEXT NOT NULL
+);
 """
 # Lagt til etter tracer-sliken; eldre tower.db får dem ved åpning.
 NYE_KOLONNER = {
@@ -65,13 +72,14 @@ NYE_KOLONNER = {
     "triage_melding_id": "TEXT",  # Meldingen triagen (eller feilen) gjelder
     "triage_feil": "TEXT",
     "utsatt_til": "TEXT",  # ISO UTC, bare i `utsatt`
+    "rydd": "INTEGER",
 }
 NYE_U_KOLONNER = {"redigert": "TEXT", "research": "TEXT",  # research: JSON-liste av {faktum, kilde}
                   "kladd": "TEXT", "lenke": "TEXT", "kladd_tekst": "TEXT"}  # Kladden i Outlook
 U_KOLONNER = ("trad, versjon, melding_id, status, tekst, sjekk, feil, instruks, redigert, research, kladd, lenke, "
               "kladd_tekst")
 KOLONNER = ("id, kanal, status, siste_melding_id, kategori, haster, sammendrag, begrunnelse, triage_melding_id, "
-            "triage_feil, utsatt_til")
+            "triage_feil, utsatt_til, rydd")
 
 # Trådstatus. `triagert` er «venter på meg». `avvist` og `utsatt` varer til ny Melding (utsatt også til tiden).
 NY, GAMMEL, BESVART, TRIAGERT, AVVIST, UTSATT = "ny", "gammel", "besvart", "triagert", "avvist", "utsatt"
@@ -112,8 +120,8 @@ class Rad:
 
 
 def _rad(r: tuple, versjoner: list[Utkast] = ()) -> Rad:
-    id, kanal, status, siste, kategori, haster, sammendrag, begrunnelse, tmid, tfeil, utsatt_til = r
-    triage = Triage(kategori, bool(haster), sammendrag, begrunnelse) if kategori else None
+    id, kanal, status, siste, kategori, haster, sammendrag, begrunnelse, tmid, tfeil, utsatt_til, rydd = r
+    triage = Triage(kategori, bool(haster), sammendrag, begrunnelse, bool(rydd)) if kategori else None
     til = datetime.fromisoformat(utsatt_til) if utsatt_til else None
     utkast, feil = synlig(versjoner)
     return Rad(id, kanal, status, siste, triage, tmid, tfeil, utkast, til, feil)
@@ -205,13 +213,27 @@ class Db:
         """Lagrer triage for `melding_id`. Ignoreres (None) hvis Tråden har fått en nyere Melding."""
         with self.con:
             n = self.con.execute(
-                "UPDATE trad SET kategori = ?, haster = ?, sammendrag = ?, begrunnelse = ?, "
+                "UPDATE trad SET kategori = ?, haster = ?, sammendrag = ?, begrunnelse = ?, rydd = ?, "
                 "triage_melding_id = siste_melding_id, triage_feil = NULL, endret = ?, "
                 "status = CASE status WHEN ? THEN ? ELSE status END "
                 "WHERE id = ? AND siste_melding_id = ?",
-                (triage.kategori, triage.haster, triage.sammendrag, triage.begrunnelse, nå.isoformat(),
+                (triage.kategori, triage.haster, triage.sammendrag, triage.begrunnelse, triage.rydd, nå.isoformat(),
                  NY, TRIAGERT, tråd_id, melding_id)).rowcount
         return self.rad(tråd_id) if n else None
+
+    def arkivert(self, tråd_id: str, avsender: str, foreslått: bool, nå: datetime) -> None:
+        with self.con:
+            self.con.execute("INSERT INTO arkivert (trad, avsender, foreslatt, tid) VALUES (?, ?, ?, ?)",
+                             (tråd_id, avsender.lower(), foreslått, nå.isoformat()))
+
+    def ryddet(self, avsendere: list[str]) -> dict[str, int]:
+        """Antall Tråder arkivert per avsender, bare de som har noen."""
+        adresser = sorted({a.lower() for a in avsendere if a})
+        if not adresser:
+            return {}
+        return dict(self.con.execute(
+            f"SELECT avsender, COUNT(DISTINCT trad) FROM arkivert WHERE avsender IN ({', '.join('?' * len(adresser))}) "
+            "GROUP BY avsender", adresser).fetchall())
 
     def lagre_triage_feil(self, tråd_id: str, melding_id: str, feil: str, nå: datetime) -> Rad | None:
         with self.con:

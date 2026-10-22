@@ -6,7 +6,7 @@ from tower.agent import AgentFeil, Resultat
 from tower.kanal import Melding, Person, Tråd
 from tower.prompt import tråd_tekst
 from tower.tests.conftest import MEG, NÅ
-from tower.triage import SCHEMA, Triage, triager
+from tower.triage import SCHEMA, Triage, historikk_tekst, triager
 
 KARI = Person("Kari Nordmann", "kari@kunde.no")
 TRÅD = Tråd("mail:x", "mail", "Tilbud", (
@@ -56,3 +56,14 @@ async def test_to_feil_kaster_med_samlet_kost():
     with pytest.raises(AgentFeil, match="b") as e:
         await triager(r, TRÅD)
     assert e.value.usd == pytest.approx(0.005)
+
+
+async def test_rydd_bare_for_info_og_historikk_i_prompten():
+    r = Skriptet({**SVAR, "rydd": True}, {**SVAR, "kategori": "svar", "rydd": True})
+    triage, _ = await triager(r, TRÅD, ryddet={"kari@kunde.no": 3})
+    assert triage.rydd
+    assert r.prompts[0].startswith("<arkivert>") and "- kari@kunde.no: 3 tråder" in r.prompts[0]
+    triage, _ = await triager(r, TRÅD)
+    assert not triage.rydd  # svar ryddes aldri
+    assert not r.prompts[1].startswith("<arkivert>")
+    assert historikk_tekst({}) == ""

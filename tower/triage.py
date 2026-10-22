@@ -1,4 +1,4 @@
-"""Triage: svar eller info, haster, sammendrag. Kjøres på nytt ved hver ny Melding."""
+"""Triage: svar eller info, haster, kan ryddes, sammendrag. Kjøres på nytt ved hver ny Melding."""
 
 from __future__ import annotations
 
@@ -15,10 +15,11 @@ SCHEMA = {
     "properties": {
         "kategori": {"type": "string", "enum": ["svar", "info"]},
         "haster": {"type": "boolean"},
+        "rydd": {"type": "boolean"},
         "sammendrag": {"type": "string", "maxLength": 80},
         "begrunnelse": {"type": "string"},
     },
-    "required": ["kategori", "haster", "sammendrag", "begrunnelse"],
+    "required": ["kategori", "haster", "rydd", "sammendrag", "begrunnelse"],
     "additionalProperties": False,
 }
 
@@ -29,10 +30,24 @@ class Triage:
     haster: bool
     sammendrag: str
     begrunnelse: str
+    rydd: bool = False  # kan arkiveres uten videre: forhåndsmerkes i tower
 
 
-async def triager(runner: Runner, t: Tråd, kunnskapsbase: str = "") -> tuple[Triage, float]:
-    """Triage og samlet kost. Kaster `AgentFeil` (med kost) når også det nye forsøket feiler."""
-    r = await med_nytt_forsøk(runner, INSTRUKS, SCHEMA, tråd_tekst(t, kunnskapsbase))
+def historikk_tekst(ryddet: dict[str, int]) -> str:
+    """Hvor mange tidligere Tråder jeg har arkivert fra hver avsender i Tråden."""
+    if not ryddet:
+        return ""
+    linjer = [f"- {adresse}: {n} tråd{'er' if n > 1 else ''}" for adresse, n in sorted(ryddet.items())]
+    return "<arkivert>\nSander har arkivert uten å svare tidligere tråder fra:\n" + "\n".join(linjer) + "\n</arkivert>\n\n"
+
+
+async def triager(runner: Runner, t: Tråd, kunnskapsbase: str = "",
+                  ryddet: dict[str, int] | None = None) -> tuple[Triage, float]:
+    """Triage og samlet kost. Kaster `AgentFeil` (med kost) når også det nye forsøket feiler.
+
+    `ryddet`: avsenderadresse → antall Tråder jeg har arkivert fra den før.
+    """
+    r = await med_nytt_forsøk(runner, INSTRUKS, SCHEMA, historikk_tekst(ryddet or {}) + tråd_tekst(t, kunnskapsbase))
     s = r.svar
-    return Triage(s["kategori"], bool(s["haster"]), s["sammendrag"], s["begrunnelse"]), r.usd
+    rydd = bool(s.get("rydd")) and s["kategori"] == "info"
+    return Triage(s["kategori"], bool(s["haster"]), s["sammendrag"], s["begrunnelse"], rydd), r.usd

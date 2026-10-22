@@ -479,3 +479,52 @@ async def test_teams_kan_ikke_merkes_eller_arkiveres(config):
         await pilot.press("x")
         await a.workers.wait_for_complete()
         assert mail.id not in a.tråder and teams.id in a.tråder
+
+
+AZURE = "mail:AAQkADMock-azure-newsletter"
+
+
+def rydd_azure(prompt: str) -> dict:
+    return {**triage_etter_emne(prompt), "rydd": "Emne: Azure" in prompt}
+
+
+async def test_triage_forhåndsmerker_rydd_og_lærer_av_arkivering(config):
+    r = FalskRunner(rydd_azure)
+    a = app(config, r)
+    async with a.run_test(size=(160, 40)) as pilot:
+        await a.poll()
+        await a.agenter.ferdig()
+        await pilot.pause()
+        assert a.merket == {AZURE}
+        assert "rydd" in triagekolonne(a)[a.query_one(DataTable).get_row_index(AZURE)]
+
+        velg(a, AZURE)
+        await pilot.press("space")  # avmerket: varer til ny Melding
+        await a.poll()
+        await pilot.pause()
+        assert not a.merket
+
+        ny_melding(config, AZURE, "ny-1")
+        await a.poll()
+        await a.agenter.ferdig()
+        await pilot.pause()
+        assert a.merket == {AZURE}  # ny Melding, ny triage, nytt forslag
+
+        await pilot.press("x")
+        await a.workers.wait_for_complete()
+        avsender = a.db.con.execute("SELECT avsender, foreslatt FROM arkivert").fetchall()
+        assert len(avsender) == 1 and avsender[0][1] == 1
+        assert a.db.ryddet([avsender[0][0].upper()]) == {avsender[0][0]: 1}
+
+
+async def test_ny_melding_fjerner_merket(config):
+    a = app(config)
+    async with a.run_test(size=(160, 40)) as pilot:
+        await a.poll()
+        await pilot.pause()
+        velg(a, NORDLYS)
+        await pilot.press("space")
+        assert a.merket == {NORDLYS}
+        ny_melding(config, NORDLYS, "ny-1")
+        await a.poll()
+        assert not a.merket
