@@ -107,11 +107,12 @@ async def test_teams_i_tabellen(config):
         await a.poll()
         await pilot.pause()
         emner = rader(a)
-        assert len(emner) == 11
+        assert len(emner) == 10
         assert "Release 4.2" in emner
         assert "Ring meg når du har et øyeblikk" in emner  # chat uten topic: start av siste Melding
         assert "Ola Berg" not in emner
         assert a.rader["teams:19:mock-referat@thread.v2"].status == "besvart"
+        assert "teams:19:mock-referat@thread.v2" not in [k.value for k in a.query_one(DataTable).rows]  # besvart skjules
 
         dt = a.query_one(DataTable)
         dt.move_cursor(row=dt.get_row_index("teams:19:u-ingrid_u-sander@unq.gbl.spaces"), animate=False)

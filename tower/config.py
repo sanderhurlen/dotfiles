@@ -34,7 +34,7 @@ class Config:
     dager: int = 7  # Tråder eldre enn dette ved første syn blir `gammel`
     poll_sekunder: float = 2
     modell: str = "sonnet"  # for triage og utkast
-    graph: tuple[str, ...] = ()  # ekte Graph (`tower login`): svar blir utkast i Outlook, aldri sendt
+    graph: tuple[str, ...] = ()  # ekte Graph (`tower login`): mail blir kladd i Outlook, Teams kopieres; aldri sendt
     synk_sekunder: float = 60
     kilder: tuple[Path, ...] = ()  # Utkast-agenten kan lese her (og i Kunnskapsbasen) ved regenerering med instruks
 
@@ -99,9 +99,16 @@ def lag_kanaler(config: Config) -> list[Kanal]:
             kanaler.append(MailKanal(GraphFil(katalog, config.outbox), config.meg, graph, config.dager,
                                      config.synk_sekunder))
         elif navn == "teams":
-            kanaler.append(TeamsKanal(GraphFil(katalog, config.outbox), config.meg))
+            graph = None
+            if "teams" in config.graph:
+                from tower.graph import Graph
+                from tower.kanal.teams_graph import TeamsGraph
+
+                graph = TeamsGraph(Graph(), katalog)
+            kanaler.append(TeamsKanal(GraphFil(katalog, config.outbox), config.meg, graph, config.dager,
+                                      config.synk_sekunder))
         else:
             raise ValueError(f"ukjent kanal i config: {navn}")
-    if ukjent := set(config.graph) - {"mail"}:
-        raise ValueError(f"graph støtter bare mail ennå, ikke: {', '.join(sorted(ukjent))}")
+    if ukjent := set(config.graph) - {"mail", "teams"}:
+        raise ValueError(f"graph støtter bare mail og teams, ikke: {', '.join(sorted(ukjent))}")
     return kanaler

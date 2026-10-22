@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from tower.kanal import Melding, Person, Tråd
 from tower.kanal.graph_fil import GraphFil
 from tower.kanal.mail import graph_tid
+from tower.kanal.teams_graph import TeamsGraph
 from tower.kanal.tekst import body_til_tekst
 
 NAVN = "teams"
@@ -65,9 +67,14 @@ def tråd_fra_graph(data: dict, meg: Person) -> Tråd | None:
 class TeamsKanal:
     navn = NAVN
 
-    def __init__(self, transport: GraphFil, meg: Person) -> None:
+    def __init__(self, transport: GraphFil, meg: Person, graph: TeamsGraph | None = None, dager: int = 7,
+                 synk_sekunder: float = 60) -> None:
         self.transport = transport
         self.meg = meg
+        self.graph = graph  # None: bare filene (mock)
+        self.dager = dager
+        self.synk_sekunder = synk_sekunder
+        self._neste_synk = 0.0
         self._filer: dict[str, Path] = {}
         self._chatter: dict[str, dict] = {}
 
@@ -75,6 +82,9 @@ class TeamsKanal:
         return await asyncio.to_thread(self._hent)
 
     def _hent(self) -> list[Tråd]:
+        if self.graph and time.monotonic() >= self._neste_synk:
+            self._neste_synk = time.monotonic() + self.synk_sekunder
+            self.graph.synk(self.dager)
         ut = []
         for sti, data in self.transport.endrede():
             tråd = tråd_fra_graph(data, self.meg)
@@ -93,10 +103,16 @@ class TeamsKanal:
             getattr(self, "_siste", {}).pop(id, None)
         return ids
 
+    def lenke(self, tråd_id: str) -> str | None:
+        """Chatten i Teams."""
+        return (self._chatter.get(tråd_id) or {}).get("webUrl")
+
     async def svar(self, tråd_id: str, tekst: str) -> None:
         await asyncio.to_thread(self._svar, tråd_id, tekst)
 
     def _svar(self, tråd_id: str, tekst: str) -> None:
+        if self.graph:
+            raise RuntimeError("ekte Teams sendes aldri fra tower, kopier utkastet")
         if tråd_id not in self._filer:
             raise KeyError(f"ukjent Tråd: {tråd_id}")
         chat = self._chatter[tråd_id]

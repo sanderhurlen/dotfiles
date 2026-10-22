@@ -21,11 +21,12 @@ import webbrowser
 from pathlib import Path
 
 GRAPH = "https://graph.microsoft.com/v1.0"
-SCOPES = "offline_access User.Read Mail.ReadWrite"  # aldri Mail.Send: tower lager bare utkast
+SCOPES = "offline_access User.Read Mail.ReadWrite Chat.Read"  # aldri Mail.Send/ChatMessage.Send: bare utkast
 
 
-# Sperre uansett hva tokenet tillater: ingen kall som sender mail.
+# Sperre uansett hva tokenet tillater: ingen kall som sender mail eller Teams-meldinger.
 SENDER = re.compile(r"/(send|sendMail|reply|replyAll|forward)/?(\?|$)", re.IGNORECASE)
+CHAT_SENDER = re.compile(r"/chats/[^/]+/messages", re.IGNORECASE)
 
 
 class GraphFeil(Exception):
@@ -65,7 +66,7 @@ class Graph:
         if "access_token" not in svar:
             raise GraphFeil(svar.get("error_description") or svar.get("error") or "ingen access_token i svaret")
         self._token = {"access_token": svar["access_token"], "refresh_token": svar["refresh_token"],
-                       "utløper": time.time() + int(svar["expires_in"])}
+                       "utløper": time.time() + int(svar["expires_in"]), "scope": SCOPES}
         fd = os.open(self._token_sti, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
             json.dump(self._token, f)
@@ -117,6 +118,8 @@ class Graph:
             if not self._token_sti.exists():
                 raise GraphFeil("ikke logget inn, kjør `tower login`")
             self._token = json.loads(self._token_sti.read_text())
+        if self._token.get("scope") != SCOPES:
+            raise GraphFeil("tower trenger nye tillatelser, kjør `tower login`")
         if self._token["utløper"] > time.time() + 120:
             return self._token["access_token"]
         svar = _post_form(self._endepunkt("token"), {
@@ -132,6 +135,8 @@ class Graph:
         url = path if path.startswith("https://") else GRAPH + path
         if SENDER.search(urllib.parse.urlsplit(url).path):
             raise GraphFeil(f"tower sender aldri mail: {path}")
+        if method != "GET" and CHAT_SENDER.search(urllib.parse.urlsplit(url).path):
+            raise GraphFeil(f"tower sender aldri Teams-meldinger: {path}")
         h = {"Authorization": f"Bearer {self.token()}", **(headers or {})}
         data = None
         if body is not None:

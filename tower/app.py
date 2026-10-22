@@ -167,8 +167,9 @@ def utkast_markup(rad: Rad, jobb: str | None, spinner: str) -> str | None:
 
 
 def tråd_markup(t: Tråd) -> str:
+    """Nyeste Melding øverst, rett under Utkastet."""
     ut = []
-    for m in t.meldinger:
+    for m in reversed(t.meldinger):
         hvem = "[b cyan]meg[/]" if m.fra_meg else f"[b]{escape(m.fra.navn)}[/]"
         tid = m.tid.astimezone().strftime("%d.%m %H:%M")
         til = ", ".join(p.navn for p in m.til)
@@ -250,9 +251,9 @@ class Tower(App):
     #hoved { height: 1fr; }
     #tabell { width: 55%; height: 1fr; }
     #hoyre { width: 1fr; border-left: vkey $panel; }
-    #hode { padding: 0 1; background: $boost; height: auto; }
+    #hode { padding: 1 2; background: $boost; height: auto; }
     #scroll { padding: 0 1; }
-    #utkast { border: round $panel-lighten-2; padding: 0 1; height: auto; margin-top: 1; }
+    #utkast { border: round $panel-lighten-2; padding: 0 1; height: auto; margin-bottom: 1; }
     #utkast.klart { border: round $success; }
     #status { height: 1; background: $panel; padding: 0 1; }
     """
@@ -264,7 +265,8 @@ class Tower(App):
         Binding("u", "utsett", "Utsett"),
         Binding("space", "merk", "Merk"),
         Binding("x", "arkiver", "Arkiver"),
-        Binding("o", "åpne", "Åpne i Outlook"),
+        Binding("c", "kopier", "Kopier"),
+        Binding("o", "åpne", "Åpne"),
         Binding("k", "kunnskapsbase", "Kunnskapsbase"),
         Binding("q", "quit", "Avslutt"),
     ]
@@ -272,10 +274,12 @@ class Tower(App):
     def __init__(self, config: Config, kanaler: list[Kanal], db: Db, runner: Runner,
                  nå: Callable[[], datetime] = nå_utc, poll: bool = True,
                  editor: Callable[[str], str | None] | None = None,
-                 åpne: Callable[[str], object] = webbrowser.open) -> None:
+                 åpne: Callable[[str], object] = webbrowser.open,
+                 kopier: Callable[[str], object] | None = None) -> None:
         super().__init__()
         self.editor = editor or self.rediger_i_editor  # tekst inn, redigert tekst ut (None = avbrutt)
         self.åpne = åpne  # lenke i nettleseren
+        self.kopier = kopier or (lambda tekst: subprocess.run(["pbcopy"], input=tekst.encode(), check=True))
         self._kladd_lås = asyncio.Lock()  # Outlook-kladdene: én synk av gangen, inn eller ut
         self._kladd_venter = False
         self._hentet: set[str] = set()  # kanaler hentet minst én gang: før det er ingen Kladd uønsket
@@ -311,8 +315,8 @@ class Tower(App):
             with Vertical(id="hoyre"):
                 yield Static(id="hode")
                 with VerticalScroll(id="scroll"):
-                    yield Static(id="trad")
                     yield Static(id="utkast")
+                    yield Static(id="trad")
         yield Static(id="status")
         yield Footer()
 
@@ -363,7 +367,7 @@ class Tower(App):
                     self.foreslå(t)
                     self.planlegg(t)
                     endret = True
-                if kanal.navn in self.config.graph and (kladder := kanal.kladder()) is not None:
+                if self.har_kladder(kanal) and (kladder := kanal.kladder()) is not None:
                     endret |= await self.kladder_inn(kanal, kladder)
             for id in self.db.vekk(self.nå()):  # utsatt-tiden er ute
                 self.rader[id] = self.db.rad(id)
@@ -394,7 +398,11 @@ class Tower(App):
             await asyncio.sleep(0.01)
         await self.poll()
 
-    # Outlook-kladdene (kanaler i `config.graph`): ett Utkast klart = én Kladd, begge veier
+    # Outlook-kladdene (mail i `config.graph`): ett Utkast klart = én Kladd, begge veier
+
+    def har_kladder(self, kanal: Kanal) -> bool:
+        """Ekte Graph med kladder. Teams har ingen: der kopieres Utkastet."""
+        return kanal.navn in self.config.graph and hasattr(kanal, "lag_kladd")
 
     def ønsket_kladd(self, tråd_id: str) -> Utkast | None:
         """Versjonen som skal ligge i Outlook: siste klare, så lenge Tråden er aktiv eller utsatt.
@@ -443,7 +451,7 @@ class Tower(App):
         return endret
 
     def utløs_kladder(self) -> None:
-        if not self._kladd_venter and any(k.navn in self.config.graph for k in self.kanaler):
+        if not self._kladd_venter and any(map(self.har_kladder, self.kanaler)):
             self._kladd_venter = True
             self.run_worker(self.kladder_ut(), group="kladder", exit_on_error=False)
 
@@ -453,7 +461,7 @@ class Tower(App):
             self._kladd_venter = False
             endret = False
             for kanal in self.kanaler:
-                if kanal.navn not in self.config.graph or kanal.navn not in self._hentet:
+                if not self.har_kladder(kanal) or kanal.navn not in self._hentet:
                     continue
                 feil_nøkkel = f"{kanal.navn} kladd"
                 try:
@@ -625,21 +633,26 @@ class Tower(App):
         await self.agenter.stopp()
         await self.kurator.stopp()
 
+    def vises(self, t: Tråd) -> bool:
+        """Besvarte Teams-chatter har ingenting å vise: de kommer tilbake med neste Melding."""
+        return not (t.kanal == "teams" and self.rader[t.id].status == BESVART)
+
     def sortert(self) -> list[Tråd]:
-        return sorted(self.tråder.values(), key=lambda t: sorteringsnøkkel(t, self.rader[t.id]))
+        return sorted(filter(self.vises, self.tråder.values()), key=lambda t: sorteringsnøkkel(t, self.rader[t.id]))
 
     def tegn_tabell(self) -> None:
         dt = self.query_one(DataTable)
         valgt = self.valgt_id()
         nå = self.nå()
         dt.clear()
-        for t in self.sortert():
+        tråder = self.sortert()
+        for t in tråder:
             rad = self.rader[t.id]
             dim = "[dim]" if rad.status in FERDIG else ""
             dt.add_row(KANAL_IKON.get(t.kanal, "?"), self.fra_celle(t), dim + escape(emne_kort(t)),
                        triage_merke(rad, self.jobb_status(t.id)),
                        utkast_merke(rad, self.jobb_status(t.id, "utkast")), alder(t.siste.tid, nå), key=t.id)
-        if valgt in self.tråder:
+        if any(t.id == valgt for t in tråder):
             dt.move_cursor(row=dt.get_row_index(valgt), animate=False)
         self.vis_detalj()
         self.utløs_kladder()  # tabellen tegnes etter hver endring i tower
@@ -669,7 +682,7 @@ class Tower(App):
         if rad.triage_feilet:
             linjer += [merke, f"[red]{escape(rad.triage_feil or '')}[/]"]
         elif rad.triage:
-            linjer += [f"{merke}  [i]{escape(rad.triage.sammendrag)}[/]", f"[dim]{escape(rad.triage.begrunnelse)}[/]"]
+            linjer += [merke, "", escape(rad.triage.sammendrag), "", f"[dim]{escape(rad.triage.begrunnelse)}[/]"]
         else:
             linjer.append(merke)
         self.query_one("#hode", Static).update("\n".join(linjer))
@@ -729,7 +742,8 @@ class Tower(App):
     def prøv_send(self, tråd_id: str) -> None:
         t, rad = self.tråder[tråd_id], self.rader[tråd_id]
         if t.kanal in self.config.graph:
-            self.notify("Mail sendes fra Outlook, o åpner kladden", severity="warning")
+            self.notify("Mail sendes fra Outlook, o åpner kladden" if t.kanal == "mail"
+                        else "Sendes fra Teams: c kopierer utkastet, o åpner chatten", severity="warning")
             return
         if grunn := self.ikke_klart(t, rad):
             self.notify(grunn, severity="warning")
@@ -765,9 +779,35 @@ class Tower(App):
         finally:
             self._sender.discard(t.id)
 
-    def action_åpne(self) -> None:
-        """Kladden i Outlook (under regenerering: forrige versjon sin)."""
+    def action_kopier(self) -> None:
+        """Utkastet til utklippstavla, for å lime inn selv (Teams)."""
         if not (valgt := self.valgt()):
+            return
+        t, rad = valgt
+        if grunn := self.ikke_klart(t, rad):
+            self.notify(grunn, severity="warning")
+            return
+        if n := len(rad.utkast.plassholdere):
+            self.notify(f"{n} plassholder{'e' if n > 1 else ''} igjen, fyll ut med e", severity="warning")
+            return
+        try:
+            self.kopier(rad.utkast.gjeldende)
+        except Exception as e:
+            self.notify(f"Kopiering feilet: {e}", severity="error")
+            return
+        self.notify("Utkastet er kopiert" + (", o åpner chatten" if self.lenke(t) else ""))
+
+    def lenke(self, t: Tråd) -> str | None:
+        """Tråden i kanalens egen app, for kanaler som har det (Teams)."""
+        kanal = next((k for k in self.kanaler if k.navn == t.kanal), None)
+        return kanal.lenke(t.id) if hasattr(kanal, "lenke") else None
+
+    def action_åpne(self) -> None:
+        """Chatten i Teams, ellers kladden i Outlook (under regenerering: forrige versjon sin)."""
+        if not (valgt := self.valgt()):
+            return
+        if lenke := self.lenke(valgt[0]):
+            self.åpne(lenke)
             return
         u = next((v for v in reversed(self.db.versjoner(valgt[0].id)) if v.kladd and v.lenke), None)
         if u is None:
