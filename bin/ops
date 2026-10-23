@@ -17,6 +17,11 @@
 #                              … mark in its corner while ops works on it, gone when it's done. Opens
 #                              the page first. --en: one pass, nothing opened
 #   ops log                    the open tiltak by due date: x = løst, u = +1 uke
+#
+# The tiltakslogg table on a referat page has a Status column with each tiltak's ADO state
+# (To Do / Doing / Done, tinted). neste and log write it; while watch runs, «x» in a Status
+# cell makes the tiltak Done and «u» moves its due date a week (like in log), a state typed
+# there sets it in ADO, and a state changed in ADO is written back to the cell.
 #   ops lukk [dato] [--dry]    after the meeting: Utfall stickies without #id become Issues, the
 #                              rest becomes the referat in the epic, and the meeting is closed
 #
@@ -284,6 +289,13 @@ class Board:
                 s["stickies"].sort(key=lambda st: (st["pos"][1], st["pos"][0]))
             a["secs"] = [s for s in a["secs"] if s["name"] or s["stickies"]]
         self.areas = [a for a in self.areas if a["secs"]]
+        self.log = {}  # tiltak id → text in its Status cell, when the tiltakslogg has that column
+        logsec = next((o for o in outer if re.search(r"(?i)tiltakslogg", o["name"])), None)
+        tab = logsec and next((n for n in nodes if n.get("type") == "TABLE" and contains(logsec, n)), None)
+        rows = table(tab) if tab else []
+        col = next((j for j, h in enumerate(rows[0]) if "status" in h.lower()), None) if rows else None
+        if col is not None:
+            self.log = {r[0]: r[col] for r in rows[1:] if len(r) > col and r[0].isdigit()}
 
     def find(self, area, sec=""):
         a = next((x for x in self.areas if x["name"].lower() == (area or "").lower()), None)
@@ -826,41 +838,77 @@ for (const it of items) {
 }
 return { n };"""
 
-# The tiltakslogg section's table gets one row per open tiltak (id and title link to ADO),
-# the section grows to fit, and stickies of tiltak that are Done turn green.
-LOG_JS = """const rows = %s, sub = %s, done = %s;
-const page = await figma.getNodeByIdAsync(%s);
+# Finds the tiltakslogg section and its table on a page; shared by LOG_JS and STATUS_JS.
+FIND_LOG_JS = """const page = await figma.getNodeByIdAsync(%s);
 await figma.setCurrentPageAsync(page);
 const load = async t => { const n = t.characters.length;
   for (const f of (n ? t.getRangeAllFontNames(0, n) : [t.fontName])) await figma.loadFontAsync(f); };
+const tint = { "To Do": [0.93, 0.93, 0.93], "Doing": [1, 0.91, 0.64], "Done": [0xcd / 255, 0xf4 / 255, 0xd3 / 255] };
+const paint = st => tint[st] ? [{ type: "SOLID", color: { r: tint[st][0], g: tint[st][1], b: tint[st][2] } }] : null;
+const greenDone = done => { let g = 0;
+  if (done.length) for (const s of page.findAllWithCriteria({ types: ["STICKY"] })) {
+    const m = s.text.characters.match(/#(\\d{3,})/);
+    if (m && done.includes(+m[1])) { s.fills = paint("Done"); g++; }
+  }
+  return g; };
 const sec = page.children.find(n => n.type === "SECTION" && /tiltakslogg/i.test(n.name));
-if (!sec) return { rows: 0, green: 0, error: "fant ingen tiltakslogg på siden" };
-const sb = sec.absoluteBoundingBox;
+const sb = sec && sec.absoluteBoundingBox;
 const inside = n => { const b = n.absoluteBoundingBox; return b.x >= sb.x && b.y >= sb.y && b.x < sb.x + sb.width && b.y < sb.y + sb.height; };
-const table = sec.findOne(n => n.type === "TABLE") || page.children.find(n => n.type === "TABLE" && inside(n));
+const table = sec && (sec.findOne(n => n.type === "TABLE") || page.children.find(n => n.type === "TABLE" && inside(n)));
+"""
+
+# The tiltakslogg section's table gets one row per tiltak (id and title link to ADO) with its ADO
+# state in a Status column (added when the template doesn't have one, tinted by state), the section
+# grows to fit, and stickies of tiltak that are Done turn green.
+LOG_JS = """const rows = %s, sub = %s, done = %s;
+""" + FIND_LOG_JS + """if (!sec) return { rows: 0, green: 0, error: "fant ingen tiltakslogg på siden" };
 const subt = sec.findOne(n => n.type === "TEXT" && n.name === "Undertittel") || page.children.find(n => n.type === "TEXT" && n.name === "Undertittel" && inside(n));
 if (!table) return { rows: 0, green: 0, error: "fant ingen tabell i tiltaksloggen" };
 if (subt && sub) { await load(subt); subt.characters = sub; }
+if (table.numColumns < 4) table.insertColumn(table.numColumns);
+const head = table.cellAt(0, 3), left = table.cellAt(0, 2);
+if (head.text.characters.trim() !== "Status (u / x)") {
+  await load(left.text); await load(head.text);
+  head.text.characters = "Status (u / x)";
+  head.text.fontName = left.text.fontName; head.text.fontSize = left.text.fontSize; head.text.fills = left.text.fills;
+  head.fills = left.fills;
+}
 const pat = table.numRows > 2 ? [table.cellAt(1, 0).fills, table.cellAt(2, 0).fills] : null;
 while (table.numRows > Math.max(rows.length, 1) + 1) table.removeRow(table.numRows - 1);
 while (table.numRows < rows.length + 1) table.insertRow(table.numRows);
 for (let i = 0; i < Math.max(rows.length, 1); i++) {
-  for (let j = 0; j < 3; j++) {
+  for (let j = 0; j < 4; j++) {
     const cell = table.cellAt(i + 1, j);
     await load(cell.text);
     cell.text.characters = rows[i] ? rows[i][j] || " " : " ";
-    if (rows[i] && j < 2) cell.text.hyperlink = { type: "URL", value: rows[i][3] };
-    if (pat) cell.fills = pat[i %% 2];
+    if (rows[i] && j < 2) cell.text.hyperlink = { type: "URL", value: rows[i][4] };
+    if (j === 3 && rows[i] && paint(rows[i][3])) cell.fills = paint(rows[i][3]);
+    else if (pat) cell.fills = pat[i %% 2];
   }
 }
-const tb = table.absoluteBoundingBox, need = tb.y + tb.height - sb.y + 64;
-if (need > sb.height) sec.resizeWithoutConstraints(sb.width, need);
-let green = 0;
-if (done.length) for (const s of page.findAllWithCriteria({ types: ["STICKY"] })) {
-  const m = s.text.characters.match(/#(\\d{3,})/);
-  if (m && done.includes(+m[1])) { s.fills = [{ type: "SOLID", color: { r: 0xcd / 255, g: 0xf4 / 255, b: 0xd3 / 255 } }]; green++; }
+const tb = table.absoluteBoundingBox, need = tb.y + tb.height - sb.y + 64, wide = tb.x + tb.width - sb.x + 64;
+if (need > sb.height || wide > sb.width) sec.resizeWithoutConstraints(Math.max(sb.width, wide), Math.max(sb.height, need));
+return { rows: table.numRows - 1, green: greenDone(done), error: "" };"""
+
+# watch: Status cells get their ADO state written back (normalised, tinted), and stickies of tiltak
+# that are now Done turn green. Rows are found by the id in the first column.
+STATUS_JS = """const states = %s;
+""" + FIND_LOG_JS + """if (!table) return { n: 0, error: "fant ingen tabell i tiltaksloggen" };
+let col = -1;
+for (let j = 0; j < table.numColumns; j++) if (/status/i.test(table.cellAt(0, j).text.characters)) col = j;
+if (col < 0) return { n: 0, error: "tiltaksloggen har ingen Status-kolonne — kjør `ops log` eller `ops neste`" };
+let n = 0;
+for (let i = 1; i < table.numRows; i++) {
+  const st = states[table.cellAt(i, 0).text.characters.trim()];
+  if (!st) continue;
+  const c = table.cellAt(i, col);
+  await load(c.text);
+  if (c.text.characters !== st) c.text.characters = st;
+  if (paint(st)) c.fills = paint(st);
+  n++;
 }
-return { rows: table.numRows - 1, green, error: "" };"""
+greenDone(Object.keys(states).filter(k => states[k] === "Done").map(Number));
+return { n, error: "" };"""
 
 CLONE_PAGE_JS = """const tpl = await figma.getNodeByIdAsync(%s);
 await figma.setCurrentPageAsync(tpl);
@@ -916,15 +964,55 @@ def push(entries, board):
 
 
 def log_rows(items):
-    return [[str(t["id"]), t["title"], t["who"], f"{ITEM}{t['id']}"] for t in sorted(items, key=lambda t: t["id"])]
+    return [[str(t["id"]), t["title"], t["who"], t["state"], f"{ITEM}{t['id']}"] for t in sorted(items, key=lambda t: t["id"])]
 
 
 def write_log(page_id, d, items, done=()):
-    sub = f"Åpne tiltak per {long_day(d)} (To Do / Doing). Fylles fra ADO av ops."
-    return use_figma(LOG_JS % (json.dumps(log_rows(items), ensure_ascii=False), json.dumps(sub, ensure_ascii=False),
-                               json.dumps(sorted(done)), json.dumps(page_id)), {
+    sub = f"Tiltak per {long_day(d)}. Skriv x i Status når et tiltak er løst, u for å utsette det en uke."
+    r = use_figma(LOG_JS % (json.dumps(log_rows(items), ensure_ascii=False), json.dumps(sub, ensure_ascii=False),
+                            json.dumps(sorted(done)), json.dumps(page_id)), {
         "type": "object", "required": ["rows", "green", "error"],
         "properties": {"rows": {"type": "integer"}, "green": {"type": "integer"}, "error": {"type": "string"}}})
+    if not r["error"]:
+        save_synced(page_id, {str(t["id"]): t["state"] for t in items})
+    return r
+
+
+# The state each Status cell had when ops last wrote it, per page: a cell that differs from it was
+# changed on the board (→ ADO); a cell that still has it while ADO has moved on gets ADO's state.
+SYNCED = os.path.join(os.path.dirname(INBOX), "tiltakslogg.json")
+STATES = {"to do": "To Do", "todo": "To Do", "ny": "To Do", "doing": "Doing", "pagar": "Doing", "igang": "Doing",
+          "i gang": "Doing", "done": "Done", "ferdig": "Done", "lost": "Done", "x": "Done"}
+
+
+def status_of(text):
+    return STATES.get(fold(text).strip())
+
+
+def synced():
+    try:
+        with open(SYNCED) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_synced(page_id, states):
+    all_ = synced()
+    all_[page_id] = {**all_.get(page_id, {}), **states}
+    os.makedirs(os.path.dirname(SYNCED), exist_ok=True)
+    with open(SYNCED, "w") as f:
+        json.dump(all_, f, indent=1)
+
+
+def write_status(page_id, states):
+    r = use_figma(STATUS_JS % (json.dumps(states), json.dumps(page_id)), {
+        "type": "object", "required": ["n", "error"],
+        "properties": {"n": {"type": "integer"}, "error": {"type": "string"}}})
+    if r["error"]:
+        raise RuntimeError(r["error"])
+    save_synced(page_id, states)
+    return r["n"]
 
 
 # ── context ─────────────────────────────────────────────────────────────────
@@ -1181,7 +1269,7 @@ def watch_pass(state, dry, wait=True):
     """One look at the next meeting's page: Utfall stickies without #id → Issues, stickies retagged."""
     f = figma(f"files/{FILE}?depth=1")
     ver = f"{f['version']}:{f.get('lastModified', '')}"
-    if wait and ver == state.get("ver") and not state["pending"]:
+    if wait and ver == state.get("ver") and not state["pending"] and not state.get("cells"):
         return
     state["ver"] = ver
     ctx = Ctx()
@@ -1195,6 +1283,7 @@ def watch_pass(state, dry, wait=True):
     d = board.date
     if d in ctx.closed:
         return
+    sync_log(board, ctx, state, dry, wait)
     loose = {st["id"]: (ar, s, st) for ar, s, st in board.stickies()
              if s["name"] and COMMIT.search(s["name"]) and st["text"] and not TAGGED.search(st["text"])}
     made = watch_made()
@@ -1232,6 +1321,61 @@ def watch_pass(state, dry, wait=True):
     mark(board, retag)
     save_made({k: t for k, t in watch_made().items() if k not in {r["id"] for r in retag}})
     say(dim(f"{len(retag)} sticky(er) oppdatert på «{board.page}»"))
+
+
+def sync_log(board, ctx, state, dry, wait):
+    """The tiltakslogg's Status cells against ADO: a cell changed on the board since ops wrote it sets
+    the state in ADO («x» = Done), «u» moves the due date a week; otherwise ADO's state is written to the
+    cell. A cell is taken only once it reads the same on two looks in a row, like a sticky; one that
+    isn't a state is put back."""
+    if not board.log:
+        return
+    ids = [int(i) for i in board.log]
+    ado = {t["id"]: t["state"] for t in ctx.items}
+    rest = [i for i in ids if i not in ado]
+    if rest:
+        ado.update({w["fields"]["System.Id"]: w["fields"]["System.State"] for w in api(
+            "wit/workitemsbatch", {"ids": rest, "fields": ["System.Id", "System.State"]})["value"]})
+    base = synced().get(board.page_id, {})
+    due = {str(t["id"]): t.get("due") for t in ctx.items}
+    shifted = state.setdefault("utsatt", set())  # «u» done in ADO, the cell not yet written back
+    prev, state["cells"] = state.get("cells") or {}, {}
+    write = {}
+    for key, text in board.log.items():
+        cur, want = ado.get(int(key)), status_of(text)
+        if not cur or text == cur:
+            if cur and base.get(key) != cur and not dry:
+                save_synced(board.page_id, {key: cur})
+            continue
+        if wait and prev.get(key) != text:
+            state["cells"][key] = text  # still being edited, or just changed: look again next pass
+            continue
+        if fold(text).strip() == "u" and key in due and key not in shifted:
+            to = (due[key] or ctx.next or today()) + WEEK
+            if dry:
+                say(f"ville utsatt #{key} til {day(to)}")
+                continue
+            set_due(int(key), to)
+            shifted.add(key)
+            say(yellow(f"#{key} utsatt til {day(to)}") + dim("  fra tiltaksloggen"))
+        elif want and want != cur and want != base.get(key):
+            if dry:
+                say(f"ville satt #{key} → {want}")
+                continue
+            set_state(int(key), want)
+            for t in ctx.items:
+                if t["id"] == int(key):
+                    t["state"] = want
+            say(green(f"#{key} → {want}") + dim("  fra tiltaksloggen"))
+            cur = want
+        elif dry:
+            say(dim(f"ville skrevet {cur} i Status for #{key}"))
+            continue
+        write[key] = cur
+    if write:
+        write_status(board.page_id, write)
+        shifted.difference_update(write)
+        say(dim(f"tiltaksloggen: {len(write)} status(er) oppdatert"))
 
 
 def mark(board, items):
@@ -1505,16 +1649,15 @@ def cmd_log(a):
         return
     locale.setlocale(locale.LC_ALL, "")
     os.environ.setdefault("ESCDELAY", "25")
-    done = set()
+    done, before = set(), {t["id"]: t["state"] for t in ctx.items}
     curses.wrapper(log_tui, ctx, done)
-    if done and not a.ingen_board:
+    if any(t["state"] != before[t["id"]] for t in ctx.items) and not a.ingen_board:
         page = ctx.page_for(ctx.next)
         if page:
             print(dim(f"… oppdaterer tiltaksloggen på «{page[1]}»"), file=sys.stderr)
             try:
-                left = [t for t in ctx.items if t["state"] != "Done"]
-                r = write_log(page[0], ctx.next, left, done)
-                print(red(r["error"]) if r["error"] else f"tiltakslogg: {r['rows']} åpne · {r['green']} sticky(er) grønne")
+                r = write_log(page[0], ctx.next, ctx.items, done)
+                print(red(r["error"]) if r["error"] else f"tiltakslogg: {r['rows']} tiltak · {r['green']} sticky(er) grønne")
             except RuntimeError as e:
                 print(red(str(e)))
 
@@ -1668,7 +1811,7 @@ def main():
     lu.add_argument("--dry", action="store_true", help="vis planen, skriv ingenting")
     lu.add_argument("--igjen", action="store_true", help="lukk et møte som allerede er lukket på nytt")
     lu.add_argument("-y", "--yes", action="store_true", help="ikke spør")
-    wa = sub.add_parser("watch", aliases=["o", "åpne", "sync"], help="under møtet: nye Utfall-stickies → ADO-issues, stickyen ryddes og får #id")
+    wa = sub.add_parser("watch", aliases=["o", "åpne", "sync"], help="under møtet: nye Utfall-stickies → ADO-issues, Status i tiltaksloggen ↔ ADO")
     wa.add_argument("--en", action="store_true", help="én runde, uten å vente på at stickyen er ferdigskrevet")
     wa.add_argument("--dry", action="store_true", help="vis hva som ville blitt laget, skriv ingenting")
     wa.add_argument("--hvert", type=int, default=30, help="sekunder mellom hver titt (30)")
