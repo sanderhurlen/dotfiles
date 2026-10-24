@@ -16,6 +16,9 @@
 #   wr complete 6943         complete now if policies pass, else set auto-complete
 #   wr abandon 6943          abandon
 #   wr open 6943             open in browser
+#   wr draft 6943            a review agent's draft (comments + vote); --format for the agent
+#   wr post 6943             post the draft: a thread per comment, inline at file:line, then my vote
+#   wr threads 6943 [-m]     the PR's threads: status, file:line, every comment (-m mine only)
 #   wr help                  explained (Norwegian)
 #
 # Filters: -A all repos · -m mine · -n N · --days N (branches)
@@ -276,9 +279,210 @@ def abandon(pr):
     return f"⊘ forlatt !{pr.id}"
 
 
+# ── review drafts ───────────────────────────────────────────────────────────
+# A review agent writes its verdict as a draft instead of posting; I go through it with
+# the agent, who keeps the file up to date, and `wr post` sends it: one thread per
+# comment I haven't skipped, inline where it names file and line, replies in and fixes to
+# earlier threads (a re-review), then my vote. Each post appends a round to <id>.log.jsonl
+# with the PR's source commit, so fleet sees when the author has pushed since. Fleet's p
+# and the pr-utkast mod in Claude go through these same commands.
+
+DRAFTS = os.path.expanduser(os.environ.get("WR_DRAFTS", "~/.local/state/wr/review"))
+VOTES = {"approve": 10, "suggestions": 5, "wait": -5, "reject": -10, "none": None}
+VOTE_TEXT = {"approve": "approve", "suggestions": "approve med forslag", "wait": "vent på forfatter",
+             "reject": "reject", "none": "ingen stemme"}
+THREAD = {1: "aktiv", 2: "fikset", 3: "won't fix", 4: "lukket", 5: "by design", 6: "venter"}
+DRAFT_FORMAT = """\
+Utkastet til review av PR !{id} er JSON i {path}:
+
+  {{
+    "summary": "hva PR-en gjør og din vurdering, 1–3 setninger (til meg, postes ikke)",
+    "vote": "approve | suggestions | wait | reject | none",
+    "comments": [
+      {{"file": "src/sti/fil.cs", "line": 42, "text": "kommentar på linja, til forfatteren"}},
+      {{"text": "kommentar til PR-en som helhet"}}
+    ],
+    "questions": ["det du trenger at jeg avgjør før utkastet er ferdig"],
+    "replies": [{{"thread": 123, "text": "svar i en eksisterende tråd"}}],
+    "resolve": [123]
+  }}
+
+file er stien fra repoets rot, line er linja i den nye versjonen. Kommentarene skrives
+til forfatteren, på norsk, presise og med hvorfor. suggestions = godkjent med forslag
+som ikke blokkerer; wait = noe må fikses først. replies og resolve er for en ny runde:
+svar i, og merk som fikset, tråder fra `wr threads {id}`. Når vi blir enige om endringer,
+skriv hele fila på nytt. Jeg kan hoppe over kommentarer (skip: true) og bytte stemme
+selv. `wr post {id}` poster utkastet; det gjør jeg, ikke du."""
+
+
+def draft_path(id):
+    return os.path.join(DRAFTS, f"{id}.json")
+
+
+def log_path(id):
+    return os.path.join(DRAFTS, f"{id}.log.jsonl")
+
+
+def load_draft(id):
+    """The draft for PR id, checked; None when there is none. Raises RuntimeError when it's malformed."""
+    try:
+        with open(draft_path(id)) as f:
+            d = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"utkastet til !{id} kan ikke leses: {e}")
+    if d.get("vote", "none") not in VOTES:
+        raise RuntimeError(f"utkastet til !{id}: ukjent vote {d.get('vote')!r} ({' | '.join(VOTES)})")
+    for c in (d.get("comments") or []) + (d.get("replies") or []):
+        if not (c.get("text") or "").strip():
+            raise RuntimeError(f"utkastet til !{id}: en kommentar mangler text")
+        if bool(c.get("file")) != bool(c.get("line")):
+            raise RuntimeError(f"utkastet til !{id}: {c.get('file') or 'kommentar'} trenger både file og line")
+    if any(not isinstance(r.get("thread"), int) for r in d.get("replies") or []) or \
+            any(not isinstance(t, int) for t in d.get("resolve") or []):
+        raise RuntimeError(f"utkastet til !{id}: replies[].thread og resolve[] er tråd-id-er (tall)")
+    return d
+
+
+def save_draft(id, d):
+    os.makedirs(DRAFTS, exist_ok=True)
+    tmp = f"{draft_path(id)}.{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, draft_path(id))
+
+
+def last_round(id):
+    """The last posted round of PR id ({at, commit, vote, ...}), or None."""
+    try:
+        with open(log_path(id)) as f:
+            lines = [l for l in f if l.strip()]
+        return json.loads(lines[-1]) if lines else None
+    except (OSError, ValueError):
+        return None
+
+
+def draft_line(d):
+    """«approve med forslag · 3 av 4 kommentarer (2 i koden) · 2 svar · 1 lukkes · 1 spørsmål»."""
+    cs = d.get("comments") or []
+    on = [c for c in cs if not c.get("skip")]
+    inline = sum(1 for c in on if c.get("file"))
+    n = f"{len(on)} av {len(cs)}" if len(on) != len(cs) else str(len(cs))
+    rs, fx, qs = len(d.get("replies") or []), len(d.get("resolve") or []), len(d.get("questions") or [])
+    return " · ".join([VOTE_TEXT[d.get("vote", "none")],
+                       f"{n} kommentar{'er' if len(cs) != 1 else ''}" + (f" ({inline} i koden)" if inline else ""),
+                       *([f"{rs} svar"] if rs else []), *([f"{fx} lukkes"] if fx else []),
+                       *([f"{qs} spørsmål"] if qs else []),
+                       *([f"postet {ago(ts(d['posted']))}"] if d.get("posted") else [])])
+
+
+def edit_draft(id, vote=None, skip=None):
+    """Set the vote, and/or flip whether comment number skip (1-based) is posted. Returns the line."""
+    d = load_draft(id)
+    if d is None:
+        raise RuntimeError(f"ingen utkast for !{id}")
+    if vote is not None:
+        if vote not in VOTES:
+            raise RuntimeError(f"ukjent vote {vote!r} ({' | '.join(VOTES)})")
+        d["vote"] = vote
+    if skip is not None:
+        cs = d.get("comments") or []
+        if not 1 <= skip <= len(cs):
+            raise RuntimeError(f"utkastet til !{id} har {len(cs)} kommentarer")
+        cs[skip - 1]["skip"] = not cs[skip - 1].get("skip")
+    save_draft(id, d)
+    return draft_line(d)
+
+
+def post(id, dry=False, again=False):
+    """Post the draft on PR id: new threads, replies, fixed threads, then the vote. One line back."""
+    d = load_draft(id)
+    if d is None:
+        raise RuntimeError(f"ingen utkast for !{id} ({draft_path(id)})")
+    if d.get("posted") and not again:
+        raise RuntimeError(f"utkastet til !{id} ble postet {ago(ts(d['posted']))} — --again for å poste på nytt")
+    pr = PR(rest(f"git/pullrequests/{id}", scope="org"))  # any project, not just this repo's
+    if dry:
+        return f"ville postet på !{id}: {draft_line(d)}"
+    base = f"git/repositories/{pr.raw['repository']['id']}/pullRequests/{id}/threads"
+    made = []
+    for c in d.get("comments") or []:
+        if c.get("skip"):
+            continue
+        body = {"comments": [{"parentCommentId": 0, "content": c["text"], "commentType": 1}], "status": 1}
+        if c.get("file"):
+            at = {"line": int(c["line"]), "offset": 1}
+            body["threadContext"] = {"filePath": "/" + c["file"].lstrip("/"), "rightFileStart": at, "rightFileEnd": at}
+        made.append(rest(base, body, method="POST", project=pr.project)["id"])
+    for r in d.get("replies") or []:
+        rest(f"{base}/{r['thread']}/comments", {"parentCommentId": 1, "content": r["text"], "commentType": 1},
+             method="POST", project=pr.project)
+    for t in d.get("resolve") or []:
+        rest(f"{base}/{t}", {"status": 2}, method="PATCH", project=pr.project)
+    vote = VOTES[d.get("vote", "none")]
+    if vote is not None:
+        rest(f"git/repositories/{pr.raw['repository']['id']}/pullRequests/{id}/reviewers/{me()[0]}",
+             {"vote": vote}, method="PUT", project=pr.project)
+    d["posted"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    save_draft(id, d)
+    with open(log_path(id), "a") as f:
+        f.write(json.dumps({"at": d["posted"], "commit": (pr.raw.get("lastMergeSourceCommit") or {}).get("commitId"),
+                            "vote": d.get("vote", "none"), "threads": made,
+                            "replied": [r["thread"] for r in d.get("replies") or []],
+                            "resolved": d.get("resolve") or []}, ensure_ascii=False) + "\n")
+    return f"✓ postet på !{id}: {draft_line(d)}"
+
+
+def show_draft(id):
+    d = load_draft(id)
+    if d is None:
+        return print(dim(f"ingen utkast for !{id} ({draft_path(id)})"))
+    print(f"{bold(f'!{id} utkast')}  {draft_line(d)}")
+    if d.get("summary"):
+        print(f"\n{d['summary']}")
+    for n, c in enumerate(d.get("comments") or [], 1):
+        where = f"{c['file']}:{c['line']}" if c.get("file") else "PR"
+        print(f"\n{dim(f'{n}.')} {cyan(where)}" + (dim("  (hoppes over)") if c.get("skip") else ""))
+        print(dim(c["text"]) if c.get("skip") else c["text"])
+    for r in d.get("replies") or []:
+        print(f"\n{cyan(f'svar i tråd {r['thread']}')}\n{r['text']}")
+    if d.get("resolve"):
+        print(f"\n{green('lukkes som fikset:')} " + ", ".join(str(t) for t in d["resolve"]))
+    for q in d.get("questions") or []:
+        print(f"\n{yellow('?')} {q}")
+
+
+def threads(id, mine=False):
+    """The PR's discussion threads, oldest first, system threads left out: one block per thread."""
+    pr = PR(rest(f"git/pullrequests/{id}", scope="org"))
+    raw = rest(f"git/repositories/{pr.raw['repository']['id']}/pullRequests/{id}/threads",
+               project=pr.project)["value"]
+    my_id = me()[0]
+    out = []
+    for t in raw:
+        cs = [c for c in t.get("comments") or [] if c.get("commentType") != "system" and not c.get("isDeleted")]
+        if not cs or (mine and (cs[0].get("author") or {}).get("id") != my_id):
+            continue
+        ctx = t.get("threadContext") or {}
+        where = f"{ctx['filePath'].lstrip('/')}:{(ctx.get('rightFileStart') or {}).get('line', '?')}" \
+            if ctx.get("filePath") else "PR"
+        status = t.get("status") if isinstance(t.get("status"), int) else \
+            {"active": 1, "fixed": 2, "wontFix": 3, "closed": 4, "byDesign": 5, "pending": 6}.get(t.get("status"), 0)
+        head = f"{bold(f'tråd {t['id']}')}  {cyan(where)}  {THREAD.get(status, str(t.get('status')))}"
+        body = [f"  {dim((c.get('author') or {}).get('displayName', '?') + ':')} {html_text(c.get('content') or '')}"
+                for c in cs]
+        out.append("\n".join([head, *body]))
+    return out
+
+
+def html_text(s):
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s)).strip()
+
+
 # ── rendering ───────────────────────────────────────────────────────────────
 
-ICON = {"draft": "◌", "conflicts": "✗", "auto": "⚡", "ready": "✓", "active": "●"}
+ICON ={"draft": "◌", "conflicts": "✗", "auto": "⚡", "ready": "✓", "active": "●"}
 TONE = {"approved": "green", "rejected": "red", "broken": "red", "running": "cyan", "queued": "dim",
         "ready": "green", "conflicts": "red", "auto": "cyan", "draft": "dim", "active": "yellow"}
 CHIP = {"approved": "✓", "rejected": "✗", "broken": "✗", "running": "●", "queued": "○", "notApplicable": "-"}
@@ -530,6 +734,33 @@ def cmd_open(a):
     subprocess.run(["open", guard(find, a.id).url])
 
 
+def cmd_draft(a):
+    if a.path:
+        return print(draft_path(a.id))
+    if a.format:
+        return print(DRAFT_FORMAT.format(id=a.id, path=draft_path(a.id)))
+    if a.vote or a.skip:
+        return print(guard(edit_draft, a.id, a.vote, a.skip))
+    if a.json:
+        return print(json.dumps(guard(load_draft, a.id), ensure_ascii=False))
+    if a.line:
+        d = guard(load_draft, a.id)
+        return print(json.dumps({"line": draft_line(d), "posted": bool(d.get("posted")), "vote": d.get("vote", "none"),
+                                 "comments": [{"where": f"{c['file']}:{c['line']}" if c.get("file") else "PR",
+                                               "text": c["text"], "skip": bool(c.get("skip"))}
+                                              for c in d.get("comments") or []]} if d else None,
+                                ensure_ascii=False))
+    guard(show_draft, a.id)
+
+
+def cmd_threads(a):
+    print("\n\n".join(guard(threads, a.id, a.mine)) or dim("ingen tråder"))
+
+
+def cmd_post(a):
+    print(green(guard(post, a.id, a.dry_run, a.again)))
+
+
 GUIDE = """\
 {b}wr — pull requests i Azure DevOps fra terminalen{r}
 
@@ -548,6 +779,13 @@ GUIDE = """\
   wr complete <id>          fullfør nå hvis ingenting blokkerer, ellers slå på auto-complete
   wr abandon <id>           forlat PR-en
   wr open <id>              åpne i nettleser
+  wr draft <id>             review-utkastet en agent har skrevet: vurdering, stemme, kommentarer,
+                              spørsmål til meg · --path hvor fila ligger · --format formatet
+  wr post <id>              post utkastet: én tråd per kommentar (inline på file:line), så stemmen
+                              -n vis bare · --again post på nytt
+  wr draft <id> --vote V    bytt stemme: approve · suggestions · wait · reject · none
+  wr draft <id> --skip N    kommentar N med/ikke med når utkastet postes
+  wr threads <id> [-m]      trådene på PR-en: status, file:line, alle kommentarer (-m bare mine)
   wr help [kommando]        denne teksten, eller flaggene til én kommando
 
 {b}TASTER{r}  {d}(levende liste){r}
@@ -641,6 +879,27 @@ def main():
         s = sub.add_parser(name, help=h)
         s.add_argument("id", type=int)
         s.set_defaults(fn=fn)
+
+    s = sub.add_parser("draft", help="a review agent's draft: comments and vote, not yet posted")
+    s.add_argument("id", type=int)
+    s.add_argument("--path", action="store_true", help="print where the draft lives")
+    s.add_argument("--format", action="store_true", help="the draft's format, for the agent writing it")
+    s.add_argument("--line", action="store_true", help='{line, posted, vote, comments} as JSON for the mod, null without a draft')
+    s.add_argument("--json", action="store_true", help="the draft as it is, null without one")
+    s.add_argument("--vote", choices=list(VOTES), help="set the vote")
+    s.add_argument("--skip", type=int, metavar="N", help="flip whether comment N is posted")
+    s.set_defaults(fn=cmd_draft)
+
+    s = sub.add_parser("threads", help="a PR's discussion threads with status and replies")
+    s.add_argument("id", type=int)
+    s.add_argument("-m", "--mine", action="store_true", help="only threads I started")
+    s.set_defaults(fn=cmd_threads)
+
+    s = sub.add_parser("post", help="post the draft's comments and vote")
+    s.add_argument("id", type=int)
+    s.add_argument("-n", "--dry-run", action="store_true")
+    s.add_argument("--again", action="store_true", help="post even if it was posted before")
+    s.set_defaults(fn=cmd_post)
 
     s = sub.add_parser("help", help="forklaring av kommandoer og taster")
     s.add_argument("topic", nargs="?")

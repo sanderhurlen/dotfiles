@@ -61,6 +61,7 @@ def ado():
         do_GET = lambda self: self.handle_one("GET")
         do_POST = lambda self: self.handle_one("POST")
         do_PATCH = lambda self: self.handle_one("PATCH")
+        do_PUT = lambda self: self.handle_one("PUT")
 
         def log_message(self, *a):
             pass

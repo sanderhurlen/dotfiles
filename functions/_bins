@@ -78,6 +78,9 @@ _bins_wi() {
     'triage:Claude proposes how to triage an item; y writes it to ADO'
     'tree:item and its children'
     'show:one work item in full'
+    'new:create a work item; prints its id'
+    'set:change state, assignee, tags, parent, links, fields'
+    'comment:comment on a work item (- reads stdin)'
     'open:open in browser'
     'help:forklaring av kommandoer og filtre'
   )
@@ -94,8 +97,11 @@ _bins_wi() {
     (triage) _arguments '1::id:_bins_items' '(-m --model)'{-m,--model}'[]:model: ' '(-r --rerun)'{-r,--rerun}'[ask Claude again even if a proposal is cached]' '(-y --yes)'{-y,--yes}'[write the proposal to ADO without asking]' '--save[only make and cache the proposal, print one line]' '--json[print the cached record]' ;;
     (tree) _arguments '1:id:_bins_items' '(-d --depth)'{-d,--depth}'[]:depth: ' '(-A --all)'{-A,--all}'[include done children]' ;;
     (show) _arguments '1:id:_bins_items' '(-C --no-comments)'{-C,--no-comments}'[]' ;;
+    (new) _arguments '*:title_: ' '(-t --type)'{-t,--type}'[]:type: ' '(-s --state)'{-s,--state}'[state; done = typens ferdig-state]:state: ' '(-a --assignee)'{-a,--assignee}'[@me | none | e-post]:assignee: ' '(-g --tag)'{-g,--tag}'[legg til tag, gjentas]:tag: ' '(-p --parent)'{-p,--parent}'[parent (erstatter en eksisterende)]:parent: ' '(-b --blocked-by)'{-b,--blocked-by}'[predecessor, gjentas]:blocked_by: ' '(-d --description)'{-d,--description}'[beskrivelse, tekst eller HTML; - leser stdin]:description: ' '(-f --field)'{-f,--field}'[vilkårlig felt, gjentas]:FELT=VERDI: ' '(-c --comment)'{-c,--comment}'[kommentar etterpå; - leser stdin]:comment: ' ;;
+    (set) _arguments '1:id:_bins_items' '(-s --state)'{-s,--state}'[state; done = typens ferdig-state]:state: ' '(-a --assignee)'{-a,--assignee}'[@me | none | e-post]:assignee: ' '(-g --tag)'{-g,--tag}'[legg til tag, gjentas]:tag: ' '(-p --parent)'{-p,--parent}'[parent (erstatter en eksisterende)]:parent: ' '(-b --blocked-by)'{-b,--blocked-by}'[predecessor, gjentas]:blocked_by: ' '(-d --description)'{-d,--description}'[beskrivelse, tekst eller HTML; - leser stdin]:description: ' '(-f --field)'{-f,--field}'[vilkårlig felt, gjentas]:FELT=VERDI: ' '(-c --comment)'{-c,--comment}'[kommentar etterpå; - leser stdin]:comment: ' '(-G --untag)'{-G,--untag}'[fjern tag, gjentas]:untag: ' '--title[]:title: ' ;;
+    (comment) _arguments '1:id:_bins_items' '*:text: ' ;;
     (open) _arguments '1:id:_bins_items' ;;
-    (help) _arguments '1::topic:(mine ls sprint q ask triage tree show open help)' ;;
+    (help) _arguments '1::topic:(mine ls sprint q ask triage tree show new set comment open help)' ;;
   esac
 }
 
@@ -135,6 +141,9 @@ _bins_wr() {
     'complete:complete (or auto-complete) a PR'
     'abandon:abandon a PR'
     'open:open PR in browser'
+    'draft:a review agent'\''s draft\: comments and vote, not yet posted'
+    'threads:a PR'\''s discussion threads with status and replies'
+    'post:post the draft'\''s comments and vote'
     'help:forklaring av kommandoer og taster'
   )
   if (( CURRENT == 2 )); then
@@ -149,7 +158,10 @@ _bins_wr() {
     (complete) _arguments '1:id:_bins_prs' ;;
     (abandon) _arguments '1:id:_bins_prs' ;;
     (open) _arguments '1:id:_bins_prs' ;;
-    (help) _arguments '1::topic:(live ls branches new complete abandon open help)' ;;
+    (draft) _arguments '1:id:_bins_prs' '--path[print where the draft lives]' '--format[the draft'\''s format, for the agent writing it]' '--line[{line, posted, vote, comments} as JSON for the mod, null without a draft]' '--json[the draft as it is, null without one]' '--vote[set the vote]:vote:(approve suggestions wait reject none)' '--skip[flip whether comment N is posted]:N: ' ;;
+    (threads) _arguments '1:id:_bins_prs' '(-m --mine)'{-m,--mine}'[only threads I started]' ;;
+    (post) _arguments '1:id:_bins_prs' '(-n --dry-run)'{-n,--dry-run}'[]' '--again[post even if it was posted before]' ;;
+    (help) _arguments '1::topic:(live ls branches new complete abandon open draft threads post help)' ;;
   esac
 }
 

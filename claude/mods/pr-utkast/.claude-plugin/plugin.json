@@ -1,0 +1,6 @@
+{
+  "name": "pr-utkast",
+  "version": "0.1.0",
+  "description": "Review-utkastet til fleet-agenten over prompten, med Post-knapp, /post og /utkast",
+  "types": "./types/index.d.ts"
+}

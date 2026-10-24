@@ -931,7 +931,7 @@ def short(path):
 # answer threads. One fleet at a time runs it (autopilot.lock). Tuned in CONFIG.
 
 CONFIG = os.path.expanduser(os.environ.get("FLEET_CONFIG", "~/.config/fleet/config.toml"))
-DEFAULTS = {"autopilot": {"enabled": True, "triggers": ["review", "build", "conflict", "triage"], "max_parallel": 2,
+DEFAULTS = {"autopilot": {"enabled": True, "triggers": ["review", "rereview", "build", "conflict", "triage"], "max_parallel": 2,
                           "backlog_hours": 24, "max_fix_attempts": 2, "hours": "07-17", "weekdays": "mon-fri",
                           "blocked_minutes": 30},
             "notify": {"start": True, "done": True, "blocked": True}}
@@ -987,11 +987,16 @@ def explain(r):
             f"jeg bør se nøye på, og risiko. Bare les — ikke post kommentarer, ikke stem.")
 
 
+REREVIEW = "nye commits etter min review"
+
+
 class Auto:
-    """The agent autopilot starts for a Review or Mine: the row's own agent (review, fix), so its chip
-    and `claude agents` show it, with a prompt that posts nothing in ADO. launch() takes it."""
+    """The agent autopilot starts for a Review or Mine: the row's own agent (review, fix, or rereview when
+    the author pushed after I posted), so its chip and `claude agents` show it, with a prompt that posts
+    nothing in ADO. launch() takes it."""
     def __init__(self, x, why=""):
-        self.x, self.why, self.key, self.role, self.id, self.title = x, why, x.key, x.role, x.id, x.title
+        self.x, self.why, self.key, self.id, self.title = x, why, x.key, x.id, x.title
+        self.role = "rereview" if why == REREVIEW else x.role
 
     def clone(self):
         return clones().get((self.x.project.lower(), self.x.repo.lower()))
@@ -1016,11 +1021,24 @@ class Auto:
                     f"review-tråder, ikke stem, ikke complete PR-en.")
         if not self.clone():
             return explain(x)
+        if self.role == "rereview":
+            last, head = pushed_since(x)
+            return (f"Ny runde på PR !{x.id} «{x.title}» av {x.who} ({x.url}): forfatteren har pushet siden jeg "
+                    f"postet min review ({last[:10]} → {head[:10]}). Du står i et nytt worktree. Kjør "
+                    f"`git fetch origin {x.source} {x.target}` og `git checkout --detach origin/{x.source}`. Se hva "
+                    f"som er endret med `git diff {last}..origin/{x.source}` (finnes ikke {last[:10]} lenger, mot "
+                    f"origin/{x.target}), og trådene med `wr threads {x.id}`. Avgjør for hver av mine aktive "
+                    f"tråder om den er løst i koden eller besvart godt nok. Skriv så et nytt utkast etter "
+                    f"`wr draft {x.id} --format`: resolve for trådene som er løst, replies der svaret ikke holder, "
+                    f"comments bare for nye funn i det som er endret, og en stemme ut fra det som gjenstår. "
+                    f"Rapporter kort her. Ikke post, ikke stem, ikke push: jeg poster med `wr post {x.id}`.")
         return (f"Du står i et nytt worktree for PR !{x.id} «{x.title}» av {x.who} ({x.url}). Kjør "
                 f"`git fetch origin {x.source} {x.target}` og `git checkout --detach origin/{x.source}`. Kjør så "
                 f"/code-review med origin/{x.target} som fast punkt; spec er work itemene PR-en lenker (hent dem "
-                f"fra ADO). Finnes ingen spec, hopp over Spec-aksen — ikke spør. Bare rapporter her: ikke post "
-                f"kommentarer, ikke stem, ikke push.")
+                f"fra ADO). Finnes ingen spec, hopp over Spec-aksen — ikke spør. Skriv så vurderingen som et "
+                f"utkast etter `wr draft {x.id} --format`: kommentarene klare til å postes, en stemme, og det du "
+                f"trenger at jeg avgjør som spørsmål. Rapporter kort her og still spørsmålene. Ikke post, ikke "
+                f"stem, ikke push: jeg poster utkastet med `wr post {x.id}` når vi er enige.")
 
 
 def untriaged(w):
@@ -1109,6 +1127,8 @@ class Pilot:
         """(why, fingerprint, when it happened | None) when autopilot would start on x, else None."""
         trig = self.c["triggers"]
         if isinstance(x, Review):
+            if "rereview" in trig and pushed_since(x):
+                return REREVIEW, f"{x.key}@re-{pushed_since(x)[1][:10]}", None
             if "review" not in trig or not x.asked or x.vote:
                 return None
             return "review", f"{x.key}@review", None  # age from when fleet first saw me asked, not PR creation
@@ -1177,14 +1197,15 @@ class Pilot:
                 continue
             why, fp, at = t
             seen = st["seen"].setdefault(fp, now)
-            name = agent_name(x)
+            name = agent_name(Auto(x, why) if why == REREVIEW else x)
             agent = s.agents.get(name)
             tries = st["started"].get(x.key, [])
             if x.key in st["muted"] or fp in tries or agent in BUSY or name in self.pending:
                 continue
             if agent and not tries:  # I started that one myself
                 continue
-            if len(tries) >= (1 if isinstance(x, Review) else self.c["max_fix_attempts"]):
+            # a re-review runs once per push (fp carries the commit), so it never gives up
+            if "@re-" not in fp and len(tries) >= (1 if isinstance(x, Review) else self.c["max_fix_attempts"]):
                 chips[x.key] = ("🤖 ga opp", "red")
                 if x.key not in st["gaveup"]:
                     st["gaveup"].append(x.key)
@@ -1370,6 +1391,39 @@ def approve(r):
     return f"✓ godkjent !{p.id}"
 
 
+def pushed_since(r):
+    """(commit I last posted a review on, the PR's head now) when the author has pushed since; else None."""
+    last = (wr.last_round(r.id) or {}).get("commit")
+    head = (r.pr.raw.get("lastMergeSourceCommit") or {}).get("commitId")
+    return (last, head) if last and head and last != head else None
+
+
+def post_option(r):
+    """The menu's `p`: post the review agent's draft, when there is one not yet posted."""
+    try:
+        d = wr.load_draft(r.id)
+    except RuntimeError as e:
+        msg = str(e)  # e is gone once the except block ends
+        return [("p", f"utkast: {msg}", lambda: msg, False)]
+    if not d or d.get("posted"):
+        return []
+    return [("p", f"post utkastet ({wr.draft_line(d)})", lambda: wr.post(r.id),
+             f"post på !{r.id}: {wr.draft_line(d)}?")]
+
+
+def draft_chip(r):
+    """📝 the draft waiting to be posted; else 🔁 when the author pushed after I posted; else the posted one, dim."""
+    try:
+        d = wr.load_draft(r.id)
+    except RuntimeError:
+        return [("  📝 utkast feil", "red")]
+    if d and not d.get("posted"):
+        return [(f"  📝 {wr.draft_line(d)}", "yellow")]
+    if pushed_since(r):
+        return [("  🔁 nye commits siden min review", "yellow")]
+    return [(f"  📝 {wr.draft_line(d)}", "dim")] if d else []
+
+
 def auto_complete(r):
     return wr.complete(fresh(r), "auto")
 
@@ -1456,6 +1510,9 @@ def menu(x, pilot=None):
             ("c", "complete nå", lambda: complete_now(x), f"complete !{x.id} {x.title[:40]} → {x.target}?"),
             ("x", "abandon", lambda: abandon(x), f"abandon !{x.id} {x.title[:40]}?"),
             ("g", "start review-agent", lambda: launch(x), False),
+            *([("r", "ny runde: re-review av det som er pushet siden", lambda: launch(Auto(x, REREVIEW)), False)]
+              if pushed_since(x) else []),
+            *post_option(x),
             *pilot_options(pilot, x),
             ("o", "åpne i nettleser", lambda: subprocess.run(["open", x.url]) and "", False)])
     triage = [("t", "triage: se forslaget, y skriver til ADO", lambda: triage_here(x), "shell")] \
@@ -1573,7 +1630,7 @@ def pr_row(snap, r, wrepo):
              (r.title[:60], None), (f"  @{r.who} {ago(r.created)}", "dim")]
     if not r.asked:
         parts.append(("  (ikke reviewer)", "dim"))
-    return parts + agent_chip(snap, r) + auto_chip(snap, r)
+    return parts + agent_chip(snap, r) + draft_chip(r) + auto_chip(snap, r)
 
 
 def mine_row(snap, m, wrepo):
@@ -2239,6 +2296,8 @@ GUIDE = """\
   → / l     fold ut kart/spec (åpne tickets: ledig / tatt / blokkert) · ← / h fold inn · space veksle
   m         valg for raden:
               PR         a approve · u auto-complete · c complete · x abandon · g review-agent ·
+                         p post review-utkastet (📝 på raden; `wr draft <id>` viser det) ·
+                         r re-review når forfatteren har pushet etter at jeg postet (🔁) ·
                          z demp/slå på autopilot · n kjør auto nå · o åpne
               work item  t triage (Issue/Bug: `wi triage` her i terminalen, y skriver til ADO) ·
                          s endre status (1–9) · i nåværende sprint · g agent · v VS Code ·

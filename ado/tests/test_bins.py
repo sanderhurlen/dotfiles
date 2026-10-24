@@ -92,3 +92,144 @@ def test_completions_are_up_to_date():
     from conftest import ROOT
     r = subprocess.run([str(ROOT / "script" / "completions"), "--check"], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+def test_wi_new(ado, run):
+    ado.on("POST", r"/Demo/_apis/wit/workitems/\$Bug", {"id": 50})
+    ado.on("POST", r"/Demo/_apis/wit/workItems/50/comments", {})
+    r = run("wi", "new", "Knapp", "virker", "ikke", "-t", "Bug", "-p", "8", "-g", "needs-triage",
+            "-d", "Steg:\n\n- trykk\n- ingenting skjer", "-c", "fra support")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith("✓ #50 Bug") and "_workitems/edit/50" in r.stdout
+    ops = {o["path"]: o["value"] for o in next(b for m, p, b in ado.seen if "$Bug" in p)}
+    assert ops["/fields/System.Title"] == "Knapp virker ikke"
+    assert ops["/fields/System.Tags"] == "needs-triage"
+    assert ops["/fields/System.Description"] == "<p>Steg:</p><ul><li>trykk</li><li>ingenting skjer</li></ul>"
+    assert ops["/relations/-"]["rel"] == "System.LinkTypes.Hierarchy-Reverse"
+    assert ops["/relations/-"]["url"].endswith("/workItems/8")
+    assert any("comments" in p and b == {"text": "<p>fra support</p>"} for m, p, b in ado.seen)
+
+
+def test_wi_set_keeps_tags_and_replaces_parent(ado, run):
+    raw = item(5, "Sak", "Doing", tags="a; needs-triage", rels=[("System.LinkTypes.Related", 9),
+                                                                ("System.LinkTypes.Hierarchy-Reverse", 3)])
+    raw["rev"] = 7
+    ado.on("GET", r"/_apis/wit/workitems/5", raw)
+    items(ado, raw)
+    ado.on("GET", r"/Demo/_apis/wit/workitemtypes/Issue/states",
+           {"value": [{"name": "To Do", "category": "Proposed"}, {"name": "Done", "category": "Completed"}]})
+    ado.on("PATCH", r"/_apis/wit/workitems/5", {"id": 5})
+    r = run("wi", "set", "5", "-s", "done", "-g", "ready-for-agent", "-G", "needs-triage", "-p", "4", "-b", "6")
+    assert r.returncode == 0, r.stderr
+    ops = next(b for m, p, b in ado.seen if m == "PATCH")
+    assert ops[0] == {"op": "test", "path": "/rev", "value": 7}
+    vals = {o["path"]: o.get("value") for o in ops}
+    assert vals["/fields/System.State"] == "Done"
+    assert vals["/fields/System.Tags"] == "a; ready-for-agent"
+    assert {"op": "remove", "path": "/relations/1"} in ops  # the old parent, not the related link
+    assert [o["value"]["rel"] for o in ops if o["path"] == "/relations/-"] == [
+        "System.LinkTypes.Hierarchy-Reverse", "System.LinkTypes.Dependency-Reverse"]
+    assert "+ready-for-agent" in r.stdout and "-needs-triage" in r.stdout
+
+
+def test_wi_set_needs_something(ado, run):
+    ado.on("GET", r"/_apis/wit/workitems/5", dict(item(5, "Sak"), rev=1))
+    r = run("wi", "set", "5")
+    assert r.returncode == 1 and "ingenting å endre" in r.stderr
+    assert not any(m == "PATCH" for m, p, b in ado.seen)
+
+
+def pr(id=41):
+    return {"pullRequestId": id, "title": "Legg til eksport", "status": "active", "isDraft": False,
+            "repository": {"name": "app", "id": "r1", "project": {"name": "Demo", "id": "p1"}},
+            "sourceRefName": "refs/heads/feat/eksport", "targetRefName": "refs/heads/main",
+            "createdBy": {"uniqueName": "kari@example.com", "id": "k"}, "creationDate": "2026-10-20T08:00:00Z"}
+
+
+def test_wr_post(ado, run, tmp_path):
+    import json
+    run("wr", "draft", "41", "--path")  # the path is under HOME, which run() sets to tmp_path
+    d = tmp_path / ".local/state/wr/review/41.json"
+    d.parent.mkdir(parents=True)
+    d.write_text(json.dumps({"summary": "ok", "vote": "suggestions", "questions": [],
+                             "comments": [{"file": "src/a.cs", "line": 12, "text": "Navnet lyver"},
+                                          {"text": "Fint ellers"}]}))
+    ado.on("GET", r"/_apis/git/pullrequests/41", pr())
+    ado.on("GET", r"/_apis/connectionData", {"authenticatedUser": {"id": "me-id", "properties": {}}})
+    ado.on("POST", r"/Demo/_apis/git/repositories/r1/pullRequests/41/threads", {"id": 1})
+    ado.on("PUT", r"/Demo/_apis/git/repositories/r1/pullRequests/41/reviewers/me-id", {"vote": 5})
+    r = run("wr", "post", "41")
+    assert r.returncode == 0, r.stderr
+    assert "approve med forslag · 2 kommentarer (1 i koden)" in r.stdout
+    threads = [b for m, p, b in ado.seen if p.split("?")[0].endswith("/threads")]
+    assert threads[0]["threadContext"]["filePath"] == "/src/a.cs"
+    assert threads[0]["threadContext"]["rightFileStart"] == {"line": 12, "offset": 1}
+    assert "threadContext" not in threads[1]
+    assert [b for m, p, b in ado.seen if m == "PUT"] == [{"vote": 5}]
+    assert json.loads(d.read_text())["posted"]
+    again = run("wr", "post", "41")
+    assert again.returncode == 1 and "--again" in again.stderr
+
+
+def test_wr_post_refuses_a_bad_draft(ado, run, tmp_path):
+    d = tmp_path / ".local/state/wr/review/41.json"
+    d.parent.mkdir(parents=True)
+    d.write_text('{"vote": "lgtm", "comments": []}')
+    r = run("wr", "post", "41")
+    assert r.returncode == 1 and "ukjent vote" in r.stderr
+    assert not ado.seen
+
+
+def test_wr_draft_vote_and_skip(run, tmp_path):
+    import json
+    d = tmp_path / ".local/state/wr/review/41.json"
+    d.parent.mkdir(parents=True)
+    d.write_text(json.dumps({"vote": "suggestions", "comments": [{"text": "a"}, {"text": "b"}]}))
+    assert run("wr", "draft", "41", "--vote", "wait").stdout.startswith("vent på forfatter")
+    assert "1 av 2 kommentarer" in run("wr", "draft", "41", "--skip", "2").stdout
+    assert json.loads(d.read_text())["comments"][1]["skip"] is True
+    assert run("wr", "draft", "41", "--skip", "3").returncode == 1
+
+
+def test_wr_post_skips_replies_resolves_and_logs(ado, run, tmp_path):
+    import json
+    d = tmp_path / ".local/state/wr/review/41.json"
+    d.parent.mkdir(parents=True)
+    d.write_text(json.dumps({"vote": "approve", "comments": [{"text": "med"}, {"text": "uten", "skip": True}],
+                             "replies": [{"thread": 7, "text": "holder ikke"}], "resolve": [8]}))
+    ado.on("GET", r"/_apis/git/pullrequests/41", dict(pr(), lastMergeSourceCommit={"commitId": "abc123"}))
+    ado.on("GET", r"/_apis/connectionData", {"authenticatedUser": {"id": "me-id", "properties": {}}})
+    ado.on("POST", r"/Demo/_apis/git/repositories/r1/pullRequests/41/threads", {"id": 9})
+    ado.on("POST", r"/Demo/_apis/git/repositories/r1/pullRequests/41/threads/7/comments", {"id": 2})
+    ado.on("PATCH", r"/Demo/_apis/git/repositories/r1/pullRequests/41/threads/8", {"id": 8})
+    ado.on("PUT", r"/Demo/_apis/git/repositories/r1/pullRequests/41/reviewers/me-id", {"vote": 10})
+    r = run("wr", "post", "41")
+    assert r.returncode == 0, r.stderr
+    new = [b for m, p, b in ado.seen if m == "POST" and p.split("?")[0].endswith("/threads")]
+    assert [t["comments"][0]["content"] for t in new] == ["med"]
+    assert any(p.split("?")[0].endswith("/threads/7/comments") and b["content"] == "holder ikke" for m, p, b in ado.seen)
+    assert [b for m, p, b in ado.seen if m == "PATCH"] == [{"status": 2}]
+    log = json.loads((d.parent / "41.log.jsonl").read_text())
+    assert log["commit"] == "abc123" and log["threads"] == [9] and log["resolved"] == [8]
+
+
+def test_fleet_rereview_after_a_push(tmp_path, monkeypatch):
+    import json
+    from ado import load
+    fleet, wr = load("fleet"), load("wr")
+    monkeypatch.setattr(wr, "DRAFTS", str(tmp_path))
+    raw = dict(pr(), lastMergeSourceCommit={"commitId": "new456"},
+               reviewers=[{"id": "me-id", "vote": -5}])
+    monkeypatch.setattr(fleet.wr, "A", lambda: type("A", (), {"org": "https://x", "project": "Demo"})())
+    r = fleet.Review(raw, "me-id")
+    assert fleet.pushed_since(r) is None  # never posted
+    (tmp_path / "41.log.jsonl").write_text(json.dumps({"commit": "old123"}) + "\n")
+    assert fleet.pushed_since(r) == ("old123", "new456")
+    pilot = fleet.Pilot.__new__(fleet.Pilot)
+    pilot.c = {"triggers": ["review", "rereview"]}
+    why, fp, _ = pilot.trigger(r)
+    assert why == fleet.REREVIEW and fp == "fleet-pr-41@re-new456"
+    auto = fleet.Auto(r, why)
+    monkeypatch.setattr(fleet.Auto, "clone", lambda self: "/repo")
+    assert fleet.agent_name(auto) == "fleet-pr-41-rereview"
+    assert "git diff old123..origin/feat/eksport" in auto.prompt
