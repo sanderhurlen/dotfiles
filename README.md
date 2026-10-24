@@ -13,7 +13,7 @@ symlinked without extension into `$HOME` when you run `script/bootstrap`.
 There's a few special files in the hierarchy.
 
 - **bin/**: Anything in `bin/` will get added to your `$PATH` and be made
-  available everywhere. `dot bins` lists them.
+  available everywhere. `dot bins` lists them; `dot status` says what needs attention.
 - **ado/**: What the Azure DevOps bins (wf, wi, wp, wr, fleet, ops, standup) share: the
   ADO client, HTTP that retries reads, colours. `script/test` runs its tests and
   tower's; `script/completions` regenerates `functions/_bins` (zsh completion

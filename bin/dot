@@ -28,6 +28,50 @@ listBinsAndExit() {
 	exit
 }
 
+# What needs me, without installing anything: ✓ fine, ⚠ do something.
+statusAndExit() {
+	g="" y="" r=""
+	[ -t 1 ] && g='\033[32m' y='\033[33m' r='\033[0m'
+	ok() { printf "  ${g}✓${r} %s\n" "$1"; }
+	warn() { printf "  ${y}⚠${r} %s\n" "$1"; }
+	d="$dotfilesDirectory"
+
+	echo "dotfiles"
+	changed=$(git -C "$d" status --porcelain | wc -l | tr -d ' ')
+	ahead=$(git -C "$d" rev-list --count @{u}..HEAD 2>/dev/null || echo 0)
+	if [ "$changed" -gt 0 ] || [ "$ahead" -gt 0 ]; then
+		warn "$changed changed, $ahead unpushed — git -C $d status"
+	else
+		ok "clean and pushed"
+	fi
+	bad=""
+	for src in $(find -H "$d" -maxdepth 2 -name '*.symlink' -not -path '*.git*'); do
+		dst="$HOME/.$(basename "${src%.*}")"
+		[ "$(readlink "$dst")" = "$src" ] || bad="$bad ~/.$(basename "${src%.*}")"
+	done
+	if [ -n "$bad" ]; then warn "not linked:$bad — script/bootstrap"; else ok "symlinks in place"; fi
+	if "$d/script/completions" --check 2>/dev/null; then
+		ok "completions up to date"
+	else
+		warn "completions out of date — script/completions"
+	fi
+
+	echo "homebrew"
+	missing=$(brew bundle check --no-upgrade --verbose --file="$d/Brewfile" 2>&1 | awk '/needs to be installed/ { print $3 }' | tr '\n' ' ')
+	if [ -n "$missing" ]; then warn "not installed: ${missing}— brew bundle --file=$d/Brewfile"; else ok "Brewfile satisfied"; fi
+
+	echo "azure"
+	if az account get-access-token --query expiresOn -o tsv >/dev/null 2>&1; then
+		ok "az logged in ($(az account show --query user.name -o tsv 2>/dev/null))"
+	else
+		warn "az login has expired — az login (pg-token and the ADO bins need it)"
+	fi
+
+	echo "launchd"
+	if [ -t 1 ]; then CLICOLOR_FORCE=1 "$d/bin/chores" status; else "$d/bin/chores" status; fi 2>&1 | sed 's/^/  /'
+	exit
+}
+
 displayUsageAndExit() {
 	echo "dot -- dotfiles management"
 	echo ""
@@ -36,6 +80,7 @@ displayUsageAndExit() {
 	echo "Options:"
 	echo "  -e, --edit    Open dotfiles directory for editing"
 	echo "  -b, --bins    List the commands in bin/, one line each"
+	echo "  -s, --status  What needs attention: repo, symlinks, Brewfile, az login, launchd jobs"
 	echo "  -h, --help    Show this help message and exit"
 	exit
 }
@@ -44,6 +89,9 @@ while test $# -gt 0; do
 	case "$1" in
 		"-h"|"--help")
 			displayUsageAndExit
+			;;
+		"-s"|"--status"|"status")
+			statusAndExit
 			;;
 		"-b"|"--bins"|"bins")
 			listBinsAndExit
