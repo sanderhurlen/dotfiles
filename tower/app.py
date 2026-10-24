@@ -20,6 +20,7 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, Static
 
+from tower import jobber
 from tower.agent import AgentFeil, Agenter, ClaudeRunner, Jobb, Runner
 from tower.config import Config
 from tower.db import AVVIST, BESVART, FEILET as K_FEILET, GAMMEL, UTSATT, VENTER, Db, Rad
@@ -229,6 +230,51 @@ class NyMeldingValg(Valg):
                 Binding("r", "velg('r')", "Regenerer"), Binding("escape", "esc", "Se meldingen")]
 
 
+class JobbValg(ModalScreen[str | None]):
+    """`J`: launchd-jobbene mine — sist og neste kjøring, og hvordan det gikk. Jobbens tast velger den (navn ut)."""
+
+    DEFAULT_CSS = """
+    JobbValg { align: center middle; }
+    JobbValg > Static { width: auto; max-width: 120; height: auto; border: round $accent; padding: 1 2;
+                        background: $surface; }
+    """
+    BINDINGS = [Binding("escape", "esc", "Lukk")]
+
+    def __init__(self, jobber: list[dict]) -> None:
+        super().__init__()
+        self.taster: dict[str, str] = {}
+        linjer = ["[b]launchd-jobber[/]  [dim]tast = velg · esc lukker[/]", ""]
+        for j in jobber:
+            tast = next((c for c in j["name"].removeprefix("chores-") + "123456789"
+                         if c.isalnum() and c not in self.taster), "?")
+            self.taster[tast] = j["name"]
+            linjer.append(f"[b]{tast}[/]  {j['merke']} {escape(j['name'])}  [dim]{escape(j['every'])}[/] · "
+                          f"{escape(j['linje'])}")
+        if not jobber:
+            linjer.append("[dim]ingen com.sanderhurlen.*-jobber i launchd[/]")
+        self.tekst = "\n".join(linjer)
+
+    def compose(self) -> ComposeResult:
+        yield Static(self.tekst)
+
+    def on_key(self, e) -> None:
+        if navn := self.taster.get(e.character or ""):
+            e.stop()
+            self.dismiss(navn)
+
+    def action_esc(self) -> None:
+        self.dismiss(None)
+
+
+class JobbHandling(Valg):
+    VALG = {"i": "hva den gjør · hva som feilet · hva du kan gjøre", "k": "kjør nå", "l": "loggen"}
+    BINDINGS = [*(Binding(k, f"velg('{k}')", v) for k, v in VALG.items()), Binding("escape", "esc", "Tilbake")]
+
+    def __init__(self, j: dict) -> None:
+        super().__init__()
+        self.TITTEL = f"[b]{j['merke']} {escape(j['name'])}[/]  [dim]{escape(j['every'])}[/]\n{escape(j['linje'])}"
+
+
 class InstruksPrompt(ModalScreen[str | None]):
     """Instruks til regenerering. Tom = prøv igjen uten verktøy; `escape` = avbryt (None)."""
 
@@ -276,6 +322,7 @@ class Tower(App):
         Binding("c", "kopier", "Kopier"),
         Binding("o", "åpne", "Åpne"),
         Binding("k", "kunnskapsbase", "Kunnskapsbase"),
+        Binding("J", "jobber", "Jobber"),
         Binding("q", "quit", "Avslutt"),
     ]
 
@@ -1020,6 +1067,33 @@ class Tower(App):
             commit_manuelt(rot, self.config.meg)
         except (OSError, subprocess.CalledProcessError) as e:
             self.notify(f"Kunne ikke committe Kunnskapsbasen: {e}", severity="error")
+
+    def action_jobber(self) -> None:
+        """launchd-jobbene (`chores status`): har sync kjørt denne uka, når går den neste, hva feilet?"""
+        try:
+            liste = {j["name"]: j for j in jobber.jobber()}
+        except Exception as e:  # bin/chores mangler eller feiler: si det, ikke krasj TUI-en
+            self.notify(f"chores status: {e}", severity="error")
+            return
+
+        def handling(j: dict, valg: str | None) -> None:
+            if valg is None:
+                self.action_jobber()  # esc: tilbake til lista
+            elif valg == "k":
+                try:
+                    jobber.kjør(j["label"])
+                    self.notify(f"▶ {j['name']} startet")
+                except RuntimeError as e:
+                    self.notify(str(e), severity="error")
+            elif valg == "i" or j.get("log"):
+                self.i_terminal(jobber.detaljer_argv(j["name"]) if valg == "i"
+                                else jobber.logg_argv(j["name"], j["log"]))
+
+        def valgt(navn: str | None) -> None:
+            if navn:
+                self.push_screen(JobbHandling(liste[navn]), lambda v: handling(liste[navn], v))
+
+        self.push_screen(JobbValg(list(liste.values())), valgt)
 
     def i_terminal(self, argv: list[str]) -> int | None:
         """Kjører `argv` med TUI-en suspendert. None hvis den ikke kunne startes."""

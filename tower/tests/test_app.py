@@ -544,3 +544,36 @@ async def test_ny_melding_fjerner_merket(config):
         ny_melding(config, NORDLYS, "ny-1")
         await a.poll()
         assert not a.merket
+
+
+async def test_jobber_viser_launchd_jobbene_og_tasten_åpner_en(config, monkeypatch):
+    from tower import jobber
+    from tower.app import JobbHandling, JobbValg
+
+    kjørt, vist_i_terminal = [], []
+    jobb = lambda navn, merke, linje: {"name": navn, "label": f"com.x.{navn}", "every": "hver dag 07:00",
+                                       "merke": merke, "linje": linje, "log": "/tmp/x.log"}
+    monkeypatch.setattr(jobber, "jobber", lambda: [
+        jobb("chores-sync", "⚠", "sist i dag 07:12 · trenger deg"), jobb("chores-mise", "·", "aldri kjørt")])
+    monkeypatch.setattr(jobber, "kjør", kjørt.append)
+    monkeypatch.setattr(jobber, "detaljer_argv", lambda navn: ["detaljer", navn])
+    a = app(config)
+    monkeypatch.setattr(a, "i_terminal", vist_i_terminal.append)
+    async with a.run_test(size=(160, 40)) as pilot:
+        await pilot.press("J")
+        await pilot.pause()
+        assert isinstance(a.screen, JobbValg)
+        vist = str(a.screen.query_one(Static).render())
+        assert "s  ⚠ chores-sync" in vist and "m  · chores-mise" in vist
+        await pilot.press("s")
+        await pilot.pause()
+        assert isinstance(a.screen, JobbHandling)
+        await pilot.press("i")
+        await pilot.pause()
+        assert vist_i_terminal == [["detaljer", "chores-sync"]]
+        await pilot.press("J", "m", "k")
+        await pilot.pause()
+        assert kjørt == ["com.x.chores-mise"]
+        await pilot.press("J", "s", "escape")
+        await pilot.pause()
+        assert isinstance(a.screen, JobbValg)  # esc i handlingen går tilbake til lista

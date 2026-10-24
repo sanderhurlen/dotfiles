@@ -9,6 +9,9 @@
 #   chores mise [repo…]      is each runtime the repo needs pinned (mise, .nvmrc, global.json,
 #                            packageManager, engines, …), do the pins agree, and do they
 #                            match the baseline in ~/.config/fleet/config.toml [chores]
+#   chores status [--json]   every launchd job of mine (com.sanderhurlen.*): when it last
+#                            ran, when it runs next, and how it went
+#   chores status <job>      one job: what it does, what failed last time, what to do about it
 #   chores help              explained (Norwegian)
 #
 # -n: sync only fetches and says what it would do. --notify: macOS notification when
@@ -18,9 +21,12 @@
 import argparse
 import concurrent.futures
 import datetime
+import glob
 import json
 import os
+import plistlib
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -35,7 +41,7 @@ DEFAULTS = {"skip": [], "baseline": {}}
 ENV = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never", GIT_SSH_COMMAND="ssh -oBatchMode=yes")
 ADO_RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"  # Azure DevOps, for `az account get-access-token`
 
-TTY = sys.stdout.isatty()
+TTY = sys.stdout.isatty() or bool(os.environ.get("CLICOLOR_FORCE"))  # forced: fleet and tower pipe to less
 
 
 def c(code, s):
@@ -463,6 +469,268 @@ def cmd_mise(a):
         notify(f"mise: {len(bad)} repoer trenger noe", ", ".join(r["repo"] for r in bad))
 
 
+# ── status ──────────────────────────────────────────────────────────────────
+
+LAUNCH = os.path.expanduser(os.environ.get("CHORES_LAUNCH", "~/Library/LaunchAgents"))
+LABEL = "com.sanderhurlen."  # my launchd jobs (chores/install.sh, azure/install.sh, …)
+DAYS = ["man", "tir", "ons", "tor", "fre", "lør", "søn"]
+WEEKDAYS = ["mandager", "tirsdager", "onsdager", "torsdager", "fredager", "lørdager", "søndager"]
+# a chores job's summary of its last full run in chores.json: (statuses, label) per part
+SUMMARY = {"sync": [(("held",), "holdt igjen"), (("fail",), "feilet")],
+           "mise": [(("warn", "missing"), "trenger noe")]}
+PROBLEM = {"sync": ("fail",), "mise": ("warn", "missing")}  # repo rows that make the job ⚠ «trenger deg»
+SHOW = {"sync": ("fail", "held"), "mise": ("warn", "missing")}  # repo rows the details list
+# What each job does, for `chores status <job>`; a job not here shows its plist's program.
+ABOUT = {
+    "chores-sync": "Henter alle repoer under {roots} (fetch --prune) og fast-forwarder default branch der ingenting\n"
+                   "kan gå tapt. På en feature-branch flyttes bare lokal main. Altså «git pull» for alt, trygt.",
+    "chores-mise": "Sjekker at hvert repo pinner runtimene det trenger (node, pnpm, dotnet, python, …), at pinnene\n"
+                   "er enige med hverandre, og at de treffer baseline i {config} [chores.baseline].",
+    "pg-token": "Henter et ferskt Entra-token med az-innloggingen og skriver det i ~/.pgpass, så psql og DataGrip\n"
+                "kobler til Azure Postgres uten å lime inn token. Tokenet varer ~1 time, derfor hvert 30. minutt.",
+}
+
+
+def slots(cal, around):
+    """Times a StartCalendarInterval entry fires within five weeks of `around`; a missing key is any."""
+    day0 = around.replace(hour=0, minute=0, second=0, microsecond=0)
+    for n in range(-35, 36):
+        d = day0 + datetime.timedelta(days=n)
+        if "Weekday" in cal and d.weekday() != (cal["Weekday"] - 1) % 7:  # launchd: 0 and 7 are Sunday
+            continue
+        if cal.get("Day", d.day) != d.day or cal.get("Month", d.month) != d.month:
+            continue
+        for h in [cal["Hour"]] if "Hour" in cal else range(24):
+            for m in [cal["Minute"]] if "Minute" in cal else range(60):
+                yield d.replace(hour=h, minute=m)
+
+
+def when(cal):
+    day = WEEKDAYS[(cal["Weekday"] - 1) % 7] if "Weekday" in cal else f"den {cal['Day']}." if "Day" in cal else "hver dag"
+    hm = f"{cal['Hour']:02}:{cal.get('Minute', 0):02}" if "Hour" in cal else f"hver time :{cal.get('Minute', 0):02}"
+    return f"{day} {hm}"
+
+
+def launchctl(label):
+    """runs, last exit code and whether it runs now, from launchd (None: not loaded)."""
+    p = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"], capture_output=True, text=True)
+    if p.returncode:
+        return None
+    exit_ = re.search(r"^\tlast exit code = (-?\d+)", p.stdout, re.M)
+    return {"running": bool(re.search(r"^\tstate = running", p.stdout, re.M)),
+            "exit": int(exit_.group(1)) if exit_ else None}
+
+
+def summary(kind, rows):
+    parts = [f"{len(rows)} repoer"] + [f"{n} {label}" for st, label in SUMMARY.get(kind, [])
+                                       if (n := sum(r["status"] in st for r in rows))]
+    return " · ".join(parts)
+
+
+def status():
+    """Each of my launchd jobs: when it runs, when it last ran, when it runs next, and how it went.
+
+    Last run is the chores job's own record in chores.json (a manual full run counts), else the
+    mtime of its log. Missed («forfalt»): the last run is older than the last time it should have
+    run — launchd runs a missed calendar job when the Mac wakes."""
+    now = datetime.datetime.now().astimezone()
+    try:
+        with open(STATE) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        state = {}
+    out = []
+    for path in sorted(glob.glob(os.path.join(LAUNCH, LABEL + "*.plist"))):
+        try:
+            with open(path, "rb") as f:
+                p = plistlib.load(f)
+        except (OSError, plistlib.InvalidFileException):
+            continue
+        label = p.get("Label") or os.path.basename(path)[:-6]
+        name = label[len(LABEL):]
+        kind = name.removeprefix("chores-") if name.startswith("chores-") else None
+        last, text, rows = None, "", []
+        if kind and kind in state:
+            last = datetime.datetime.fromisoformat(state[kind]["at"])
+            text = summary(kind, state[kind]["repos"])
+            rows = [r for r in state[kind]["repos"] if r["status"] in SHOW.get(kind, ())]
+        elif not kind and (log := p.get("StandardOutPath")) and os.path.exists(log):
+            last = datetime.datetime.fromtimestamp(os.path.getmtime(log)).astimezone()
+        prev = next_ = None
+        if cal := p.get("StartCalendarInterval"):
+            cals = cal if isinstance(cal, list) else [cal]
+            every = ", ".join(when(c) for c in cals)
+            times = sorted(t.astimezone() for c in cals for t in slots(c, now.replace(tzinfo=None)))
+            prev = max((t for t in times if t <= now), default=None)
+            next_ = min((t for t in times if t > now), default=None)
+        elif sec := p.get("StartInterval"):
+            every = f"hvert {sec // 60}. minutt" if sec < 3600 else f"hver {sec // 3600}. time"
+            if last:
+                prev = now - datetime.timedelta(seconds=2 * sec)  # one late run is fine, two is not
+                next_ = max(now, last + datetime.timedelta(seconds=sec))
+        else:
+            every = "ved innlogging" if p.get("RunAtLoad") else "?"
+        lc = launchctl(label)
+        if lc is None:
+            st = "unloaded"
+        elif lc["running"]:
+            st = "running"
+        elif lc["exit"]:
+            st, text = "fail", f"exit {lc['exit']}" + (f" · {text}" if text else "")
+        elif not last and prev and prev.timestamp() > os.path.getmtime(path):  # should have run since installed
+            st = "missed"
+        elif not last:
+            st = "never"
+        elif prev and last < prev:
+            st = "missed"
+        elif any(r["status"] in PROBLEM.get(kind, ()) for r in rows):
+            st = "warn"
+        else:
+            st = "ok"
+        out.append({"name": name, "label": label, "status": st, "every": every, "text": text,
+                    "last": last and last.isoformat(timespec="seconds"),
+                    "next": next_ and next_.isoformat(timespec="seconds"), "exit": lc and lc["exit"],
+                    "kind": kind, "rows": rows, "log": p.get("StandardErrorPath") or p.get("StandardOutPath"),
+                    "program": " ".join(p.get("ProgramArguments") or [p.get("Program", "?")])})
+    return out
+
+
+def rel(iso, now=None):
+    """«i dag 07:12», «i går 07:00», «tor 07:00» (this week ±6 days) or «12.10 07:00»."""
+    if not iso:
+        return "—"
+    t = datetime.datetime.fromisoformat(iso)
+    now = now or datetime.datetime.now().astimezone()
+    days = (t.date() - now.date()).days
+    day = {0: "i dag", -1: "i går", 1: "i morgen"}.get(days) or (DAYS[t.weekday()] if abs(days) < 7 else t.strftime("%d.%m"))
+    return f"{day} {t:%H:%M}"
+
+
+MARK = {"ok": "✓", "running": "▶", "missed": "⚠", "warn": "⚠", "never": "·", "fail": "✗", "unloaded": "?"}
+WORD = {"ok": "", "running": "kjører nå", "missed": "forfalt", "warn": "trenger deg", "never": "aldri kjørt",
+        "fail": "feilet", "unloaded": "ikke lastet i launchd"}
+COL = {"ok": green, "running": cyan, "missed": yellow, "warn": yellow, "never": dim, "fail": red, "unloaded": yellow}
+
+
+def row_hint(kind, r):
+    """What I can do about one repo row from the last run."""
+    t, path = r.get("text", ""), short_path(r["path"])
+    if kind == "sync" and r["status"] == "held":
+        return "commit, stash eller fullfør merge/rebase i repoet — da tar neste sync det"
+    if kind == "sync" and re.search(r"not found|does not exist", t):
+        return f"repoet finnes ikke lenger på origin (slettet/flyttet i ADO): sett ny origin med " \
+               f"`git -C {path} remote set-url origin <url>`, eller slett klonen"
+    if kind == "sync" and re.search(r"Authentication|Username|401|403|credential", t, re.I):
+        return "pålogging: `az login`, så kjør jobben på nytt"
+    if kind == "sync" and re.search(r"resolve host|timed out|unreachable|Connection", t, re.I):
+        return "nett/VPN var nede — kjør jobben på nytt"
+    if kind == "sync":
+        return f"se feilen selv: `git -C {path} fetch --prune`"
+    fs = " ".join(r.get("findings", []))
+    if "ikke pinnet" in fs:
+        return f"pin runtimen i repoet, f.eks. `mise use node@<baseline>` i {path}"
+    if "flere mise-filer" in fs:
+        return "slå mise-filene sammen til én"
+    return "rett pinnen til baseline, eller endre [chores.baseline] hvis baseline er feil — `chores mise <repo>` viser alt"
+
+
+def short_path(p):
+    return p.replace(os.path.expanduser("~"), "~", 1)
+
+
+def tail(path, n=15):
+    try:
+        with open(path, errors="replace") as f:
+            return f.readlines()[-n:]
+    except OSError:
+        return []
+
+
+def find(name):
+    jobs = status()
+    hit = [j for j in jobs if j["name"] == name] or [j for j in jobs if name in j["name"]]
+    if len(hit) != 1:
+        die(f"{'flere' if hit else 'ingen'} jobber passer «{name}»: {', '.join(j['name'] for j in hit or jobs)}")
+    return hit[0]
+
+
+def details(j):
+    """`chores status <job>`: what it does, how the last run went, and what I can do about it."""
+    st = j["status"]
+    out = [f"{bold(j['name'])}  {COL[st](MARK[st] + ' ' + (WORD[st] or 'ok'))}  " + dim(f"{j['every']} · {j['label']}"),
+           f"  sist {rel(j['last'])} · neste {rel(j['next'])}" + (f" · {j['text']}" if j["text"] else ""), "",
+           bold("Hva den gjør")]
+    about = ABOUT.get(j["name"])
+    out += ["  " + l for l in (about.format(roots=", ".join(ROOTS), config=short_path(CONFIG)).splitlines()
+                               if about else [])] + [dim(f"  kjører: {short_path(j['program'])}"), ""]
+    todo = []
+    if j["rows"]:
+        mark = {"fail": red("✗"), "held": yellow("⚠"), "warn": yellow("⚠"), "missing": red("✗")}
+        out.append(bold("Siste kjøring"))
+        w = max(len(r["repo"]) for r in j["rows"])
+        for r in j["rows"]:
+            what = r.get("text") or " · ".join(r.get("findings", []))
+            out += [f"  {mark[r['status']]} {r['repo'].ljust(w)}  {what}", dim(f"    → {row_hint(j['kind'], r)}")]
+        out.append("")
+    if st == "fail":
+        todo.append(f"jobben avsluttet med exit {j['exit']} — feilen står i loggen under; "
+                    f"kjør `{short_path(j['program'])}` selv for å se den direkte")
+        if j["name"] == "pg-token" or any("az login" in l for l in tail(j["log"] or "")):
+            todo.append("står det «az login»: logg inn med `az login`, så kjør jobben på nytt")
+    elif st == "missed":
+        todo.append("launchd kjører en tapt kalenderjobb når Mac-en våkner; har den stått på uten at det skjedde, "
+                    "kjør den nå og se i loggen")
+    elif st == "never":
+        todo.append("den har ikke vært planlagt siden den ble installert — kjør den nå om du ikke vil vente")
+    elif st == "unloaded":
+        todo.append("jobben ligger i LaunchAgents men er ikke lastet: kjør install-skriptet (script/install)")
+    if todo:
+        out += [bold("Hva du kan gjøre")] + [f"  → {t}" for t in todo] + [""]
+    if j["log"] and (st == "fail" or not j["kind"]):
+        out += [bold(f"Logg") + dim(f"  {short_path(j['log'])}, siste linjer")] + \
+               ["  " + dim(l.rstrip("\n")) for l in tail(j["log"], 15 if st == "fail" else 5)]
+    return "\n".join(out).rstrip() + "\n"
+
+
+def line(j):
+    """One job as text, for chores status, fleet and tower."""
+    bits = [f"sist {rel(j['last'])}", f"neste {rel(j['next'])}", WORD[j["status"]], j["text"]]
+    return " · ".join(b for b in bits if b)
+
+
+def cmd_status(a):
+    if a.job:
+        j = find(a.job)
+        print(json.dumps(j, indent=1, ensure_ascii=False) if a.json else details(j), end="" if not a.json else "\n")
+        return
+    jobs = status()
+    if a.json:
+        print(json.dumps(jobs, indent=1, ensure_ascii=False))
+        return
+    col = COL
+    w = max((len(j["name"]) for j in jobs), default=0)
+    ew = max((len(j["every"]) for j in jobs), default=0)
+    for j in jobs:
+        print(f"{col[j['status']](MARK[j['status']])} {j['name'].ljust(w)}  {dim(j['every'].ljust(ew))}  {line(j)}")
+    if not jobs:
+        print(dim(f"ingen {LABEL}*-jobber i {LAUNCH}"))
+
+
+def pager(name, log=None):
+    """argv that shows `chores status <name>` (or the log, from the end) in less, for fleet and tower."""
+    if log:
+        return ["less", "-R", "+G", log]
+    me = os.path.realpath(__file__)
+    return ["sh", "-c", f"CLICOLOR_FORCE=1 {shlex.quote(me)} status {shlex.quote(name)} | less -R"]
+
+
+def kickstart(label):
+    """Runs a launchd job now, as launchd would (same env, log and --notify)."""
+    p = subprocess.run(["launchctl", "kickstart", f"gui/{os.getuid()}/{label}"], capture_output=True, text=True)
+    if p.returncode:
+        raise RuntimeError(f"launchctl kickstart {label}: {(p.stderr or p.stdout).strip()}")
+
+
 # ── help ────────────────────────────────────────────────────────────────────
 
 GUIDE = """\
@@ -490,6 +758,14 @@ GUIDE = """\
     ·  i skip-lista, eller trenger ingen runtime
   Poenget er at versjonen er pinnet og konsistent, ikke at mise brukes: global.json holder for .NET.
   Baseline og skip-liste: {config} → [chores].
+
+{b}chores status{r}  (også i fleet og tower: tast J)
+  Alle launchd-jobbene mine (com.sanderhurlen.*): når de går, sist og neste kjøring, og hvordan det gikk.
+    ✓  kjørt når den skulle      ⚠  forfalt: siste kjøring er eldre enn sist den skulle gått
+    ▶  kjører nå                 ✗  feilet (exit-kode fra launchd)      ·  aldri kjørt
+    ⚠  trenger deg: jobben gikk, men noe i den feilet (et repo sync ikke fikk hentet, en pin som mangler)
+  chores status <jobb>: hva jobben gjør, hva som feilet sist (per repo, eller loggen) og hva du kan gjøre.
+  Sist kjørt: chores sin egen post i {state} (en manuell full kjøring teller), ellers loggens mtime.
 
 Begge skriver resultatet til {state}. --notify: macOS-varsel når noe trenger meg.
 Installer launchd-jobbene: chores/install.sh (kjøres av script/install).
@@ -519,6 +795,11 @@ def main():
     s.add_argument("repos", nargs="*", help="only these (dir names)")
     s.add_argument("--notify", action="store_true", help="macOS notification when a repo needs something")
     s.set_defaults(fn=cmd_mise)
+
+    s = sub.add_parser("status", help="my launchd jobs: last run, next run, how it went")
+    s.add_argument("job", nargs="?", help="one job in detail: what it does, what failed, what to do (sync, mise, …)")
+    s.add_argument("--json", action="store_true", help="as JSON, for fleet and tower")
+    s.set_defaults(fn=cmd_status)
 
     s = sub.add_parser("help", help="forklaring (norsk)")
     s.set_defaults(fn=cmd_help)
