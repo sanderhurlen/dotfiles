@@ -1,0 +1,9 @@
+#!/bin/sh
+#
+# script/test — the tests: the ADO bins (ado/tests) and tower (tower/tests).
+# Arguments go to pytest, e.g. script/test -k retry
+
+set -e
+cd "$(dirname "$0")/.."
+uv run -q --with pytest pytest -q ado/tests "$@"
+uv run -q --with pytest --with pytest-asyncio --with 'textual>=8,<9' pytest -q -o asyncio_mode=auto tower/tests "$@"
