@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+#
+# script/completions — writes functions/_bins, zsh completion for the argparse bins,
+# from each bin's own parser: subcommands with their help, options, and for ids the
+# work items and PRs fleet last saw (~/.cache/fleet/state.json), with titles.
+#
+# Run it again after changing a bin's arguments; ado/tests checks it's up to date.
+# --check: exit 1 if functions/_bins would change.
+
+import argparse
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, ROOT)
+from ado import load  # noqa: E402
+
+BINS = ["wf", "wi", "wp", "wr", "fleet", "ops", "chores", "entra"]
+OUT = os.path.join(ROOT, "functions", "_bins")
+
+# What an id argument names, per bin (and subcommand where it differs)
+ITEMS, PRS = "_bins_items", "_bins_prs"
+IDS = {"wf": ITEMS, "wi": ITEMS, "wr": PRS,
+       ("fleet", "go"): ITEMS, ("fleet", "code"): ITEMS, ("fleet", "wi"): ITEMS,
+       ("fleet", "review"): PRS, ("fleet", "fix"): PRS, ("fleet", "pr"): PRS}
+ARGS = {("chores", "repos"): "_bins_repos", ("chores", "job"): "_bins_jobs", ("wr", "branch"): "_bins_branches"}
+
+HELPERS = r'''
+# work items / PRs fleet last saw, as id:title
+_bins_items() {
+  local f=${XDG_CACHE_HOME:-$HOME/.cache}/fleet/state.json
+  [[ -r $f ]] || return 1
+  local -a ids=(${(f)"$(jq -r '.workItems[]? | ., (.tickets[]? // empty) | "\(.id):\(.title | gsub(":"; "\\:"))"' $f 2>/dev/null)"})
+  _describe -t work-items 'work item' ids
+}
+_bins_prs() {
+  local f=${XDG_CACHE_HOME:-$HOME/.cache}/fleet/state.json
+  [[ -r $f ]] || return 1
+  local -a ids=(${(f)"$(jq -r '(.pullRequests[]?, .myPullRequests[]?) | "\(.id):\(.repo) \(.title | gsub(":"; "\\:"))"' $f 2>/dev/null)"})
+  _describe -t pull-requests 'pull request' ids
+}
+_bins_repos() {
+  local r; for r in ${(s.:.)${FLEET_ROOTS:-$HOME/visense}}; do _files -W ${~r} -/; done
+}
+_bins_jobs() {
+  local -a jobs=(~/Library/LaunchAgents/com.sanderhurlen.*.plist(N:t:r))
+  compadd ${jobs#com.sanderhurlen.}
+}
+_bins_branches() {
+  compadd ${(f)"$(git for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)"}
+}
+'''
+
+
+class Caught(Exception):
+    def __init__(self, parser):
+        self.parser = parser
+
+
+def parser_of(name):
+    """The bin's top-level parser, caught at its first parse_args — main() runs no further."""
+    mod = load(name)
+    real = argparse.ArgumentParser.parse_args
+    argparse.ArgumentParser.parse_args = lambda self, *a, **k: (_ for _ in ()).throw(Caught(self))
+    argv = sys.argv
+    sys.argv = [name]
+    try:
+        mod.main()
+    except Caught as c:
+        return c.parser
+    finally:
+        argparse.ArgumentParser.parse_args, sys.argv = real, argv
+    raise RuntimeError(f"{name}: main() never parsed its arguments")
+
+
+def q(s):
+    """Text inside a zsh single-quoted _arguments spec."""
+    s = " ".join((s or "").split()).replace("'", "'\\''")
+    for ch in "[]:":
+        s = s.replace(ch, "\\" + ch)
+    return s
+
+
+def option(act):
+    flags = [f for f in act.option_strings]
+    if not flags or act.help == argparse.SUPPRESS:
+        return None
+    value = ""
+    if act.nargs != 0:
+        value = ":" + q(act.metavar or act.dest) + ":" + (f"({' '.join(map(str, act.choices))})" if act.choices else " ")
+    if len(flags) == 1:
+        return f"'{flags[0]}[{q(act.help)}]{value}'"
+    return f"'({' '.join(flags)})'{{{','.join(flags)}}}'[{q(act.help)}]{value}'"
+
+
+def positional(name, sub, act, n, subs):
+    action = ARGS.get((name, act.dest)) or (IDS.get((name, sub)) or IDS.get(name) if act.type is int else None)
+    if act.choices:
+        action = f"({' '.join(map(str, act.choices))})"
+    if act.dest == "topic":
+        action = f"({' '.join(subs)})"
+    label = q(act.help or act.dest)
+    if act.nargs in ("+", "*"):
+        return f"'*:{label}:{action or ' '}'"
+    return f"'{n}:{':' if act.nargs == '?' else ''}{label}:{action or ' '}'"
+
+
+def specs(name, sub, p, subs):
+    out, n = [], 1
+    for act in p._actions:
+        if isinstance(act, (argparse._HelpAction, argparse._SubParsersAction)):
+            continue
+        if act.option_strings:
+            s = option(act)
+        else:
+            s, n = positional(name, sub, act, n, subs), n + 1
+        if s:
+            out.append(s)
+    return out
+
+
+def function(name):
+    p = parser_of(name)
+    sp = next(a for a in p._actions if isinstance(a, argparse._SubParsersAction))
+    helps = {a.dest: a.help for a in sp._choices_actions}
+    subs = [s for s in sp.choices if not s.startswith("_")]
+    real = {}  # alias → the subcommand it names, for its help
+    for s, sub in sp.choices.items():
+        real.setdefault(id(sub), s)
+    lines = [f"_bins_{name}() {{", "  local -a subs=("]
+    for s in subs:
+        lines.append(f"    '{q(s)}:{q(helps.get(s) or helps.get(real[id(sp.choices[s])]) or '')}'")
+    lines.append("  )")
+    top = specs(name, None, p, subs)
+    lines.append("  if (( CURRENT == 2 )); then")
+    if top:
+        lines.append("    [[ $PREFIX == -* ]] && { _arguments " + " ".join(top) + "; return; }")
+    lines.append(f"    _describe -t commands '{name} command' subs; return")
+    lines.append("  fi")
+    lines.append("  local sub=$words[2]; shift words; (( CURRENT-- ))")
+    lines.append("  case $sub in")
+    for s in subs:
+        args = specs(name, real[id(sp.choices[s])], sp.choices[s], subs)
+        lines.append(f"    ({s}) _arguments {' '.join(args)} ;;" if args else f"    ({s}) ;;")
+    lines.append("  esac")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def render():
+    head = (f"#compdef {' '.join(BINS)}\n"
+            "#\n# Generated by script/completions from each bin's argparse — run it again after changing one.\n")
+    body = "\n\n".join(function(b) for b in BINS)
+    return head + HELPERS + "\n" + body + "\n\n_bins_$service \"$@\"\n"
+
+
+def main():
+    text = render()
+    old = open(OUT).read() if os.path.exists(OUT) else ""
+    if "--check" in sys.argv[1:]:
+        if text != old:
+            print("functions/_bins is out of date — run script/completions", file=sys.stderr)
+            sys.exit(1)
+        return
+    if text != old:
+        with open(OUT, "w") as f:
+            f.write(text)
+        print("wrote functions/_bins — `rm ~/.zcompdump*; exec zsh` to load it")
+
+
+if __name__ == "__main__":
+    main()

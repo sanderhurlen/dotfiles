@@ -10,6 +10,24 @@ set -e
 parentDirectory="$(cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd -P)"
 dotfilesDirectory="$(cd "$( dirname "$parentDirectory" )" && pwd -P)"
 
+# Each bin with the first line of its header comment; "help" when it explains itself.
+listBinsAndExit() {
+	for f in "$dotfilesDirectory"/bin/*; do
+		[ -f "$f" ] && [ -x "$f" ] || continue
+		n=$(basename "$f")
+		d=$(awk -v n="$n" '
+			NR == 1 && /^#!/ { next }
+			/^# \/\/\/ script/ { skip = 1; next }
+			skip { if (/^# \/\/\//) skip = 0; next }
+			/^# *$/ { next }
+			/^#/ { sub(/^# */, ""); if ($0 == n) next; sub("^" n " *(—|-|:) *", ""); print; exit }
+			NR > 1 { exit }' "$f")
+		grep -q 'add_parser[(]"help"' "$f" && d="$d  ($n help)"
+		printf '%s\t%s\n' "$n" "$d"
+	done | column -t -s "$(printf '\t')"
+	exit
+}
+
 displayUsageAndExit() {
 	echo "dot -- dotfiles management"
 	echo ""
@@ -17,6 +35,7 @@ displayUsageAndExit() {
 	echo ""
 	echo "Options:"
 	echo "  -e, --edit    Open dotfiles directory for editing"
+	echo "  -b, --bins    List the commands in bin/, one line each"
 	echo "  -h, --help    Show this help message and exit"
 	exit
 }
@@ -25,6 +44,9 @@ while test $# -gt 0; do
 	case "$1" in
 		"-h"|"--help")
 			displayUsageAndExit
+			;;
+		"-b"|"--bins"|"bins")
+			listBinsAndExit
 			;;
 		"-e"|"--edit")
 			exec "$EDITOR" "$dotfilesDirectory"
