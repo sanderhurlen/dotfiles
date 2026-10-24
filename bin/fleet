@@ -1801,8 +1801,11 @@ def tui(scr, a):
         nonlocal snap, loading
         while True:
             loading = True
-            s = snapshot(a.all, clean=not a.no_clean)
-            pilot.tick(s)
+            try:
+                s = snapshot(a.all, clean=not a.no_clean)
+                pilot.tick(s)
+            except (Exception, SystemExit) as e:  # a dead loader would freeze the list on stale data
+                s = Snapshot(at=time.time(), error=f"oppdatering feilet: {e}")
             with lock:
                 snap = s
             loading = False
