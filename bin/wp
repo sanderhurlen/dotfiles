@@ -2,7 +2,7 @@
 #
 # wp — Azure DevOps pipeline runs from the shell, and approve them with one key.
 #
-# Shares tracker and auth with wf (bin/wf). Org/project from this repo's origin,
+# Shares the ADO client with wf/wi/wr/fleet (ado/). Org/project from this repo's origin,
 # else `az devops configure` defaults. Inside an ADO repo: that repo's runs only
 # (-A for the whole project).
 #
@@ -25,8 +25,6 @@ import concurrent.futures
 import curses
 import datetime
 import fcntl
-import importlib.machinery
-import importlib.util
 import json
 import locale
 import os
@@ -34,18 +32,10 @@ import shlex
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 
-_here = os.path.dirname(os.path.realpath(__file__))
-_loader = importlib.machinery.SourceFileLoader("wf", os.path.join(_here, "wf"))
-_spec = importlib.util.spec_from_loader("wf", _loader)
-wf = importlib.util.module_from_spec(_spec)
-_loader.exec_module(wf)
-
-from_wf = ("bold", "dim", "cyan", "green", "yellow", "red", "TTY")
-globals().update({k: getattr(wf, k) for k in from_wf})
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from ado import TTY, Ado, ago, bold, cyan, dim, green, load, red, sh, ts, yellow
 
 COUNT = 30
 GROUP = 3     # runs per pipeline in the grouped view
@@ -67,30 +57,14 @@ _ado = None
 def A():
     global _ado
     if _ado is None:
-        _ado = wf.Ado(wf.sh("git", "remote", "get-url", "origin"))
+        _ado = Ado(sh("git", "remote", "get-url", "origin"))
     return _ado
 
 
 def rest(path, body=None, method=None):
     """Project-scoped ADO call. Raises RuntimeError with ADO's message instead of exiting,
     so the TUI can show it and carry on."""
-    url = f"{A().org}/{urllib.parse.quote(A().project)}/_apis/{path}"
-    url += ("&" if "?" in path else "?") + "api-version=7.1"
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method or ("POST" if data else "GET"),
-                                 headers={"Authorization": f"Bearer {A().token()}",
-                                          "Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        try:
-            msg = json.loads(e.read()).get("message")
-        except ValueError:
-            msg = None
-        raise RuntimeError(msg or f"HTTP {e.code}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(str(e.reason))
+    return A().rest(path, body, method, project=A().project)
 
 
 # ── data ────────────────────────────────────────────────────────────────────
@@ -125,13 +99,6 @@ class Run:
         return self.status
 
 
-def ts(s):
-    if not s:
-        return None
-    head, _, frac = s.rstrip("Z").partition(".")
-    return datetime.datetime.fromisoformat(f"{head}.{(frac + '000000')[:6]}+00:00")
-
-
 _repo_id = {}
 
 
@@ -142,7 +109,7 @@ def repo_id(name):
 
 
 def current_repo():
-    remote = wf.sh("git", "remote", "get-url", "origin")
+    remote = sh("git", "remote", "get-url", "origin")
     return remote.rsplit("/_git/", 1)[1] if "/_git/" in remote else None
 
 
@@ -338,7 +305,7 @@ def watch():
             where = (f["org"], f["project"])
             if where not in ados:
                 os.environ.update(WF_ORG=f["org"], WF_PROJECT=f["project"])
-                ados[where] = wf.Ado()
+                ados[where] = Ado()
             _ado = ados[where]
             try:
                 if where not in waits:
@@ -380,9 +347,7 @@ _fleet = None
 def fleet():
     global _fleet
     if _fleet is None:
-        loader = importlib.machinery.SourceFileLoader("fleet", os.path.join(_here, "fleet"))
-        _fleet = importlib.util.module_from_spec(importlib.util.spec_from_loader("fleet", loader))
-        loader.exec_module(_fleet)
+        _fleet = load("fleet")
     return _fleet
 
 
@@ -451,13 +416,6 @@ ICON = {"succeeded": "✓", "failed": "✗", "canceled": "⊘", "partiallySuccee
 CHIP = {"ok": "✓", "warn": "!", "fail": "✗", "skip": "-", "run": "●", "wait": "○", "approve": "⏸"}
 TONE = {"succeeded": "green", "ok": "green", "failed": "red", "fail": "red", "partiallySucceeded": "yellow",
         "warn": "yellow", "inProgress": "cyan", "run": "cyan", "waiting": "yellow", "approve": "yellow"}
-
-
-def ago(t):
-    if not t:
-        return ""
-    s = int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds())
-    return f"{s // 60}m" if s < 3600 else f"{s // 3600}t" if s < 86400 else f"{s // 86400}d"
 
 
 def took(r):

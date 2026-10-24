@@ -29,8 +29,6 @@
 import argparse
 import datetime
 import html
-import importlib.machinery
-import importlib.util
 import json
 import os
 import re
@@ -38,15 +36,12 @@ import shlex
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 
-_here = os.path.dirname(os.path.realpath(__file__))
-_loader = importlib.machinery.SourceFileLoader("wf", os.path.join(_here, "wf"))
-_spec = importlib.util.spec_from_loader("wf", _loader)
-wf = importlib.util.module_from_spec(_spec)
-_loader.exec_module(wf)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from ado import load
+
+wf = load("wf")
 
 from_wf = ("bold", "dim", "cyan", "green", "yellow", "red", "state_c", "DONE", "CHILD", "PARENT", "TTY", "text")
 globals().update({k: getattr(wf, k) for k in from_wf})
@@ -191,22 +186,8 @@ TRIES = 3
 
 
 def rest(path, body=None, project=None, version="7.1"):
-    """Like Ado.api, but raises instead of exiting, so a bad WIQL can be retried."""
-    url = f"{A().org}/{project + '/' if project else ''}_apis/{path}"
-    url += ("&" if "?" in path else "?") + f"api-version={version}"
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method="POST" if data else "GET",
-                                 headers={"Authorization": f"Bearer {A().token()}",
-                                          "Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        try:
-            msg = json.loads(e.read()).get("message")
-        except ValueError:
-            msg = None
-        raise RuntimeError(msg or f"HTTP {e.code}")
+    """Like Ado.api, under project (and team) when given; raises, so a bad WIQL can be retried."""
+    return A().rest(path, body, project=project, version=version)
 
 
 def context(fresh=False):
@@ -884,6 +865,8 @@ def main():
         a.fn(a)
     except KeyboardInterrupt:
         sys.exit(130)
+    except RuntimeError as e:
+        die(e)
 
 
 if __name__ == "__main__":

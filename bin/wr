@@ -3,7 +3,7 @@
 # wr — Azure DevOps pull requests from the shell: see them, open new ones from
 # pushed branches, complete or abandon with one key.
 #
-# Shares tracker and auth with wf (bin/wf), time helpers with wp (bin/wp).
+# Shares the ADO client and time helpers with wf/wp/fleet (ado/), the repo with wp (bin/wp).
 # Org/project from this repo's origin, else `az devops configure` defaults.
 # Inside an ADO repo: that repo's PRs only (-A for the whole project).
 #
@@ -25,8 +25,6 @@ import argparse
 import concurrent.futures
 import curses
 import datetime
-import importlib.machinery
-import importlib.util
 import json
 import locale
 import os
@@ -34,23 +32,14 @@ import re
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 
 
-def _load(name):
-    loader = importlib.machinery.SourceFileLoader(name, os.path.join(os.path.dirname(os.path.realpath(__file__)), name))
-    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(name, loader))
-    loader.exec_module(mod)
-    return mod
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from ado import TTY, ago, bold, cyan, dim, green, load, red, sh, ts, yellow
 
-
-wp = _load("wp")
-wf = wp.wf
-from_wf = ("bold", "dim", "cyan", "green", "yellow", "red", "TTY")
-globals().update({k: getattr(wf, k) for k in from_wf})
-A, ts, ago, current_repo = wp.A, wp.ts, wp.ago, wp.current_repo
+wp = load("wp")
+A, current_repo = wp.A, wp.current_repo
 
 COUNT = 50
 REFRESH = 20  # seconds between TUI refreshes
@@ -68,23 +57,8 @@ def die(msg):
 def rest(path, body=None, method=None, scope="project", version="7.1", project=None):
     """ADO call. Raises RuntimeError with ADO's message instead of exiting, so the TUI
     can show it and carry on. project overrides this repo's project."""
-    base = A().org if scope == "org" else f"{A().org}/{urllib.parse.quote(project or A().project)}"
-    url = f"{base}/_apis/{path}" + ("&" if "?" in path else "?") + f"api-version={version}"
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method or ("POST" if data else "GET"),
-                                 headers={"Authorization": f"Bearer {A().token()}",
-                                          "Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.loads(r.read().decode("utf-8-sig") or "null")
-    except urllib.error.HTTPError as e:
-        try:
-            msg = json.loads(e.read().decode("utf-8-sig")).get("message")
-        except ValueError:
-            msg = None
-        raise RuntimeError(msg or f"HTTP {e.code}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(str(e.reason))
+    return A().rest(path, body, method, project=None if scope == "org" else project or A().project,
+                    version=version)
 
 
 _me = None
@@ -528,10 +502,10 @@ def cmd_new(a):
     name = a.repo_ or current_repo()
     if not name:
         die("ikke i et ADO-repo — bruk -r REPO")
-    branch = a.branch or (wf.sh("git", "branch", "--show-current") if not a.repo_ else "")
+    branch = a.branch or (sh("git", "branch", "--show-current") if not a.repo_ else "")
     if not branch:
         die("hvilken branch?")
-    if not a.repo_ and wf.sh("git", "rev-list", "--count", f"origin/{branch}..{branch}") not in ("", "0"):
+    if not a.repo_ and sh("git", "rev-list", "--count", f"origin/{branch}..{branch}") not in ("", "0"):
         print(yellow(f"obs: {branch} har lokale commits som ikke er pushet"), file=sys.stderr)
     body, commits = guard(draft_pr, name, branch, a.target)
     if a.title:

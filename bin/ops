@@ -50,8 +50,6 @@ import concurrent.futures
 import fcntl
 import difflib
 import html
-import importlib.machinery
-import importlib.util
 import json
 import locale
 import os
@@ -61,19 +59,14 @@ import sys
 import threading
 import time
 import unicodedata
-import urllib.error
 import urllib.parse
-import urllib.request
 import uuid
 
 os.environ.setdefault("WF_ORG", "Hussoppen")
 os.environ.setdefault("WF_PROJECT", "Visense")
 
-_loader = importlib.machinery.SourceFileLoader("wf", os.path.join(os.path.dirname(os.path.realpath(__file__)), "wf"))
-wf = importlib.util.module_from_spec(importlib.util.spec_from_loader("wf", _loader))
-_loader.exec_module(wf)
-from_wf = ("bold", "dim", "cyan", "green", "yellow", "red", "TTY")
-globals().update({k: getattr(wf, k) for k in from_wf})
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from ado import TTY, Ado, HttpError, bold, cyan, dim, green, red, request, sh, yellow
 
 FILE = os.environ.get("OPS_FIGMA_FILE", "zTyL7wC1gjK5DlciwmQmQT")
 BOARD = f"https://www.figma.com/board/{FILE}/Operations"
@@ -178,7 +171,7 @@ _token = None
 def figma_token():
     global _token
     if _token is None:
-        _token = os.environ.get("FIGMA_TOKEN") or wf.sh(
+        _token = os.environ.get("FIGMA_TOKEN") or sh(
             "security", "find-generic-password", "-a", os.environ.get("USER", ""), "-s", "figma-token", "-w")
     return _token
 
@@ -186,18 +179,10 @@ def figma_token():
 def figma(path):
     if not figma_token():
         raise RuntimeError("ingen Figma-token — se `ops` header (FIGMA_TOKEN / keychain figma-token)")
-    req = urllib.request.Request(f"https://api.figma.com/v1/{path}", headers={"X-Figma-Token": figma_token()})
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        try:
-            msg = json.loads(e.read()).get("err")
-        except ValueError:
-            msg = None
-        raise RuntimeError(f"Figma {e.code}: {msg or e.reason}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Figma: {e.reason}")
+        return request(f"https://api.figma.com/v1/{path}", headers={"X-Figma-Token": figma_token()}, timeout=60)
+    except HttpError as e:
+        raise RuntimeError(f"Figma {e.code}: {e}" if e.code else f"Figma: {e}")
 
 
 def page_doc(pid, version):
@@ -339,28 +324,16 @@ _ado = None
 def A():
     global _ado
     if _ado is None:
-        _ado = wf.Ado()
+        _ado = Ado()
     return _ado
 
 
 def api(path, body=None, method=None, ctype="application/json", project=PROJECT):
-    """Like wf.Ado.api, but raises instead of exiting, so the TUI survives a failed call."""
-    url = f"{A().org}/{urllib.parse.quote(project) + '/' if project else ''}_apis/{path}"
-    url += ("&" if "?" in url else "?") + "api-version=7.1"
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method or ("POST" if data else "GET"),
-                                 headers={"Authorization": f"Bearer {A().token()}", "Content-Type": ctype})
+    """Like wf.Ado.api, under PROJECT unless project=None; raises RuntimeError for the TUI."""
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        try:
-            msg = json.loads(e.read()).get("message")
-        except ValueError:
-            msg = None
-        raise RuntimeError(f"ADO {e.code}: {msg or e.reason}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"ADO: {e.reason}")
+        return A().rest(path, body, method, project=project, ctype=ctype)
+    except HttpError as e:
+        raise RuntimeError(f"ADO {e.code}: {e}" if e.code else f"ADO: {e}")
 
 
 FIELDS = ["System.Id", "System.Title", "System.State", "System.WorkItemType", "System.AssignedTo",

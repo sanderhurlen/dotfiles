@@ -38,8 +38,6 @@ import curses
 import datetime
 import fcntl
 import glob
-import importlib.machinery
-import importlib.util
 import json
 import locale
 import os
@@ -51,23 +49,14 @@ import sys
 import threading
 import time
 import tomllib
-import urllib.error
 import urllib.parse
-import urllib.request
 
 
-def _load(name):
-    loader = importlib.machinery.SourceFileLoader(name, os.path.join(os.path.dirname(os.path.realpath(__file__)), name))
-    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(name, loader))
-    loader.exec_module(mod)
-    return mod
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from ado import TTY, ago, bold, cyan, dim, green, load, red, yellow
 
-
-wr, wi, chores = _load("wr"), _load("wi"), _load("chores")
-wf, wp = wr.wf, wr.wp
-from_wf = ("bold", "dim", "cyan", "green", "yellow", "red", "TTY")
-globals().update({k: getattr(wf, k) for k in from_wf})
-A, ts, ago, rest, me = wp.A, wp.ts, wp.ago, wr.rest, wr.me
+wf, wp, wr, wi, chores = load("wf"), load("wp"), load("wr"), load("wi"), load("chores")
+A, rest, me = wp.A, wr.rest, wr.me
 
 STATES = ("Doing", "To Do")
 OLD = 45  # days: work items created before this only show as one row that opens their query
@@ -1394,21 +1383,7 @@ def abandon(r):
 
 
 def patch_item(w, ops):
-    url = f"{A().org}/{urllib.parse.quote(w.project)}/_apis/wit/workitems/{w.id}?api-version=7.1"
-    req = urllib.request.Request(url, data=json.dumps(ops).encode(), method="PATCH",
-                                 headers={"Authorization": f"Bearer {A().token()}",
-                                          "Content-Type": "application/json-patch+json"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.load(resp)
-    except urllib.error.HTTPError as e:
-        try:
-            m = json.loads(e.read().decode("utf-8-sig")).get("message")
-        except ValueError:
-            m = None
-        raise RuntimeError(m or f"HTTP {e.code}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(str(e.reason))
+    return A().rest(f"wit/workitems/{w.id}", ops, "PATCH", project=w.project, ctype="application/json-patch+json")
 
 
 _states = {}

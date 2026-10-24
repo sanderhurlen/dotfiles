@@ -44,6 +44,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from ado import HttpError, request
+
 GRAPH = "https://graph.microsoft.com/v1.0"
 GRAPH_RES = "https://graph.microsoft.com"
 ADO_RES = "499b84ac-1321-427f-aa17-267ca6975798"
@@ -125,19 +128,12 @@ def reason(raw):
 
 
 def call(url, tok, body=None, method=None, ctype="application/json"):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method or ("POST" if data is not None else "GET"),
-                                 headers={"Authorization": f"Bearer {tok}", "Content-Type": ctype})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:  # GroupEntitlements can take half a minute
-            raw = r.read()
-            return json.loads(raw) if raw.strip() else None
-    except urllib.error.HTTPError as e:
-        raise Fail(f"{e.code}: {reason(e.read().decode(errors='replace'))}", e.code)
-    except urllib.error.URLError as e:
-        raise Fail(f"nett: {e.reason}")
-    except (TimeoutError, OSError) as e:
-        raise Fail(f"nett: {e or 'tidsavbrudd'} ({urllib.parse.urlparse(url).netloc})")
+    try:  # GroupEntitlements can take half a minute
+        return request(url, body, method, {"Authorization": f"Bearer {tok}", "Content-Type": ctype}, timeout=60)
+    except HttpError as e:
+        if e.code:
+            raise Fail(f"{e.code}: {reason(e.body)}", e.code)
+        raise Fail(f"nett: {e} ({urllib.parse.urlparse(url).netloc})")
 
 
 def oauth(tid, endpoint, **fields):
