@@ -221,6 +221,58 @@ class Review:
         self.asked = mine is not None
         self.vote = mine.get("vote", 0) if mine else 0
         self.key, self.role = f"fleet-pr-{self.id}", "review"
+        self.items = set()  # work item ids it links, or its branch carries (link_items)
+        self.group = None  # the Group it's reviewed in, when it shares a work item with another
+
+
+def link_items(r):
+    """Fill in the work items a Review links or its branch carries. ADO errors leave them empty."""
+    p = r.pr
+    try:
+        r.items |= {int(w["id"]) for w in rest(f"git/repositories/{p.raw['repository']['id']}/pullRequests/{p.id}"
+                                               f"/workitems", project=p.project)["value"]}
+    except RuntimeError:
+        pass
+    r.items |= {int(i) for i in TREE_ID.findall(r.source)}
+
+
+class Group:
+    """Review PRs by one author that link the same work item — a feature split over repos (core and
+    bff) — reviewed by one agent, with one draft per PR. Its agent is the work item's: fleet-wi-<id>-review."""
+    def __init__(self, item, prs):
+        self.id, self.prs, self.title, self.url, self.project = item.id, prs, item.title, item.url, item.project
+        self.who = prs[0].who
+        self.asked = any(r.asked for r in prs)
+        self.key, self.role = f"fleet-wi-{item.id}", "review"
+
+    def where(self):
+        return Auto(self).where()
+
+    @property
+    def prompt(self):
+        return Auto(self).prompt
+
+
+def groups(prs):
+    """Groups of two or more Reviews by the same author sharing a work item; sets each member's group.
+    The item with the fewest PRs goes first, so a shared Epic doesn't swallow a feature's own item.
+    A PR is in one group at most."""
+    by = {}
+    for r in prs:
+        for i in r.items:
+            by.setdefault((i, r.who), []).append(r)
+    shared = {k: rs for k, rs in by.items() if len(rs) > 1}
+    wf.fetch(sorted({i for i, _ in shared}))
+    out = []
+    for (i, _), rs in sorted(shared.items(), key=lambda kv: (len(kv[1]), kv[0][0])):
+        rs = [r for r in rs if r.group is None]
+        if len(rs) < 2:
+            continue
+        g = Group(wf.get(i), sorted(rs, key=lambda r: r.id))
+        for r in rs:
+            r.group = g
+        out.append(g)
+    return out
 
 
 def active():
@@ -438,6 +490,7 @@ class Snapshot:
         self.old = old  # Old, or None before the first fetch
         self.items, self.prs, self.agents, self.at, self.error = list(items), list(prs), agents_ or {}, at, error
         self.mine = list(mine_)  # Mine
+        self.groups = []  # Group: review PRs that share a work item
         self.quiet = {}  # {agent name: seconds since its transcript changed}
         self.orphans = []  # Orphan
         self.cleanup = []  # Cleanup: worktrees of Done items fleet couldn't safely remove
@@ -452,6 +505,9 @@ def snapshot(everyone, clean=False):
         prs = active()
         items, old = work()
         s = Snapshot(items, reviews(prs, everyone), agents(raw), time.time(), mine_=mine(prs), old=old)
+        with concurrent.futures.ThreadPoolExecutor(8) as ex:
+            list(ex.map(link_items, s.prs))
+        s.groups = groups(s.prs)
         s.quiet = quiet(raw)
         others = reviews(prs, True)
     except RuntimeError as e:
@@ -463,7 +519,7 @@ def snapshot(everyone, clean=False):
             by_pr.setdefault(i, []).append(m)
     for w in flat:
         w.prs = by_pr.get(w.id, [])
-    s.orphans = orphans(raw, {x.key for x in flat + others + s.mine})
+    s.orphans = orphans(raw, {x.key for x in flat + others + s.mine + s.groups})
     ts_ = trees()
     by_id = {}
     for t in ts_:
@@ -832,10 +888,19 @@ def launch(x, prompt=None, role=None):
     return f"▶ {agent_name(x, role)} startet{f' ({m.group(1)})' if m else ''} i {short(cwd)}: {cmd[-1][:60]}"
 
 
+def group_starts(g):
+    out = [(f"review av gruppa: {' + '.join(f'!{r.id}' for r in g.prs)}", Auto(g), None, None)]
+    if any(pushed_since(r) for r in g.prs):
+        out.append(("ny runde: re-review av det som er pushet siden", Auto(g, REREVIEW), None, None))
+    return out
+
+
 def starts(x):
     """[(label, row, role, prompt)] offered when enter starts an agent on x: its own prompt first, then
     fixing its PRs, then what fits the kind of row. row is whose agent (key, cwd) runs it, role
     names it among the row's agents (None = row's own); prompt None = row's own."""
+    if isinstance(x, Group):
+        return group_starts(x)
     if isinstance(x, Mine):
         return [(f"fiks: {'; '.join(x.todo) or 'sjekk bygg og kommentarer'}", x, None, None),
                 (f"/code-review {x.source} mot {x.target}", x, "code-review",
@@ -877,13 +942,16 @@ def start_menu(x, agents_):
         return f"{name} finnes allerede ({st}) — start ny?" if st else False
     opts = [(str(n), label, lambda r=r, p=p, role=role: launch(r, p, role), ask(r, role))
             for n, (label, r, role, p) in enumerate(starts(x)[:9], 1)]
-    what = f"#{x.id}" if isinstance(x, Work) else f"!{x.id}"
+    what = f"#{x.id}" if isinstance(x, (Work, Group)) else f"!{x.id}"
     return (f"start agent · {what} {x.title[:40]}",
             opts + [("e", "egendefinert prompt …", lambda text: launch(x, f"{about(x)}\n\n{text}", "ask"), "edit")])
 
 
 def about(x):
     """One line naming the row, put before a typed prompt so the agent knows what it's about."""
+    if isinstance(x, Group):
+        return (f"Gjelder PR-ene {', '.join(f'!{r.id} ({r.repo})' for r in x.prs)} av {x.who}, som hører til "
+                f"#{x.id} «{x.title}» ({x.url}).")
     if isinstance(x, Work):
         return f"Gjelder {x.type.lower()} #{x.id} «{x.title}» i {x.project} ({x.url})."
     if isinstance(x, Mine):
@@ -1003,6 +1071,8 @@ class Auto:
 
     def where(self):
         x = self.x
+        if isinstance(x, Group):
+            return group_dir(self), None
         if isinstance(x, Mine):
             cwd, wt = where_fix(x)
             if not cwd:
@@ -1019,6 +1089,8 @@ class Auto:
                     f"ved å merge origin/{x.target} inn — ikke rebase, aldri force-push. Er en konflikt tvetydig, "
                     f"stopp og spør meg. Få bygget grønt, commit og push til {x.source}. Ikke svar i eller resolve "
                     f"review-tråder, ikke stem, ikke complete PR-en.")
+        if isinstance(x, Group):
+            return group_prompt(self)
         if not self.clone():
             return explain(x)
         if self.role == "rereview":
@@ -1126,6 +1198,13 @@ class Pilot:
     def trigger(self, x):
         """(why, fingerprint, when it happened | None) when autopilot would start on x, else None."""
         trig = self.c["triggers"]
+        if isinstance(x, Group):
+            pushed = [pushed_since(r)[1][:7] for r in x.prs if pushed_since(r)]
+            if "rereview" in trig and pushed:
+                return REREVIEW, f"{x.key}@re-{'-'.join(pushed)}", None
+            if "review" not in trig or not any(r.asked and not r.vote for r in x.prs):
+                return None
+            return "review", f"{x.key}@review-{'-'.join(str(r.id) for r in x.prs)}", None
         if isinstance(x, Review):
             if "rereview" in trig and pushed_since(x):
                 return REREVIEW, f"{x.key}@re-{pushed_since(x)[1][:10]}", None
@@ -1178,7 +1257,8 @@ class Pilot:
         if not s.at or s.error:
             return
         st = self.load()
-        live = {r.key: r for r in s.prs if r.asked} | {m.key: m for m in s.mine}
+        live = {r.key: r for r in s.prs if r.asked and not r.group} | {g.key: g for g in s.groups if g.asked} \
+            | {m.key: m for m in s.mine}
         work = {w.key: w for w in s.items if untriaged(w)} if "triage" in self.c["triggers"] else {}
         for k in self.LISTS:
             st[k] = [x for x in st[k] if x in live or x in work]
@@ -1205,7 +1285,7 @@ class Pilot:
             if agent and not tries:  # I started that one myself
                 continue
             # a re-review runs once per push (fp carries the commit), so it never gives up
-            if "@re-" not in fp and len(tries) >= (1 if isinstance(x, Review) else self.c["max_fix_attempts"]):
+            if "@re-" not in fp and len(tries) >= (1 if isinstance(x, (Review, Group)) else self.c["max_fix_attempts"]):
                 chips[x.key] = ("🤖 ga opp", "red")
                 if x.key not in st["gaveup"]:
                     st["gaveup"].append(x.key)
@@ -1217,7 +1297,7 @@ class Pilot:
             if work_age(when, local, days) > self.c["backlog_hours"]:
                 chips[x.key] = ("💤 for gammel · m → n", "dim")
                 continue
-            due.append((isinstance(x, Review), when, x, why, fp))
+            due.append((isinstance(x, (Review, Group)), when, x, why, fp))
         due.sort(key=lambda d: d[:2])  # fixes first, oldest first
         free = self.c["max_parallel"] - self.busy(s)
         self.queue = []
@@ -1344,7 +1424,7 @@ def pilot_menu(p):
 
 def pilot_options(p, x):
     """The row menu's autopilot entries for a Review or Mine, or an untriaged work item."""
-    if not p or not p.lock or not (isinstance(x, (Review, Mine)) or untriaged(x)):
+    if not p or not p.lock or not (isinstance(x, (Review, Mine, Group)) or untriaged(x)):
         return []
     muted = x.key in p.load()["muted"]
     now = ("n", "triager i bakgrunnen nå", lambda: p.now(x), False) if isinstance(x, Work) else \
@@ -1389,6 +1469,47 @@ def approve(r):
     rest(f"git/repositories/{p.raw['repository']['id']}/pullrequests/{p.id}/reviewers/{me()[0]}",
          {"vote": 10}, method="PUT", project=p.project)
     return f"✓ godkjent !{p.id}"
+
+
+def group_dir(auto):
+    """The directory a group's agent runs in, under the first root so `claude agents` lists it:
+    ~/visense/.claude/worktrees/fleet-wi-<id>-review, with .fleet.json naming the PRs for the
+    pr-utkast mod. The PRs' own worktrees are made by the agent, in their clones."""
+    d = os.path.join(HOME, ".claude", "worktrees", agent_name(auto))
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, ".fleet.json"), "w") as f:
+        json.dump({"prs": [{"id": r.id, "repo": r.repo} for r in auto.x.prs]}, f)
+    return d
+
+
+def group_prompt(auto):
+    g, again = auto.x, auto.role == "rereview"
+    name, lines = agent_name(auto), []
+    for r in g.prs:
+        clone = clones().get((r.project.lower(), r.repo.lower()))
+        if not clone:
+            lines.append(f"- !{r.id} {r.repo} «{r.title}», {r.source} → {r.target} ({r.url}): ingen lokal klone, "
+                         f"les endringene i ADO")
+            continue
+        tree = os.path.join(clone, ".claude", "worktrees", name)
+        line = (f"- !{r.id} {r.repo} «{r.title}», {r.source} → {r.target} ({r.url}): `git -C {clone} fetch origin "
+                f"{r.source} {r.target}`, så `git -C {clone} worktree add --detach {tree} origin/{r.source}` (finnes "
+                f"det: `git -C {tree} checkout --detach origin/{r.source}`)")
+        since = pushed_since(r) if again else None
+        if since:
+            line += (f". Ny runde: forfatteren har pushet siden jeg postet ({since[0][:10]} → {since[1][:10]}); se "
+                     f"`git -C {tree} diff {since[0]}..origin/{r.source}` og `wr threads {r.id}`")
+        lines.append(line)
+    rounds = (" For PR-ene med ny runde: avgjør for hver av mine aktive tråder om den er løst i koden eller besvart "
+              "godt nok, og bruk resolve, replies og comments bare for nye funn." if again else "")
+    return (f"PR-ene under er av {g.who}, hører til #{g.id} «{g.title}» ({g.url}) og reviewes samlet"
+            f"{' som en ny runde' if again else ''}. Lag et worktree per PR:\n" + "\n".join(lines) +
+            f"\n\nSpec er #{g.id} og work itemene PR-ene lenker (`wi show <id>`). Kjør /code-review for hver PR i "
+            f"sitt worktree med origin/<target> som fast punkt. Se særlig på at PR-ene passer sammen: kontrakter og "
+            f"felt på tvers av repoene, at begge sider er endret der de må, og rekkefølgen de må deployes i.{rounds} "
+            f"Skriv så ett utkast per PR etter `wr draft <pr> --format`; et funn i samspillet skrives i PR-en der det "
+            f"må fikses. Rapporter kort her og still spørsmålene. Ikke post, ikke stem, ikke push: jeg poster med "
+            f"`wr post <pr>`.")
 
 
 def pushed_since(r):
@@ -1503,6 +1624,13 @@ def menu(x, pilot=None):
             ("x", "abandon", lambda: abandon(x), f"abandon !{x.id} {x.title[:40]}?"),
             *pilot_options(pilot, x),
             ("o", "åpne i nettleser", lambda: subprocess.run(["open", x.url]) and "", False)])
+    if isinstance(x, Group):
+        return (f"#{x.id} {x.title[:50]} · {len(x.prs)} PRer", [
+            ("g", "start review-agent for gruppa", lambda: launch(Auto(x)), False),
+            *([("r", "ny runde: re-review av det som er pushet siden", lambda: launch(Auto(x, REREVIEW)), False)]
+              if any(pushed_since(r) for r in x.prs) else []),
+            *pilot_options(pilot, x),
+            ("o", "åpne work item", lambda: subprocess.run(["open", x.url]) and "", False)])
     if isinstance(x, Review):
         return (f"!{x.id} {x.title[:50]}", [
             ("a", "approve", lambda: approve(x), False),
@@ -1624,9 +1752,14 @@ def child_row(snap, t, last, pad):
     return parts + pr_chip(t) + tree_chip(t) + agent_chip(snap, t)
 
 
-def pr_row(snap, r, wrepo):
+def group_row(snap, g):
+    return [("▾ ", "cyan"), (f"#{g.id:<5} ", "dim"), (g.title[:60], "bold"),
+            (f"  {len(g.prs)} PRer @{g.who}", "dim")] + agent_chip(snap, g) + auto_chip(snap, g)
+
+
+def pr_row(snap, r, wrepo, indent=""):
     icon, tone = VOTE.get(r.vote, ("○", "dim"))
-    parts = [(icon + " ", tone), (f"!{r.id:<5} ", "dim"), (f"{r.repo:<{wrepo}}  ", "bold"),
+    parts = [(indent + icon + " ", tone), (f"!{r.id:<5} ", "dim"), (f"{r.repo:<{wrepo}}  ", "bold"),
              (r.title[:60], None), (f"  @{r.who} {ago(r.created)}", "dim")]
     if not r.asked:
         parts.append(("  (ikke reviewer)", "dim"))
@@ -1671,8 +1804,14 @@ def lines(snap, everyone, open_=()):
     who = "alle andres" if everyone else "der jeg er reviewer"
     out.append(([(f"PRer uten min godkjenning · {who} ({len(snap.prs)})", "bold")], None))
     wrepo = max([len(r.repo) for r in snap.prs] + [4])
+    shown = set()
     for r in snap.prs:
-        out.append((pr_row(snap, r, wrepo), r))
+        if not r.group:
+            out.append((pr_row(snap, r, wrepo), r))
+        elif r.group.key not in shown:  # the group's header where its first PR would be, its PRs under it
+            shown.add(r.group.key)
+            out.append((group_row(snap, r.group), r.group))
+            out += [(pr_row(snap, m, wrepo, "  "), m) for m in r.group.prs]
     if not snap.prs:
         out.append(([("  ingen", "dim")], None))
     if snap.mine:
@@ -2156,7 +2295,10 @@ def cmd_prune(a):
         prs = active()
         flat = work()[0]
         flat += [t for m in flat for t in m.children]
-        keys = {x.key for x in flat + reviews(prs, True) + mine(prs)}
+        rs = reviews(prs, True)
+        with concurrent.futures.ThreadPoolExecutor(8) as ex:
+            list(ex.map(link_items, rs))
+        keys = {x.key for x in flat + rs + mine(prs) + groups(rs)}
     except RuntimeError as e:
         die(str(e))
     os_ = [o for o in os_ if owner(o.name) not in keys]
@@ -2295,6 +2437,8 @@ GUIDE = """\
             jobbens tast → i hva den gjør, hva som feilet og hva du kan gjøre · k kjør nå · l loggen
   → / l     fold ut kart/spec (åpne tickets: ledig / tatt / blokkert) · ← / h fold inn · space veksle
   m         valg for raden:
+              gruppe     (▾ #id: review-PRer av samme forfatter på samme work item) g én review-agent for
+                         alle · r re-review · z/n autopilot · o åpne work item
               PR         a approve · u auto-complete · c complete · x abandon · g review-agent ·
                          p post review-utkastet (📝 på raden; `wr draft <id>` viser det) ·
                          r re-review når forfatteren har pushet etter at jeg postet (🔁) ·

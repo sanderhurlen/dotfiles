@@ -233,3 +233,41 @@ def test_fleet_rereview_after_a_push(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet.Auto, "clone", lambda self: "/repo")
     assert fleet.agent_name(auto) == "fleet-pr-41-rereview"
     assert "git diff old123..origin/feat/eksport" in auto.prompt
+
+
+def test_fleet_groups_reviews_by_shared_item_and_author(monkeypatch, tmp_path):
+    from ado import load
+    fleet = load("fleet")
+    monkeypatch.setattr(fleet.wr, "A", lambda: type("A", (), {"org": "https://x", "project": "Demo"})())
+    monkeypatch.setattr(fleet.wf, "fetch", lambda ids: None)
+    monkeypatch.setattr(fleet.wf, "get", lambda i: type("I", (), {"id": i, "title": f"item {i}",
+                                                                   "url": f"https://x/{i}", "project": "Demo"})())
+
+    def review(id, items, who="kari@example.com", repo="app"):
+        raw = dict(pr(id), createdBy={"uniqueName": who, "id": who},
+                   repository={"name": repo, "id": repo, "project": {"name": "Demo", "id": "p1"}},
+                   reviewers=[{"id": "me-id", "vote": 0}])
+        r = fleet.Review(raw, "me-id")
+        r.items = set(items)
+        return r
+
+    epic, core, bff, other, alone = (review(1, {100, 9249}, repo="core"), review(2, {100, 9249}, repo="bff"),
+                                     review(3, {100}, repo="web"), review(4, {9249}, who="ola@example.com"),
+                                     review(5, {77}))
+    gs = fleet.groups([epic, core, bff, other, alone])
+    assert [(g.id, [r.id for r in g.prs]) for g in gs] == [(9249, [1, 2])]  # the feature, not the shared epic
+    assert bff.group is None and other.group is None and alone.group is None  # left over, other author, alone
+    g = gs[0]
+    monkeypatch.setattr(fleet, "HOME", str(tmp_path))
+    monkeypatch.setattr(fleet, "clones", lambda: {("demo", "core"): "/src/core"})
+    auto = fleet.Auto(g)
+    assert fleet.agent_name(auto) == "fleet-wi-9249-review"
+    cwd, wt = auto.where()
+    assert wt is None and cwd.endswith(".claude/worktrees/fleet-wi-9249-review")
+    assert '"id": 1' in (tmp_path / ".claude/worktrees/fleet-wi-9249-review/.fleet.json").read_text()
+    text = auto.prompt
+    assert "worktree add --detach /src/core/.claude/worktrees/fleet-wi-9249-review" in text
+    assert "!2 bff" in text and "ingen lokal klone" in text and "wr draft <pr> --format" in text
+    pilot = fleet.Pilot.__new__(fleet.Pilot)
+    pilot.c = {"triggers": ["review", "rereview"]}
+    assert pilot.trigger(g)[1] == "fleet-wi-9249@review-1-2"
