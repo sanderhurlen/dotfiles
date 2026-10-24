@@ -14,7 +14,7 @@ There's a few special files in the hierarchy.
 
 - **bin/**: Anything in `bin/` will get added to your `$PATH` and be made
   available everywhere. `dot bins` lists them.
-- **ado/**: What the Azure DevOps bins (wf, wi, wp, wr, fleet, ops) share: the
+- **ado/**: What the Azure DevOps bins (wf, wi, wp, wr, fleet, ops, standup) share: the
   ADO client, HTTP that retries reads, colours. `script/test` runs its tests and
   tower's; `script/completions` regenerates `functions/_bins` (zsh completion
   for those bins) after a bin's arguments change.

@@ -5,7 +5,7 @@ import pytest
 
 from conftest import item
 
-BINS = ["wf", "wi", "wp", "wr", "fleet", "ops", "chores", "entra"]
+BINS = ["wf", "wi", "wp", "wr", "fleet", "ops", "chores", "entra", "standup"]
 
 
 @pytest.mark.parametrize("name", BINS)
@@ -15,7 +15,7 @@ def test_help(run, name):
     assert "usage" in r.stdout.lower()
 
 
-@pytest.mark.parametrize("name", ["wf", "wi", "wp", "wr", "fleet", "ops", "chores", "entra"])
+@pytest.mark.parametrize("name", BINS)
 def test_loads_as_a_module(name):
     from ado import load
     assert load(name).main

@@ -15,7 +15,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, ROOT)
 from ado import load  # noqa: E402
 
-BINS = ["wf", "wi", "wp", "wr", "fleet", "ops", "chores", "entra"]
+BINS = ["wf", "wi", "wp", "wr", "fleet", "ops", "chores", "entra", "standup"]
 OUT = os.path.join(ROOT, "functions", "_bins")
 
 # What an id argument names, per bin (and subcommand where it differs)
@@ -23,7 +23,9 @@ ITEMS, PRS = "_bins_items", "_bins_prs"
 IDS = {"wf": ITEMS, "wi": ITEMS, "wr": PRS,
        ("fleet", "go"): ITEMS, ("fleet", "code"): ITEMS, ("fleet", "wi"): ITEMS,
        ("fleet", "review"): PRS, ("fleet", "fix"): PRS, ("fleet", "pr"): PRS}
-ARGS = {("chores", "repos"): "_bins_repos", ("chores", "job"): "_bins_jobs", ("wr", "branch"): "_bins_branches"}
+DEFAULT = {"standup": "show"}  # bins that run this subcommand when the first word isn't one
+ARGS = {("chores", "repos"): "_bins_repos", ("chores", "job"): "_bins_jobs", ("wr", "branch"): "_bins_branches",
+        ("standup", "teams"): "_bins_teams"}
 
 HELPERS = r'''
 # work items / PRs fleet last saw, as id:title
@@ -45,6 +47,12 @@ _bins_repos() {
 _bins_jobs() {
   local -a jobs=(~/Library/LaunchAgents/com.sanderhurlen.*.plist(N:t:r))
   compadd ${jobs#com.sanderhurlen.}
+}
+_bins_teams() {  # from standup's day cache: the last word of each name, which standup matches on
+  local f=${XDG_CACHE_HOME:-$HOME/.cache}/standup/teams.json
+  [[ -r $f ]] || return 1
+  local -a ts=(${(f)"$(jq -r '.[] | "\(.name | split(" ") | map(select(. != "Team" and . != "og")) | first | ascii_downcase):\(.name)"' $f 2>/dev/null)"})
+  _describe -t teams team ts
 }
 _bins_branches() {
   compadd ${(f)"$(git for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)"}
@@ -135,9 +143,20 @@ def function(name):
     lines.append("  if (( CURRENT == 2 )); then")
     if top:
         lines.append("    [[ $PREFIX == -* ]] && { _arguments " + " ".join(top) + "; return; }")
-    lines.append(f"    _describe -t commands '{name} command' subs; return")
-    lines.append("  fi")
-    lines.append("  local sub=$words[2]; shift words; (( CURRENT-- ))")
+    if name in DEFAULT:
+        d = sp.choices[DEFAULT[name]]
+        first = next((positional(name, DEFAULT[name], x, 1, subs) for x in d._actions
+                      if not x.option_strings and not isinstance(x, argparse._HelpAction)), None)
+        action = first.strip("'").rsplit(":", 1)[1] if first else ""
+        lines.append(f"    _describe -t commands '{name} command' subs" + (f"; {action}" if action.startswith("_") else ""))
+        lines.append("    return")
+        lines.append("  fi")
+        lines.append("  local sub=$words[2]")
+        lines.append(f"  if [[ -n ${{(M)subs:#$sub:*}} ]]; then shift words; (( CURRENT-- )); else sub={DEFAULT[name]}; fi")
+    else:
+        lines.append(f"    _describe -t commands '{name} command' subs; return")
+        lines.append("  fi")
+        lines.append("  local sub=$words[2]; shift words; (( CURRENT-- ))")
     lines.append("  case $sub in")
     for s in subs:
         args = specs(name, real[id(sp.choices[s])], sp.choices[s], subs)

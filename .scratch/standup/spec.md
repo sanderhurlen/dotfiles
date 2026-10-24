@@ -1,5 +1,10 @@
 # standup — forslag
 
+> **Status 2026-10-24:** v1 bygd i `bin/standup`, med agentlinja og sprintmål (`[goal]` i config) fra v2.
+> Avvik fra forslaget: «blokkert» bare for det som er i Doing eller i sprinten, Epic/Feature teller aldri
+> som «står fast» eller WIP, en «current» sprint uten datoer rundt i dag regnes som ingen sprint.
+> Gjenstår: PRer der teamet bare er reviewer-gruppe, `--claude`, `post`, launchd.
+
 `bin/standup` skriver standupen per ADO-team ut fra det som faktisk skjedde i ADO (og fleet),
 så ingen trenger å lese opp status. Gruppert per team, ikke per person — personen er en egenskap
 på linja. Bare unntak og bevegelse; det som går som det skal vises ikke (`-v` viser alt).

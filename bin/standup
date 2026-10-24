@@ -1,0 +1,500 @@
+#!/usr/bin/env python3
+#
+# standup — each ADO team's standup from what actually happened in ADO, so nobody has to
+# read status aloud. Per team, not per person: the person is on the line. Only exceptions
+# and movement; what is going as it should doesn't show (-v shows it too).
+#
+# Type:
+#
+#   standup                  every team of mine (or config default), one section each
+#   standup logit            one team (prefix of any word in its name)
+#   standup logit -c         also to the clipboard, plain, ready for Teams
+#   standup logit -v         also what is going fine: everything in Doing, the sprint's To Do
+#   standup teams [-a]       my teams (-a: all) with area paths and sprint
+#   standup help             explained (Norwegian)
+#
+# «Since last time» is the previous workday (Monday → Friday). A team with a current sprint
+# gets the sprint view (progress, unowned in the sprint); one without, the board view.
+# Config: ~/.config/standup/config.toml (see `standup help`). Teams are cached a day in
+# ~/.cache/standup/teams.json, which zsh completion reads too.
+
+import argparse
+import concurrent.futures
+import datetime
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import tomllib
+import urllib.parse
+
+os.environ.setdefault("WF_ORG", "Hussoppen")
+os.environ.setdefault("WF_PROJECT", "Visense")
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from ado import DONE, PRED, TTY, Ado, bold, cyan, dim, green, load, red, ts, yellow  # noqa: E402
+
+wr = load("wr")  # PRs and their policies; loaded here, not in the report threads
+
+CONFIG = os.path.expanduser(os.environ.get("STANDUP_CONFIG", "~/.config/standup/config.toml"))
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "standup")
+FLEET = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "fleet", "state.json")
+DEFAULTS = {"default": [], "stale_days": 2, "pr_wait_days": 1, "wip": 2, "new_days": 7, "weekdays": "mon-fri",
+            "goal": {}}
+DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+DAY_NB = ["man", "tir", "ons", "tor", "fre", "lør", "søn"]
+CLOSED = DONE | {"Removed"}
+DOING = {"Doing", "Active", "In Progress", "Committed"}
+CONTAINERS = {"Epic", "Feature"}  # long-lived by nature: never «stuck», never WIP
+TEAMS_TTL = 86400
+WIDTH = 52  # title column
+
+
+def die(msg):
+    print(f"standup: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+_ado = None
+
+
+def A():
+    global _ado
+    if _ado is None:
+        _ado = Ado()
+    return _ado
+
+
+def config():
+    out = {k: (dict(v) if isinstance(v, dict) else v) for k, v in DEFAULTS.items()}
+    try:
+        with open(CONFIG, "rb") as f:
+            got = tomllib.load(f)
+    except FileNotFoundError:
+        return out
+    except tomllib.TOMLDecodeError as e:
+        die(f"{CONFIG}: {e}")
+    for k, v in got.items():
+        if k in out and type(v) is type(out[k]):
+            out[k] = v
+    return out
+
+
+# ── days ────────────────────────────────────────────────────────────────────
+
+
+def workdays(c):
+    days = set()
+    for part in c["weekdays"].lower().split(","):
+        x, _, y = part.strip().partition("-")
+        days |= set(range(DAYS.index(x[:3]), DAYS.index((y or x)[:3]) + 1))
+    return days
+
+
+def since(c, today=None):
+    """Midnight starting the previous workday, local time, and how to say it («fre», «i går»)."""
+    today = today or datetime.date.today()
+    days, d = workdays(c), today - datetime.timedelta(days=1)
+    while d.weekday() not in days and d > today - datetime.timedelta(days=8):
+        d -= datetime.timedelta(days=1)
+    label = "i går" if d == today - datetime.timedelta(days=1) else DAY_NB[d.weekday()]
+    return datetime.datetime.combine(d, datetime.time()).astimezone(), label
+
+
+def age(t, c, now=None):
+    """Whole workdays from t until now."""
+    if not t:
+        return 0
+    days, now = workdays(c), (now or datetime.datetime.now(datetime.timezone.utc))
+    d, end, n = t.astimezone().date(), now.astimezone().date(), 0
+    while d < end:
+        d += datetime.timedelta(days=1)
+        n += d.weekday() in days
+    return n
+
+
+# ── teams ───────────────────────────────────────────────────────────────────
+
+
+class Team:
+    def __init__(self, d):
+        self.name, self.project, self.areas = d["name"], d["project"], [tuple(a) for a in d["areas"]]
+        self.sprint = d.get("sprint")  # {name, path, start, finish} | None
+
+    def dump(self):
+        return {"name": self.name, "project": self.project, "areas": self.areas, "sprint": self.sprint}
+
+
+def current_sprint(project, team, today):
+    """The team's current iteration, if it has dates around today — ADO calls a 2023 sprint
+    with no end «current» when nothing newer exists."""
+    try:
+        its = A().rest("work/teamsettings/iterations?$timeframe=current", project=f"{project}/{team}")["value"]
+    except RuntimeError:
+        return None
+    for it in its:
+        at = it.get("attributes") or {}
+        start, finish = ts(at.get("startDate")), ts(at.get("finishDate"))
+        if start and finish and start.date() <= today <= finish.date() + datetime.timedelta(days=3):
+            return {"name": it["name"], "path": it["path"], "start": start.date().isoformat(),
+                    "finish": finish.date().isoformat()}
+    return None
+
+
+def fetch_teams(everyone):
+    raw = A().rest("teams" + ("" if everyone else "?$mine=true"), version="7.1-preview.3")["value"]
+    today = datetime.date.today()
+
+    def one(t):
+        proj, name = t["projectName"], t["name"]
+        tf = A().rest("work/teamsettings/teamfieldvalues", project=f"{proj}/{name}")
+        return Team({"name": name, "project": proj, "sprint": current_sprint(proj, name, today),
+                     "areas": [(v["value"], v.get("includeChildren", False)) for v in tf.get("values") or []]})
+    with concurrent.futures.ThreadPoolExecutor(8) as ex:
+        return sorted(ex.map(one, raw), key=lambda t: t.name.lower())
+
+
+def teams(everyone=False, fresh=False):
+    path = os.path.join(CACHE, "teams-all.json" if everyone else "teams.json")
+    if not fresh:
+        try:
+            if time.time() - os.path.getmtime(path) < TEAMS_TTL:
+                with open(path) as f:
+                    return [Team(d) for d in json.load(f)]
+        except (OSError, ValueError, KeyError):
+            pass
+    out = fetch_teams(everyone)
+    os.makedirs(CACHE, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump([t.dump() for t in out], f, ensure_ascii=False, indent=1)
+    return out
+
+
+def pick(all_, names):
+    """Teams whose name has a word starting with each given name, in order given."""
+    out = []
+    for n in names:
+        n = n.lower()
+        hit = [t for t in all_ if t.name.lower() == n] or \
+              [t for t in all_ if any(w.startswith(n) for w in t.name.lower().split()) or t.name.lower().startswith(n)]
+        if not hit:
+            die(f"no team matches «{n}» — `standup teams` lists them (-a: all)")
+        if len(hit) > 1:
+            die(f"«{n}» matches {', '.join(t.name for t in hit)} — be more specific")
+        out += [t for t in hit if t not in out]
+    return out
+
+
+# ── data ────────────────────────────────────────────────────────────────────
+
+
+class W:
+    """One work item, with what standup needs."""
+
+    def __init__(self, raw):
+        f = raw["fields"]
+        self.id, self.title, self.type = raw["id"], f.get("System.Title", ""), f.get("System.WorkItemType", "")
+        self.state, self.area = f.get("System.State", ""), f.get("System.AreaPath", "")
+        self.iteration = f.get("System.IterationPath", "")
+        a = f.get("System.AssignedTo")
+        self.who = a.get("displayName", "") if isinstance(a, dict) else ""
+        self.first = re.split(r"[ .]", self.who)[0] if self.who else ""
+        self.changed = ts(f.get("Microsoft.VSTS.Common.StateChangeDate"))
+        self.created = ts(f.get("System.CreatedDate"))
+        rels = raw.get("relations") or []
+        self.preds = [int(r["url"].rsplit("/", 1)[1]) for r in rels if r["rel"] == PRED]
+        # vstfs:///Git/PullRequestId/<project id>%2f<repo id>%2f<pr id>
+        self.prs = [(urllib.parse.unquote(r["url"]).split("/")[-3], int(urllib.parse.unquote(r["url"]).split("/")[-1]))
+                    for r in rels if r["url"].startswith("vstfs:///Git/PullRequestId/")]
+        self.done = self.state in DONE
+
+    def in_sprint(self, sprint):
+        return bool(sprint) and (self.iteration == sprint["path"] or self.iteration.startswith(sprint["path"] + "\\"))
+
+
+def wiql_str(s):
+    return "'" + s.replace("'", "''") + "'"
+
+
+def items(team, start):
+    area = " OR ".join(f"[System.AreaPath] {'UNDER' if ch else '='} {wiql_str(p)}" for p, ch in team.areas)
+    closed = ", ".join(wiql_str(s) for s in sorted(CLOSED))
+    q = (f"SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = {wiql_str(team.project)} AND ({area}) "
+         f"AND ([System.State] NOT IN ({closed}) OR ([System.State] <> 'Removed' "
+         f"AND [Microsoft.VSTS.Common.StateChangeDate] >= {wiql_str(start.date().isoformat())}))")
+    ids = [w["id"] for w in A().rest("wit/wiql?$top=1000", {"query": q}, project=team.project)["workItems"]]
+    return {w.id: w for w in batch(ids)}
+
+
+def batch(ids):
+    chunks = [ids[n:n + 200] for n in range(0, len(ids), 200)]
+    with concurrent.futures.ThreadPoolExecutor(4) as ex:
+        res = ex.map(lambda c: A().rest("wit/workitemsbatch", {"ids": c, "$expand": "relations",
+                                                               "errorPolicy": "omit"})["value"], chunks)
+    return [W(r) for chunk in res for r in chunk if r]
+
+
+def pull_requests(ws):
+    """Active PRs linked to these items, with their policies (build, review) — through wr."""
+    want = {}
+    for w in ws:
+        for proj, pr in w.prs:
+            want.setdefault(pr, (proj, []))[1].append(w.id)
+
+    def one(kv):
+        pr, (proj, wids) = kv
+        try:
+            raw = A().rest(f"git/pullrequests/{pr}", project=proj)
+        except RuntimeError:
+            return None
+        if raw.get("status") != "active":
+            return None
+        p = wr.PR(raw)
+        p.items = wids
+        p.voters = [r for r in raw.get("reviewers") or [] if not r.get("isContainer")]
+        p.author = re.split(r"[ .]", (raw.get("createdBy") or {}).get("displayName") or p.who)[0]
+        wr.policies(p)
+        return p
+    with concurrent.futures.ThreadPoolExecutor(8) as ex:
+        return sorted((p for p in ex.map(one, want.items()) if p), key=lambda p: p.created or 0)
+
+
+def agents(ids, prs):
+    """{role: count} of my fleet agents on these items/PRs, from fleet's last refresh."""
+    try:
+        with open(FLEET) as f:
+            state = json.load(f).get("agents") or {}
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for name, status in state.items():
+        m = re.match(r"fleet-(wi|pr)-(\d+)-(\w+)", name)
+        if m and int(m.group(2)) in (ids if m.group(1) == "wi" else prs):
+            key = m.group(3) + (" ✓" if status in ("done", "idle") else "")
+            out[key] = out.get(key, 0) + 1
+    return out
+
+
+# ── the standup ─────────────────────────────────────────────────────────────
+
+
+def clip(s, n=WIDTH):
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def row(icon, ref, title, tail):
+    return f"  {icon} {ref:<6} {clip(title):<{WIDTH}}  {tail}"
+
+
+def report(team, c, verbose=False, color=True):
+    """The team's standup as lines of text."""
+    paint = (lambda f, s: f(s)) if color else (lambda f, s: s)
+    start, label = since(c)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ws = items(team, start)
+    open_ = [w for w in ws.values() if not w.done]
+    sprint = team.sprint
+    missing = [p for w in open_ for p in w.preds if p not in ws]
+    blockers = {w.id: w for w in batch(list(dict.fromkeys(missing)))} if missing else {}
+    blockers.update(ws)
+    prs = pull_requests(open_)
+    out = []
+
+    head = paint(bold, team.name)
+    if sprint:
+        s0, s1 = datetime.date.fromisoformat(sprint["start"]), datetime.date.fromisoformat(sprint["finish"])
+        days = workdays(c)
+        span = [s0 + datetime.timedelta(days=i) for i in range((s1 - s0).days + 1)]
+        total = sum(d.weekday() in days for d in span) or 1
+        day = sum(d.weekday() in days for d in span if d <= datetime.date.today())
+        inside = [w for w in ws.values() if w.in_sprint(sprint)]
+        done = sum(w.done for w in inside)
+        bar = "▓" * round(10 * done / max(len(inside), 1)) + "░" * (10 - round(10 * done / max(len(inside), 1)))
+        head += f" · {sprint['name']} (dag {min(day, total)}/{total})"
+        goal = c["goal"].get(team.name)
+        if goal:
+            head += f" · mål: «{goal}»"
+        head += f"   {bar} {done}/{len(inside)}"
+    else:
+        head += paint(dim, " · tavle (ingen sprint)")
+    out += [head, ""]
+
+    def section(title, lines):
+        if lines:
+            out.extend([paint(bold, title)] + lines + [""])
+
+    finished = sorted((w for w in ws.values() if w.done and w.changed and w.changed >= start), key=lambda w: w.id)
+    section(f"Ferdig siden {label}", [
+        row(paint(green, "✓"), f"#{w.id}", w.title,
+            " · ".join(x for x in [w.first, " ".join(f"!{p}" for _, p in w.prs)] if x)) for w in finished])
+
+    almost = []
+    for p in reversed(prs):
+        voted = [r for r in p.voters if r.get("vote", 0) > 0]
+        notes = []
+        if p.draft:
+            notes.append("utkast")
+        if p.conflicts:
+            notes.append(paint(red, "konflikt"))
+        if any(s == "rejected" for n, s, _ in p.policies if n not in ("review", "påkrevd")):
+            notes.append(paint(red, "bygg ✗"))
+        if not voted and not p.draft:
+            waited = age(p.created, c, now)
+            if waited >= c["pr_wait_days"] or verbose:
+                notes.append(paint(yellow, f"venter review {waited} d") if waited >= c["pr_wait_days"]
+                             else f"venter review {waited} d")
+            if not p.voters:
+                notes.append("ingen reviewer")
+        if p.ready:
+            notes = [n for n in notes if "review" not in n] + [paint(green, "klar")]
+        if notes or verbose:
+            refs = " (" + ", ".join(f"#{i}" for i in p.items) + ")"
+            almost.append(row("⏳", f"!{p.id}", clip(p.title, WIDTH - len(refs)) + refs,
+                              " · ".join([p.author] + notes)))
+    section("Nesten ferdig  (tavla fra høyre)", almost)
+
+    stuck, doing = [], [w for w in open_ if w.state in DOING and w.type not in CONTAINERS]
+    for w in sorted(doing, key=lambda w: w.id):
+        d = age(w.changed, c, now)
+        if d > c["stale_days"]:
+            stuck.append(row(paint(yellow, "▶"), f"#{w.id}", w.title,
+                             f"{w.first or 'ingen eier'} · {w.state} {d} d (> {c['stale_days']})"))
+    # blocked only matters for what is under way or planned now; a backlog waits by design
+    for w in sorted((w for w in open_ if w in doing or w.in_sprint(sprint)), key=lambda w: w.id):
+        b = [p for p in w.preds if p in blockers and not blockers[p].done]
+        if b:
+            stuck.append(row(paint(red, "⛔"), f"#{w.id}", w.title,
+                             f"{w.first or 'ingen eier'} · blokkert av {', '.join(f'#{p}' for p in b)}"))
+    per = {}
+    for w in doing:
+        if w.who:
+            per[w.who] = per.get(w.who, 0) + 1
+    for who, n in sorted(per.items()):
+        if n > c["wip"]:
+            stuck.append(f"  {paint(yellow, '⚠')} {who}: {n} i Doing (WIP > {c['wip']})")
+    section("Står fast", stuck)
+
+    fresh = datetime.timedelta(days=c["new_days"])
+    unowned = [w for w in open_ if not w.who and w.type not in ("Epic", "Feature")
+               and (w.in_sprint(sprint) if sprint else w.created and now - w.created <= fresh)]
+    section("Uten eier", [row("○", f"#{w.id}", w.title, f"{w.area} · {age(w.created, c, now)} d")
+                          for w in sorted(unowned, key=lambda w: w.id)])
+
+    if verbose:
+        section("I gang", [row("▸", f"#{w.id}", w.title, f"{w.first} · {age(w.changed, c, now)} d")
+                           for w in sorted(doing, key=lambda w: w.id)])
+        if sprint:
+            todo = [w for w in open_ if w.in_sprint(sprint) and w not in doing]
+            section("Igjen i sprinten", [row("·", f"#{w.id}", w.title, w.first or "ingen eier")
+                                         for w in sorted(todo, key=lambda w: w.id)])
+
+    bots = agents(set(ws), {p.id for p in prs})
+    if bots:
+        out += [paint(dim, "🤖 Agenter (mine): " + " · ".join(f"{n} {k}" for k, n in sorted(bots.items()))), ""]
+    if len(out) == 2:
+        out += [paint(dim, "  Ingen unntak — alt går som det skal."), ""]
+    return out
+
+
+# ── commands ────────────────────────────────────────────────────────────────
+
+
+def cmd_show(a):
+    c = config()
+    if a.teams:
+        chosen = pick(teams(a.all, fresh=a.fresh), a.teams)
+    else:
+        mine = teams(a.all, fresh=a.fresh)
+        chosen = pick(mine, c["default"]) if c["default"] and not a.all else mine
+    with concurrent.futures.ThreadPoolExecutor(4) as ex:
+        reports = list(ex.map(lambda t: report(t, c, a.verbose, color=TTY and not a.copy), chosen))
+    text = "\n".join(l for r in reports for l in r).rstrip() + "\n"
+    print(text, end="")
+    if a.copy:
+        subprocess.run(["pbcopy"], input=text, text=True)
+        print(dim("(kopiert)"), file=sys.stderr)
+
+
+def cmd_teams(a):
+    for t in teams(a.all, fresh=True):
+        sprint = t.sprint
+        when = f"{sprint['name']} ({sprint['start']} – {sprint['finish']})" if sprint else dim("ingen sprint")
+        areas = ", ".join(p + ("\\…" if ch else "") for p, ch in t.areas)
+        print(f"{bold(t.name):<40} {dim(t.project):<26} {cyan(areas)}  {when}")
+
+
+GUIDE = """\
+{b}standup{r} — standupen per team, fra ADO
+
+{b}Hva den viser{r}
+  Bare unntak og bevegelse siden forrige arbeidsdag (mandag → fredag):
+    Ferdig siden …   work items som ble Done
+    Nesten ferdig    aktive PRer lenket til teamets items som venter på noe: review
+                     (ingen stemme etter pr_wait_days), bygg ✗, konflikt — eller er klare
+    Står fast        Doing lenger enn stale_days arbeidsdager, blokkert av en åpen
+                     forgjenger, og personer med flere enn wip i Doing
+    Uten eier        sprinten: alt uten eier · tavle: nye (new_days) uten eier
+    🤖               mine fleet-agenter på teamets items/PRer (bare lokale)
+  -v viser også det som går greit: alt i Doing og resten av sprinten.
+
+{b}Team{r}
+  Fra ADO: teamene jeg er medlem av, med area paths fra teaminnstillingene (UNDER når
+  teamet tar med under-areas). Har teamet en sprint med datoer rundt i dag, blir det
+  sprintvisning med fremdrift; ellers tavlevisning. `standup teams` viser dem, -a alle.
+  Team-lista caches et døgn i {cache}; --fresh henter på nytt.
+
+{b}Config{r}  {config}
+  default = ["Team Logit", "Innsikt Team"]   # `standup` uten team; tom = alle mine
+  stale_days = 2      # Doing lenger enn dette (arbeidsdager) = står fast
+  pr_wait_days = 1    # PR uten godkjennende stemme lenger enn dette
+  wip = 2             # flere i Doing per person = varsel
+  new_days = 7        # tavlevisning: «uten eier» bare for så nye items
+  weekdays = "mon-fri"
+  [goal]
+  "Team Logit" = "Support-mail → Supportsaker"   # sprintmål i overskriften
+
+{b}Ikke med (ennå){r}
+  PRer der teamet bare er reviewer-gruppe, --claude med samtaleemner, post til Teams.
+"""
+
+
+def cmd_help(a):
+    on = TTY
+    print(GUIDE.format(b="\033[1m" if on else "", r="\033[0m" if on else "", config=CONFIG, cache=CACHE))
+
+
+def main():
+    p = argparse.ArgumentParser(prog="standup", description="each ADO team's standup, from ADO")
+    sub = p.add_subparsers(dest="cmd")
+
+    s = sub.add_parser("show", help="the standup for my teams, or the named ones")
+    s.add_argument("teams", nargs="*", help="team name prefixes (default: config default, else all mine)")
+    s.add_argument("-c", "--copy", action="store_true", help="plain text, also to the clipboard")
+    s.add_argument("-v", "--verbose", action="store_true", help="also what is going fine")
+    s.add_argument("-a", "--all", action="store_true", help="every team in the org, not just mine")
+    s.add_argument("--fresh", action="store_true", help="fetch the teams again, not from the day's cache")
+    s.set_defaults(fn=cmd_show)
+
+    s = sub.add_parser("teams", help="my teams with area paths and sprint")
+    s.add_argument("-a", "--all", action="store_true", help="every team in the org")
+    s.set_defaults(fn=cmd_teams)
+
+    s = sub.add_parser("help", help="forklaring (norsk)")
+    s.set_defaults(fn=cmd_help)
+
+    argv = sys.argv[1:]
+    if not argv or argv[0] not in sub.choices and argv[0] not in ("-h", "--help"):
+        argv = ["show"] + argv
+    a = p.parse_args(argv)
+    try:
+        a.fn(a)
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except RuntimeError as e:
+        die(e)
+
+
+if __name__ == "__main__":
+    main()
