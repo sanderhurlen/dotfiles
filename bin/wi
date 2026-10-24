@@ -19,6 +19,9 @@
 #   wi triage 8700           Claude proposes route, priority, parent, criteria and
 #                            questions; y writes them to ADO (see TRIAGE below)
 #   wi triage                my open Issues/Bugs nobody has triaged yet
+#   wi new "Tittel" -p 8698  create (Issue unless -t); -g tag -a who -d body -b blocker
+#   wi set 8700 -s done -g x state, assignee, tags (+-g/-G), parent, blockers, fields
+#   wi comment 8700 "tekst"  comment; text or HTML, - reads stdin
 #   wi open 8700             open in browser
 #   wi help                  explained (Norwegian)
 #
@@ -622,6 +625,133 @@ def cmd_triage(a):
         show_proposal(r, raw)
 
 
+# ── write ───────────────────────────────────────────────────────────────────
+# new, set and comment: what agents otherwise do with `az boards`, minus its gotchas.
+# Tags are read-modify-write guarded by the item's rev, `-s done` is the type's own
+# Completed state, a new parent replaces the old one, and plain text becomes HTML.
+# Each prints one line.
+
+PATCH = "application/json-patch+json"
+
+
+def body_html(s):
+    """Text (- reads stdin) → the HTML ADO stores. HTML is kept as it is; plain text becomes
+    paragraphs, and a paragraph of "- " lines a list."""
+    s = sys.stdin.read() if s == "-" else s
+    if re.search(r"(?i)<(p|ul|ol|li|br|h\d|pre|code|div|a)\b", s):
+        return s
+    out = []
+    for para in re.split(r"\n\s*\n", s.strip()):
+        rows = para.splitlines()
+        if all(r.lstrip().startswith(("- ", "* ")) for r in rows):
+            out.append("<ul>" + "".join(f"<li>{html.escape(r.lstrip()[2:])}</li>" for r in rows) + "</ul>")
+        else:
+            out.append("<p>" + "<br>".join(html.escape(r) for r in rows) + "</p>")
+    return "".join(out)
+
+
+def field(name, value):
+    return {"op": "add", "path": f"/fields/{name}", "value": value}
+
+
+def relation(rel, id):
+    return {"op": "add", "path": "/relations/-",
+            "value": {"rel": rel, "url": f"{A().org}/_apis/wit/workItems/{id}"}}
+
+
+def edits(a, raw=None):
+    """(patch ops, what changed) for the flags of new/set. raw: the item as it is now (set)."""
+    f = raw["fields"] if raw else {}
+    ops = [{"op": "test", "path": "/rev", "value": raw["rev"]}] if raw else []
+    did = []
+    if getattr(a, "title", None):
+        ops.append(field("System.Title", a.title))
+        did.append("tittel")
+    if a.state:
+        state = A().done_state(wf.get(raw["id"])) if raw and a.state.lower() == "done" else a.state
+        ops.append(field("System.State", state))
+        did.append(state)
+    if a.assignee:
+        who_ = "" if a.assignee == "none" else A().me() if a.assignee in ("me", "@me") else a.assignee
+        ops.append(field("System.AssignedTo", who_))
+        did.append(f"@{who_.split('@')[0]}" if who_ else "uten eier")
+    cur = [t.strip() for t in (f.get("System.Tags") or "").split(";") if t.strip()]
+    tags = [t for t in cur if t not in (getattr(a, "untag", None) or [])]
+    tags += [t for t in a.tag or [] if t not in tags]
+    if tags != cur:
+        ops.append(field("System.Tags", "; ".join(tags)))
+        did += [f"+{t}" for t in tags if t not in cur] + [f"-{t}" for t in cur if t not in tags]
+    if a.description:
+        ops.append(field("System.Description", body_html(a.description)))
+        did.append("beskrivelse")
+    for kv in a.field or []:
+        k, sep, v = kv.partition("=")
+        if not sep:
+            die(f"-f {kv}: skriv Felt=verdi")
+        ops.append(field(k.strip(), v))
+        did.append(k.strip().rsplit(".", 1)[-1])
+    if a.parent:
+        rels = (raw or {}).get("relations") or []
+        # an item has one parent: remove the old link, last index first so the others don't shift
+        for i in reversed([i for i, r in enumerate(rels) if r["rel"] == PARENT]):
+            ops.append({"op": "remove", "path": f"/relations/{i}"})
+        ops.append(relation(PARENT, a.parent))
+        did.append(f"parent {a.parent}")
+    for b in a.blocked_by or []:
+        ops.append(relation(wf.PRED, b))
+        did.append(f"blokkert av {b}")
+    return ops, did
+
+
+def post_comment(id, body):
+    A().api(f"wit/workItems/{id}/comments", {"text": body_html(body)}, project=urllib.parse.quote(A().project))
+
+
+def cmd_new(a):
+    ops, did = edits(a)
+    ops.insert(0, field("System.Title", " ".join(a.title_)))
+    raw = A().api(f"wit/workitems/${urllib.parse.quote(a.type)}", ops, method="POST",
+                  project=urllib.parse.quote(A().project), ctype=PATCH)
+    if a.comment:
+        post_comment(raw["id"], a.comment)
+        did.append("kommentar")
+    print(f"✓ #{raw['id']} {a.type}" + "".join(f" · {d}" for d in did)
+          + f"  {A().org}/{urllib.parse.quote(A().project)}/_workitems/edit/{raw['id']}")
+
+
+def cmd_set(a):
+    raw = raw_item(a.id)
+    ops, did = edits(a, raw)
+    if len(ops) > 1:
+        A().api(f"wit/workitems/{a.id}", ops, method="PATCH", ctype=PATCH)
+    if a.comment:
+        post_comment(a.id, a.comment)
+        did.append("kommentar")
+    if not did:
+        die("ingenting å endre — se `wi help set`")
+    print(f"✓ #{a.id} → " + " · ".join(did))
+
+
+def cmd_comment(a):
+    post_comment(a.id, " ".join(a.text))
+    print(f"✓ #{a.id} · kommentar")
+
+
+def writes(s, new=False):
+    """The flags new and set share."""
+    s.add_argument("-s", "--state", help="state; done = typens ferdig-state")
+    s.add_argument("-a", "--assignee", help="@me | none | e-post")
+    s.add_argument("-g", "--tag", action="append", help="legg til tag, gjentas")
+    s.add_argument("-p", "--parent", type=int, help="parent (erstatter en eksisterende)")
+    s.add_argument("-b", "--blocked-by", type=int, action="append", help="predecessor, gjentas")
+    s.add_argument("-d", "--description", help="beskrivelse, tekst eller HTML; - leser stdin")
+    s.add_argument("-f", "--field", action="append", metavar="FELT=VERDI", help="vilkårlig felt, gjentas")
+    s.add_argument("-c", "--comment", help="kommentar etterpå; - leser stdin")
+    if not new:
+        s.add_argument("-G", "--untag", action="append", help="fjern tag, gjentas")
+        s.add_argument("--title")
+
+
 # ── rendering ───────────────────────────────────────────────────────────────
 
 
@@ -726,6 +856,11 @@ GUIDE = """\
   wi triage [id]          Claude foreslår rute, prioritet, parent, kriterier og spørsmål;
                           y skriver til ADO · e rediger · r på nytt. Uten id: mine utriagerte
                           -y skriv uten å spørre · --save bare lag forslaget · -m modell
+  wi new "<tittel>" [..]  opprett (Issue, -t Bug/Task); skriver #id og lenke
+  wi set <id> [..]        endre: -s state (done = typens ferdig-state) · -a @me|none|e-post
+                          · -g tag / -G fjern tag · -p parent (erstatter) · -b blokkert av
+                          · -d beskrivelse · -f Felt=verdi · --title · -c kommentar
+  wi comment <id> <tekst> kommentar; - leser stdin
   wi open <id>            åpne i nettleser
   wi help [kommando]      denne teksten, eller flaggene til én kommando
 
@@ -745,7 +880,8 @@ GUIDE = """\
 
 {b}VERDT Å VITE{r}
 
-  · Bare lesing, unntatt triage etter y. Endre ellers med `az boards work-item update` eller wf.
+  · Skriving: new, set, comment, og triage etter y. Tags leses og skrives mot itemets rev,
+    så ingen tags forsvinner. Tekst blir HTML (avsnitt, «- » blir liste); HTML går rett inn.
   · triage: rute = ready-for-agent | ready-for-human | needs-info | wayfinder (blir tag
     wayfinder:map, så `wf go <id>` tegner kartet). Skriver tag, prioritet, manglende parent,
     akseptkriterier (i beskrivelsen) og, ved needs-info, spørsmålene som kommentar til den
@@ -847,6 +983,22 @@ def main():
     s.add_argument("id", type=int)
     s.add_argument("-C", "--no-comments", action="store_true")
     s.set_defaults(fn=cmd_show)
+
+    s = sub.add_parser("new", help="create a work item; prints its id")
+    s.add_argument("title_", nargs="+", metavar="title")
+    s.add_argument("-t", "--type", default="Issue")
+    writes(s, new=True)
+    s.set_defaults(fn=cmd_new)
+
+    s = sub.add_parser("set", help="change state, assignee, tags, parent, links, fields")
+    s.add_argument("id", type=int)
+    writes(s)
+    s.set_defaults(fn=cmd_set)
+
+    s = sub.add_parser("comment", help="comment on a work item (- reads stdin)")
+    s.add_argument("id", type=int)
+    s.add_argument("text", nargs="+")
+    s.set_defaults(fn=cmd_comment)
 
     s = sub.add_parser("open", help="open in browser")
     s.add_argument("id", type=int)

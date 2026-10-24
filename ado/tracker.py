@@ -183,4 +183,4 @@ class Ado:
         return state
 
     def read_hint(self, id):
-        return f"`az boards work-item show --id {id}`"
+        return f"`wi show {id}`"
