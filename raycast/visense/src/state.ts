@@ -2,8 +2,8 @@
 // `fleet ls`), wr's review drafts, and running the dotfiles bins. All logic about ADO stays
 // in the bins; this only reads what they write and calls them.
 
-import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { execFile, spawn } from "node:child_process";
+import { mkdirSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -142,6 +142,19 @@ export function run(bin: string, args: string[], timeout = 120_000): Promise<str
       },
     ),
   );
+}
+
+/** Starts a dotfiles bin that outlives the command (Raycast kills what it started when its
+ *  window closes); its output goes to log. */
+export function detach(bin: string, args: string[], log: string) {
+  mkdirSync(join(log, ".."), { recursive: true });
+  const fd = openSync(log, "w");
+  spawn(join(HOME, ".dotfiles/bin", bin), args, {
+    env: { ...process.env, PATH },
+    cwd: HOME,
+    detached: true,
+    stdio: ["ignore", fd, fd],
+  }).unref();
 }
 
 /** Brings an app to the front (Ghostty, where fleet and the agents run). */

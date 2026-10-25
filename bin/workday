@@ -1,0 +1,146 @@
+#!/bin/bash
+#
+# workday — the day's end and start, as notes Claude writes from what happened.
+#
+#   workday end [-f <fokus>] [-n <neste>]   stop fleet and tower, prune finished agents and
+#                                           worktrees, then write today's note: my own lines
+#                                           (what I focused on, where I stopped) and a summary
+#                                           of today's commits, unfinished worktrees and agents
+#   workday plan [--fresh]                  how to attack today: the last note, fleet's list
+#                                           (fleet ls) and my teams' standup, through Claude;
+#                                           written once a day, --fresh writes it again
+#   workday last                            the last note
+#
+# Notes live in ~/.local/state/workday: <date>.md (end) and plan-<date>.md (plan), kept 7
+# days. Each is written whole at the end, so a reader can wait for the file to change. The Raycast
+# extension (raycast/visense) runs end and plan detached and shows the files.
+
+# Raycast runs with a bare PATH; claude lives in ~/.local/bin, az/uv in Homebrew.
+export PATH="$HOME/.local/bin:$HOME/.dotfiles/bin:/opt/homebrew/bin:$PATH"
+
+dir="$HOME/.local/state/workday"
+root="$HOME/visense"
+day=$(date +%F)
+mkdir -p "$dir"
+# Notes are history (what did I do that week?), not a queue; a week is enough.
+find "$dir" -name '*.md' -mtime +7 -delete
+
+die() { echo "workday: $*" >&2; exit 1; }
+
+# The newest end note, today's included.
+last() { ls "$dir"/????-??-??.md 2>/dev/null | tail -1; }
+
+# Writes stdin to $1 in one go.
+put() { cat >"$1.tmp" && mv "$1.tmp" "$1"; }
+
+facts() {
+  local midnight_ms=$(($(date -j -f '%F %T' "$day 00:00:00" +%s) * 1000))
+  echo "## Commits i dag, per repo/worktree (alle brancher)"
+  for git in "$root"/*/.git; do
+    # A .git file is a worktree of another repo, which lists it already.
+    [[ -d $git ]] || continue
+    repo=$(dirname "$git")
+    git -C "$repo" worktree list --porcelain | sed -n 's/^worktree //p' | while read -r wt; do
+      branch=$(git -C "$wt" branch --show-current)
+      dirty=$(git -C "$wt" status --porcelain | wc -l | tr -d ' ')
+      track=
+      [[ -n $branch ]] && track=$(git -C "$wt" for-each-ref --format='%(upstream:track)' "refs/heads/$branch")
+      log=$(git -C "$wt" log --since=midnight --author="$(git -C "$wt" config user.email)" --format='  - %s' HEAD)
+      # Only today's work, uncommitted files or unpushed commits; behind or [gone] alone is not left over.
+      [[ -z $log && $dirty == 0 && $track != *ahead* ]] && continue
+      echo "### ${wt#"$root"/} ($branch) · ${dirty} uncommitted filer ${track:+· $track}"
+      echo "$log"
+    done
+  done
+  echo
+  echo "## Claude-agenter: startet i dag, eller blocked/running"
+  claude agents --json --all 2>/dev/null |
+    jq -r --argjson t "$midnight_ms" \
+      '.[] | select(.startedAt >= $t or .state == "blocked" or .state == "running") | "- \(.name) · \(.state) · \(.cwd)"'
+}
+
+cmd_end() {
+  local fokus= neste=
+  while getopts f:n: o; do
+    case $o in
+      f) fokus=$OPTARG ;;
+      n) neste=$OPTARG ;;
+      *) die "bruk: workday end [-f <fokus>] [-n <neste>]" ;;
+    esac
+  done
+
+  # fleet's caffeinate is tied to its pid (-w), so it ends with fleet.
+  pkill -TERM -f "$HOME/.dotfiles/bin/fleet"
+  pkill -TERM -f "$HOME/.dotfiles/bin/tower"
+  fleet prune >/dev/null 2>&1
+  fleet clean >/dev/null 2>&1
+
+  local mine=
+  [[ -n $fokus ]] && mine+="### Fokus i dag"$'\n'"$fokus"$'\n\n'
+  [[ -n $neste ]] && mine+="### Hvor jeg slapp / neste steg"$'\n'"$neste"$'\n\n'
+
+  local data summary prompt
+  data=$(facts)
+  prompt="Under er rådata fra arbeidsdagen min ($day), og det jeg selv skrev om dagen. Skriv en kort \
+oppsummering på norsk i Markdown som lar meg fortsette der jeg slapp: 1) hva jeg fikk gjort, \
+2) hva som er halvferdig og hvor (repo, branch, worktree, agent som er blocked/running, \
+uncommitted/upushet). Det jeg skrev selv veier tyngst; uncommitted filer alene på main/master \
+er som regel støy. Bare fakta, ingen innledning, ingen overskrift på toppnivå, maks ~20 linjer."
+  summary=$(claude -p --model sonnet "$prompt" <<<"${mine:+# Det jeg skrev
+$mine}# Rådata
+$data" 2>/dev/null) || summary=$data
+
+  {
+    echo "# $day"
+    echo
+    [[ -n $mine ]] && printf '## Mine notater\n\n%s' "$mine"
+    echo "## Oppsummering"
+    echo
+    echo "$summary"
+  } | put "$dir/$day.md"
+  cat "$dir/$day.md"
+}
+
+cmd_plan() {
+  local out="$dir/plan-$day.md"
+  if [[ $1 != --fresh && -s $out ]]; then
+    cat "$out"
+    return
+  fi
+
+  local note tmp
+  note=$(last)
+  tmp=$(mktemp -d)
+  # fleet ls refreshes state.json too; when ADO is unreachable, its last list is better than none.
+  { fleet ls 2>/dev/null || cat "$HOME/.cache/fleet/screen.txt" 2>/dev/null; } >"$tmp/fleet" &
+  standup 2>/dev/null >"$tmp/standup" &
+  wait
+
+  local prompt="I dag er $(LC_TIME=nb_NO.UTF-8 date '+%A %F'). Under er notatet fra forrige arbeidsdag \
+(mine egne linjer og en oppsummering), fleet-lista mi (work items, PRer jeg skal reviewe, mine PRer, \
+agenter) og teamenes standup. Foreslå på norsk i Markdown hvordan jeg bør angripe dagen: \
+først det som blokkerer andre eller haster (agenter som venter på meg, mine PRer med konflikt/feil, \
+reviews som har ventet), så å fortsette der jeg slapp, så resten. 3–6 punkter i rekkefølge, \
+hvert med #id/!pr og ett kort hvorfor, og første konkrete handling (gjerne en fleet-kommando). \
+Ingen innledning, ingen overskrift på toppnivå, maks ~25 linjer."
+  {
+    echo "# Notat fra forrige arbeidsdag"
+    if [[ -n $note ]]; then cat "$note"; else echo "(ingen)"; fi
+    echo
+    echo "# fleet"
+    cat "$tmp/fleet"
+    echo
+    echo "# Standup"
+    cat "$tmp/standup"
+  } | claude -p --model sonnet "$prompt" 2>/dev/null | put "$out"
+  rm -rf "$tmp"
+  [[ -s $out ]] || { rm -f "$out"; die "claude skrev ingen plan"; }
+  cat "$out"
+}
+
+case $1 in
+  end) shift; cmd_end "$@" ;;
+  plan) shift; cmd_plan "$@" ;;
+  last) note=$(last); [[ -n $note ]] && cat "$note" || die "ingen notater ennå" ;;
+  *) sed -n '3,16s/^# \{0,1\}//p' "$0"; exit 1 ;;
+esac

@@ -22,6 +22,18 @@
       "mode": "view"
     },
     {
+      "name": "start-workday",
+      "title": "Start Workday",
+      "description": "Forslag til hvordan angripe dagen, gårsdagens notat, og fleet, tower, Outlook og Teams på ↵",
+      "mode": "view"
+    },
+    {
+      "name": "end-workday",
+      "title": "End Workday",
+      "description": "Noen linjer om dagen, så stopper fleet og tower og Claude skriver notatet",
+      "mode": "view"
+    },
+    {
       "name": "wi-new",
       "title": "Nytt Work Item",
       "description": "wi new med type, parent, tags og beskrivelse",
