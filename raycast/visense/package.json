@@ -1,0 +1,48 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "visense",
+  "title": "Visense",
+  "description": "fleet, work items og PRer fra dotfiles-bin-ene",
+  "icon": "icon.png",
+  "author": "sanderhurlen",
+  "license": "MIT",
+  "commands": [
+    {
+      "name": "menu-bar",
+      "title": "Fleet Menylinje",
+      "subtitle": "Visense",
+      "description": "Det som venter på meg fra fleet: agenter, mine PRer, review",
+      "mode": "menu-bar",
+      "interval": "1m"
+    },
+    {
+      "name": "fleet",
+      "title": "Fleet",
+      "description": "Work items og PRer fra fleet, med handlinger",
+      "mode": "view"
+    },
+    {
+      "name": "wi-new",
+      "title": "Nytt Work Item",
+      "description": "wi new med type, parent, tags og beskrivelse",
+      "mode": "view"
+    }
+  ],
+  "scripts": {
+    "build": "ray build",
+    "dev": "ray develop",
+    "lint": "ray lint"
+  },
+  "dependencies": {
+    "@raycast/api": "2.9.0",
+    "@raycast/utils": "2.3.3"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.17",
+    "@types/react": "19.0.10",
+    "typescript": "~5.9.3"
+  },
+  "categories": [
+    "Developer Tools"
+  ]
+}
