@@ -6,7 +6,7 @@
 # *.symlink only reaches $HOME, so ~/.claude/* is linked here instead.
 #
 # Not versioned on purpose (this repo is public): skills with private details
-# (parkeringsfaktura), herdr's own hook, and the mail skill's config.json —
+# (parkeringsfaktura) and the mail skill's config.json —
 # copy config.json.example to config.json and fill it in.
 
 if test ! "$(which claude)"

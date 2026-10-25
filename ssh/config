@@ -1,0 +1,18 @@
+Include ~/.colima/ssh_config
+
+
+Host rpi
+	HostName rpi.local
+	User pi
+	IdentityFile ~/.ssh/rpi_rsa
+
+Host rpitail
+	HostName 100.109.226.113
+	User pi
+	IdentityFile ~/.ssh/rpi_rsa
+
+Host dev.azure.com
+    User git
+    HostName ssh.dev.azure.com
+    AddKeysToAgent yes
+    IdentityFile ~/.ssh/id_rsa

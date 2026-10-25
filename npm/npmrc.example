@@ -1,0 +1,4 @@
+//pkgs.dev.azure.com/Hussoppen/Visense/_packaging/visense/npm/registry/:_authToken=NPM_TOKEN
+@playwright:registry=https://registry.npmjs.org/
+playwright:registry=https://registry.npmjs.org/
+playwright-core:registry=https://registry.npmjs.org/
