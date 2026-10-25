@@ -1211,9 +1211,7 @@ class Pilot:
             if "review" not in trig or not x.asked or x.vote:
                 return None
             return "review", f"{x.key}@review", None  # age from when fleet first saw me asked, not PR creation
-        if x.pr.draft:
-            return None
-        fails = x.failing if "build" in trig else []
+        fails = x.failing if "build" in trig and not x.pr.draft else []  # a draft may be red on purpose, not conflict
         why = (["merge-konflikter"] if "conflict" in trig and x.pr.conflicts else []) + [f"{n} feiler" for n in fails]
         if not why:
             return None
@@ -2488,7 +2486,7 @@ GUIDE = """\
                     bakgrunnen, maks 2 om gangen, én gang per item. Bare et forslag i ~/.cache/wi/triage —
                     skriver ingenting i ADO. Linja: 🧭 agent-klar / for meg / trenger info / bør bli kart · m → t;
                     m → t viser forslaget og y skriver det. Holder ikke agentplass, ingen {backlog} t-grense.
-  Ikke: drafts · PRer der jeg allerede har en agent jeg startet selv · hendelser eldre enn
+  Ikke: rødt bygg på draft (konflikt fikses) · PRer der jeg allerede har en agent jeg startet selv · hendelser eldre enn
   {backlog} t (helg teller ikke; review regnes fra da fleet først så meg som reviewer) · utenfor {hours} {days} — da i kø til arbeidstid starter.
   Maks {par} fleet-agenter kjører samtidig (mine teller med); resten «⏳ i kø», fix før review.
   En agent som har stått ⏸ over {blocked} min (transkriptet urørt) er ferdig med turen og venter
