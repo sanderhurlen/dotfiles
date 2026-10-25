@@ -13,6 +13,9 @@
 # quits Outlook and Teams.
 # Running agents are left alone; the Ghostty window stays open.
 
+# Raycast runs with a bare PATH; claude lives in ~/.local/bin, az/uv in Homebrew.
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"
+
 root="$HOME/visense"
 day=$(date +%F)
 note="$HOME/Desktop/Fortsett der du slapp $day.md"
@@ -21,13 +24,17 @@ midnight_ms=$(($(date -j -f '%F %T' "$day 00:00:00" +%s) * 1000))
 facts() {
   echo "## Commits i dag, per repo/worktree (alle brancher)"
   for git in "$root"/*/.git; do
+    # A .git file is a worktree of another repo, which lists it already.
+    [[ -d $git ]] || continue
     repo=$(dirname "$git")
     git -C "$repo" worktree list --porcelain | sed -n 's/^worktree //p' | while read -r wt; do
       branch=$(git -C "$wt" branch --show-current)
       dirty=$(git -C "$wt" status --porcelain | wc -l | tr -d ' ')
-      track=$(git -C "$wt" for-each-ref --format='%(upstream:track)' "refs/heads/$branch")
+      track=
+      [[ -n $branch ]] && track=$(git -C "$wt" for-each-ref --format='%(upstream:track)' "refs/heads/$branch")
       log=$(git -C "$wt" log --since=midnight --author="$(git -C "$wt" config user.email)" --format='  - %s' HEAD)
-      [[ -z $log && $dirty == 0 && -z $track ]] && continue
+      # Only today's work, uncommitted files or unpushed commits; behind or [gone] alone is not left over.
+      [[ -z $log && $dirty == 0 && $track != *ahead* ]] && continue
       echo "### ${wt#"$root"/} ($branch) · ${dirty} uncommitted filer ${track:+· $track}"
       echo "$log"
     done

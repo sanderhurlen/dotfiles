@@ -1,6 +1,7 @@
 # Map: tower
 
 Label: wayfinder:map
+Status: closed (v1 og videre bygd, se Decisions og «Etter v1»)
 
 ## Destination
 
