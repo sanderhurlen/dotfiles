@@ -26,7 +26,7 @@ const VOTES = [
   ['reject', 'reject', 'r'],
 ] as const
 
-type Line = { line: string; posted: boolean; vote: string; comments: { where: string; text: string; skip: boolean }[] }
+type Line = { line: string; posted: boolean; vote: string; goal: string; comments: { where: string; text: string; skip: boolean }[] }
 
 async function wr($: EngineInterface, args: string[]) {
   const { exitCode, stdout, stderr } = await $.process.run(['wr', ...args], { timeoutMs: 60_000 })
@@ -60,6 +60,7 @@ async function refresh($: EngineInterface) {
         line: found.line,
         isPosted: found.posted,
         vote: found.vote,
+        goal: found.goal ?? '',
         comments: found.comments.map(c => ({ where: c.where, text: c.text, isSkipped: c.skip })),
       })
     }
@@ -179,6 +180,7 @@ export const register: Register = on => {
 
           return (
             <Box key={`line-${d.id}`} flexDirection="column">
+              {d.goal ? <Text><Text color="yellow">skal løse:</Text> {d.goal}</Text> : null}
               <Text>📝 {name} utkast: {d.line}</Text>
               <Box gap={1}>
                 <Button

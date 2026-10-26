@@ -16,7 +16,7 @@
 #                            keeps the Mac from idle-sleeping while it runs (caffeinate -i)
 #   fleet ls                 same list, printed once
 #   fleet go 8698            background agent on a work item: map → /wayfinder, else /implement
-#   fleet review 6966        background agent reviewing a PR: /review-pr
+#   fleet review 6966        background agent reviewing a PR: /code-review → draft (`wr draft`)
 #   fleet fix 7012           background agent fixing my PR: conflicts, failing build, review comments
 #   fleet prune [-n]         remove finished fleet agents whose item/PR is gone from the list
 #   fleet code 9006          VS Code in the item's worktree, .env* copied from the main checkout
@@ -30,7 +30,7 @@
 # default ~/visense), else in the first root. Named for what they work on and their role:
 # fleet-wi-<id>-<role> / fleet-pr-<id>-<role> (fleet-pr-7012-fix, fleet-pr-6966-review), so every
 # agent on a PR or work item shows on its row and goes when it does.
-# TUI: ↑↓/jk move · m actions for the row · enter start agent (pick prompt, or type one) · →/← unfold/fold a map or spec · o open · a all PRs · A autopilot · J launchd jobs · r refresh · q quit
+# TUI: ? what fleet does · ↑↓/jk move · m actions for the row · enter start agent (pick prompt, or type one) · →/← unfold/fold a map or spec · o open · a all PRs · A autopilot · J launchd jobs · r refresh · q quit
 
 import argparse
 import concurrent.futures
@@ -854,7 +854,10 @@ def where_fix(m):
 def plan(x, prompt=None, role=None):
     """(cwd, cmd) that starts the background agent for a Work, Mine, Review, or anything with
     where() → (cwd, worktree) and prompt (wp's failed runs). prompt: instead of the row's own;
-    role: names the agent (agent_name), the row's own when None."""
+    role: names the agent (agent_name), the row's own when None. A Review's own is autopilot's:
+    /code-review in a worktree, written as a draft."""
+    if isinstance(x, Review) and not prompt:
+        x = Auto(x)
     if hasattr(x, "where"):
         cwd, wt = x.where()
         prompt = prompt or x.prompt
@@ -868,7 +871,6 @@ def plan(x, prompt=None, role=None):
         prompt = prompt or x.prompt
     else:
         cwd, wt = where_review(x)
-        prompt = prompt or (f"/review-pr {x.id}" if cwd else f"/review-pr {x.url}")
         cwd = cwd or HOME
     cmd = ["claude", SKIP, "--bg", "-n", agent_name(x, role)]
     if wt:
@@ -911,7 +913,7 @@ def starts(x):
                  f"mot {x.target} og work items {', '.join(f'#{i}' for i in sorted(x.items)) or '-'}, "
                  f"og oppdater PR-en i ADO.")]
     if isinstance(x, Review):
-        return [(f"/review-pr {x.id}", x, None, None),
+        return [(f"/code-review {x.id} → utkast", x, None, None),
                 ("forklar PR-en for meg (ingen kommentarer)", x, "explain", explain(x)),
                 ("test lokalt: bygg og kjør testene", x, "test",
                  f"Sjekk ut PR !{x.id} ({x.url}), kildebranch {x.source}, i et worktree. Bygg, kjør testene og "
@@ -1101,15 +1103,16 @@ class Auto:
                     f"som er endret med `git diff {last}..origin/{x.source}` (finnes ikke {last[:10]} lenger, mot "
                     f"origin/{x.target}), og trådene med `wr threads {x.id}`. Avgjør for hver av mine aktive "
                     f"tråder om den er løst i koden eller besvart godt nok. Skriv så et nytt utkast etter "
-                    f"`wr draft {x.id} --format`: resolve for trådene som er løst, replies der svaret ikke holder, "
+                    f"`wr draft {x.id} --format` (behold goal fra forrige): resolve for trådene som er løst, replies der svaret ikke holder, "
                     f"comments bare for nye funn i det som er endret, og en stemme ut fra det som gjenstår. "
                     f"Rapporter kort her. Ikke post, ikke stem, ikke push: jeg poster med `wr post {x.id}`.")
         return (f"Du står i et nytt worktree for PR !{x.id} «{x.title}» av {x.who} ({x.url}). Kjør "
                 f"`git fetch origin {x.source} {x.target}` og `git checkout --detach origin/{x.source}`. Kjør så "
                 f"/code-review med origin/{x.target} som fast punkt; spec er work itemene PR-en lenker (hent dem "
                 f"fra ADO). Finnes ingen spec, hopp over Spec-aksen — ikke spør. Skriv så vurderingen som et "
-                f"utkast etter `wr draft {x.id} --format`: kommentarene klare til å postes, en stemme, og det du "
-                f"trenger at jeg avgjør som spørsmål. Rapporter kort her og still spørsmålene. Ikke post, ikke "
+                f"utkast etter `wr draft {x.id} --format`: hva PR-en skal løse, kommentarene klare til å postes, en "
+                f"stemme, og det du trenger at jeg avgjør som spørsmål. Rapporter kort her — først hva work itemet og "
+                f"PR-en skal løse og om den løser det (ja/delvis/nei), så funnene — og still spørsmålene. Ikke post, ikke "
                 f"stem, ikke push: jeg poster utkastet med `wr post {x.id}` når vi er enige.")
 
 
@@ -1506,7 +1509,8 @@ def group_prompt(auto):
             f"sitt worktree med origin/<target> som fast punkt. Se særlig på at PR-ene passer sammen: kontrakter og "
             f"felt på tvers av repoene, at begge sider er endret der de må, og rekkefølgen de må deployes i.{rounds} "
             f"Skriv så ett utkast per PR etter `wr draft <pr> --format`; et funn i samspillet skrives i PR-en der det "
-            f"må fikses. Rapporter kort her og still spørsmålene. Ikke post, ikke stem, ikke push: jeg poster med "
+            f"må fikses; goal er hva #{g.id} og den PR-en skal løse. Rapporter kort her — først hva #{g.id} skal løse, "
+            f"hva hver PR bidrar med og om de sammen løser det (ja/delvis/nei), så funnene — og still spørsmålene. Ikke post, ikke stem, ikke push: jeg poster med "
             f"`wr post <pr>`.")
 
 
@@ -2076,7 +2080,7 @@ def tui(scr, a):
                 put(by + n, bx, line_, w - 1 - bx, pal["cyan"] if n in (0, len(opts) + 1) else 0)
             for n, (k_, _, _, _) in enumerate(opts, 1):
                 put(by + n, bx + 3, k_, 1, pal["yellow"] | curses.A_BOLD)
-        keys = f"↑↓ flytt · m valg · enter start agent · →/← fold ut/inn kart/spec · o åpne · a {'mine' if a.all else 'alle'} PRer · A autopilot · J jobber · r oppdater · q avslutt" \
+        keys = f"↑↓ flytt · m valg · enter start agent · →/← fold ut/inn kart/spec · o åpne · a {'mine' if a.all else 'alle'} PRer · A autopilot · J jobber · ? hjelp · r oppdater · q avslutt" \
                f"  ·  {short(OUT)}/screen.txt"
         if edit:
             put(h - 1, 0, f"{edit[0]}: {edit[1]}"[-(w - 2):] + "█", w - 1, pal["cyan"] | curses.A_BOLD)
@@ -2172,6 +2176,13 @@ def tui(scr, a):
                 pop = jobs_menu()
             except RuntimeError as e:
                 msg, err = str(e), True
+        elif k == ord("?"):  # the guide in less, in this terminal: hand it over, then take it back
+            curses.def_prog_mode()
+            curses.endwin()
+            act(lambda: subprocess.run(["sh", "-c", f"CLICOLOR_FORCE=1 {shlex.quote(os.path.realpath(__file__))} "
+                                                    f"help | less -R"]) and "")
+            curses.reset_prog_mode()
+            scr.clear()
         elif k == ord("A"):
             try:
                 pop = pilot_menu(pilot)
@@ -2389,6 +2400,20 @@ def cmd_wi(a):
 GUIDE = """\
 {b}fleet — jobben min i Azure DevOps, én tast for å sette en Claude-agent på den{r}
 
+{b}HVA FLEET GJØR{r}  {d}(? i lista viser denne teksten){r}
+  Samler   work items tildelt meg, PRer jeg skal reviewe og mine egne PRer i én liste, med hva som blokkerer
+  Reviewer nye PRer av seg selv: /code-review i eget worktree → utkast med hva PR-en skal løse, om den
+           løser det, kommentarer og stemme. Jeg leser (`wr draft`), justerer og poster med p — ingenting postes uten meg
+  Re-review når forfatteren pusher etter at jeg postet: sjekker om trådene mine er løst
+  Grupperer PRer av samme forfatter på samme work item (core + bff) i én review som ser på samspillet
+  Fikser   mine PRer: konflikter og rødt bygg (merger target inn, pusher, aldri force-push)
+  Triagerer nye Issues/Bugs til meg: forslag (agent-klar / for meg / trenger info / kart), y skriver til ADO
+  Starter  agenter på work items: /implement, /wayfinder, /tdd, /diagnosing-bugs, /code-review, /to-tickets
+  Handler  approve, auto-complete, complete, abandon, state, sprint — uten å åpne ADO
+  Rydder   worktrees, brancher og agenter når work itemet er Done eller PR-en er borte
+  Varsler  når en agent venter på meg eller er ferdig; holder macen våken; viser launchd-jobbene (J)
+  Deler    lista med Claude (screen.txt, state.json) og Raycast (menylinje, Fleet-lista)
+
 {b}ORG{r}  {org} (alle prosjekter)
 
 {b}LISTA{r}
@@ -2430,6 +2455,7 @@ GUIDE = """\
 
 {b}TASTER{r}
   ↑↓ / j k  flytt · enter start agent · o åpne i nettleser · a mine/alle PRer · r oppdater · q avslutt
+  ?         denne teksten (q tilbake)
   A         autopilot: a slå av/på · u tillat utenfor arbeidstid (begge gjelder denne økta)
   J         launchd-jobbene (`chores status`): sist og neste kjøring, ⚠ forfalt / trenger deg, ✗ feilet;
             jobbens tast → i hva den gjør, hva som feilet og hva du kan gjøre · k kjør nå · l loggen
@@ -2453,7 +2479,7 @@ GUIDE = """\
             Worktree hører til itemet når mappe- eller branchnavnet har id-en: fleet-<id>,
             t<id>, feat/<id>-…
   enter     start agent — velg prompt:
-              1   radens egen (/implement, /wayfinder, /review-pr, fiks-prompten)
+              1   radens egen (/implement, /wayfinder, /code-review → utkast, fiks-prompten)
               2…  work item: fiks lenket PR · /diagnosing-bugs (Bug) el. /tdd · /code-review
                   (har PR/worktree) · /to-tickets (spec) · oppsummer (kart)
                   PR: forklar for meg · test lokalt   min PR: /code-review · /pr
@@ -2467,7 +2493,8 @@ GUIDE = """\
   annet → claude --bg -n fleet-wi-<id>-go "/implement <id>"   i repoet commits/PRer på itemet
           (eller barna) peker til, i worktree fleet-<id> — ellers i {home}
   kart-ticket → "/wayfinder <kart> ticket <id>" i {home}; task-tickets → "/implement <id>"
-  PR    → claude --bg -n fleet-pr-<id>-review "/review-pr <id>"   i lokal klone av PR-ens repo
+  PR    → claude --bg -n fleet-pr-<id>-review: /code-review i worktree fleet-pr-<id>-review, skriver utkast
+          (`wr draft <id>`: hva den skal løse, om den gjør det, kommentarer, stemme); uten klone: forklar PR-en
   min PR → claude --bg -n fleet-pr-<id>-fix "<hva som blokkerer + instrukser>"  i checkouten som
           allerede har kildebranchen, ellers i worktree fleet-pr-<id>-fix i klonen. Pusher, completer ikke.
   Alle startes med --dangerously-skip-permissions — også agent view (`{agents}`).
@@ -2519,7 +2546,7 @@ GUIDE = """\
 
 
 def cmd_help(a):
-    on = TTY
+    on = TTY or bool(os.environ.get("CLICOLOR_FORCE"))  # ? in the list pipes it to less
     print(GUIDE.format(b="\033[1m" if on else "", r="\033[0m" if on else "", org=A().org,
                        refresh=REFRESH, write=WRITE, home=short(HOME), out=short(OUT), agents=AGENTS,
                        d="\033[2m" if on else "", log=short(LOG), config=short(CONFIG),

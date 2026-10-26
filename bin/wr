@@ -296,7 +296,8 @@ DRAFT_FORMAT = """\
 Utkastet til review av PR !{id} er JSON i {path}:
 
   {{
-    "summary": "hva PR-en gjør og din vurdering, 1–3 setninger (til meg, postes ikke)",
+    "goal": "hva work itemet og PR-en skal løse: problemet, for hvem, og hva som skal være annerledes når den er inne, 2–4 setninger ut fra work itemet og PR-beskrivelsen, ikke koden (til meg, postes ikke)",
+    "summary": "løser PR-en goal? begynn med ja, delvis eller nei og hva som mangler eller er løst annerledes; så hva PR-en gjør og din vurdering, 1–3 setninger (til meg, postes ikke)",
     "vote": "approve | suggestions | wait | reject | none",
     "comments": [
       {{"file": "src/sti/fil.cs", "line": 42, "text": "kommentar på linja, til forfatteren"}},
@@ -438,7 +439,10 @@ def show_draft(id):
     d = load_draft(id)
     if d is None:
         return print(dim(f"ingen utkast for !{id} ({draft_path(id)})"))
-    print(f"{bold(f'!{id} utkast')}  {draft_line(d)}")
+    print(bold(f"!{id} utkast"))
+    if d.get("goal"):
+        print(f"\n{yellow('skal løse:')} {d['goal']}\n")
+    print(draft_line(d))
     if d.get("summary"):
         print(f"\n{d['summary']}")
     for n, c in enumerate(d.get("comments") or [], 1):
@@ -746,6 +750,7 @@ def cmd_draft(a):
     if a.line:
         d = guard(load_draft, a.id)
         return print(json.dumps({"line": draft_line(d), "posted": bool(d.get("posted")), "vote": d.get("vote", "none"),
+                                 "goal": d.get("goal") or "",
                                  "comments": [{"where": f"{c['file']}:{c['line']}" if c.get("file") else "PR",
                                                "text": c["text"], "skip": bool(c.get("skip"))}
                                               for c in d.get("comments") or []]} if d else None,

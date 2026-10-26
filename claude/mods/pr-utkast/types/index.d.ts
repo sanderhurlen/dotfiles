@@ -5,6 +5,7 @@ export type Draft = {
   line: string
   isPosted: boolean
   vote: string
+  goal: string
   comments: DraftComment[]
 }
 export type Pr = { id: number; repo: string }
