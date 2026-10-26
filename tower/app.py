@@ -29,7 +29,8 @@ from tower.kanal import Kanal, Kladd, Tråd, kladdtekst
 from tower.kunnskapsbase import oppslag
 from tower.kurator import KuratorJobb, commit_manuelt, kurater, sikre_repo, siste_commit, skriv_og_commit
 from tower.triage import triager
-from tower.utkast import FEILET, FORKASTET, GENERERER, KLART, PLASSHOLDER, SENDT, UTDATERT, Utkast, skriv_utkast
+from tower.utkast import (FEILET, FORKASTET, GENERERER, INNSPILL, KLART, PLASSHOLDER, SENDT, UTDATERT, Utkast,
+                          skriv_utkast)
 
 KANAL_IKON = {"mail": "✉", "teams": "◆"}
 FERDIG = {BESVART, GAMMEL, AVVIST, UTSATT}  # dimmet nederst, ingen agenter
@@ -124,7 +125,7 @@ def utkast_merke(rad: Rad, jobb: str | None = None) -> str:
         return "[dim]avvist[/]"
     if rad.status in FERDIG:
         return "[dim]sendt[/]" if u and u.status == SENDT else ""
-    if rad.triage and rad.triage.kategori == "info" and not rad.trenger_triage:
+    if rad.triage and rad.triage.kategori == "info" and not rad.trenger_triage and not (u and u.instruks):
         return "[dim]—[/]"
     if u is None:
         return ""
@@ -152,7 +153,8 @@ def utkast_tekst_markup(tekst: str) -> str:
 def utkast_markup(rad: Rad, jobb: str | None, spinner: str) -> str | None:
     """Innhold i utkastrammen, eller None når rammen skal skjules."""
     u = rad.utkast
-    if rad.status in FERDIG or (rad.triage and rad.triage.kategori == "info" and not rad.trenger_triage):
+    if rad.status in FERDIG or (rad.triage and rad.triage.kategori == "info" and not rad.trenger_triage
+                                and not (u and u.instruks)):
         return None
     if u is None:
         return None if rad.triage is None else "[dim]I kø for utkast…[/]" if rad.trenger_utkast else None
@@ -173,6 +175,19 @@ def utkast_markup(rad: Rad, jobb: str | None, spinner: str) -> str | None:
     if u.feil:
         pre += f"[red]✗ Sending feilet:[/] {escape(u.feil)}\n\n"
     return pre + instruks + (hint + "\n" if hint else "") + utkast_tekst_markup(u.gjeldende)
+
+
+SAKS = "# ------------------------ >8 ------------------------"
+
+
+def tråd_ren(t: Tråd) -> str:
+    """Tråden som ren tekst under utkastet i editoren, nyeste først."""
+    ut = ["# Alt fra saks-linja og ned fjernes. Tråden, nyeste først:", ""]
+    for m in reversed(t.meldinger):
+        hvem = "meg" if m.fra_meg else m.fra.navn
+        til = ", ".join(p.navn for p in m.til)
+        ut += [f"── {hvem}  {m.tid.astimezone().strftime('%d.%m %H:%M')}  → {til}", m.tekst, ""]
+    return "\n".join(ut)
 
 
 def tråd_markup(t: Tråd) -> str:
@@ -339,6 +354,7 @@ class Tower(App):
         Binding("space", "merk", "Merk"),
         Binding("x", "arkiver", "Arkiver", show=False),
         Binding("c", "kopier", "Kopier", show=False),
+        Binding("i", "innspill", "Innspill", show=False),
         Binding("o", "åpne", "Åpne"),
         Binding("k", "kunnskapsbase", "Kunnskapsbase"),
         Binding("J", "jobber", "Jobber"),
@@ -352,7 +368,8 @@ class Tower(App):
                  kopier: Callable[[str], object] | None = None,
                  varsle: Callable[[str, str, str], object] = lambda *_: None) -> None:
         super().__init__()
-        self.editor = editor or self.rediger_i_editor  # tekst inn, redigert tekst ut (None = avbrutt)
+        # tekst inn, redigert tekst ut (None = avbrutt); min egen viser den valgte Tråden under utkastet
+        self.editor = editor or (lambda tekst: self.rediger_i_editor(tekst, self.tråder.get(self.valgt_id() or "")))
         self.åpne = åpne  # lenke i nettleseren
         self.varsle = varsle  # (tittel, undertittel, tekst) når triagen sier haster
         self.kopier = kopier or (lambda tekst: subprocess.run(["pbcopy"], input=tekst.encode(), check=True))
@@ -807,6 +824,8 @@ class Tower(App):
                   "c": ("kopier", "kopier utkastet")}
         if rad.status not in FERDIG and u and u.status not in (GENERERER, SENDT, FORKASTET):
             h["r"] = ("regenerer", "regenerer utkastet, med instruks")
+        elif self.kan_gi_innspill(rad):
+            h["i"] = ("innspill", "kom med innspill — Claude skriver et utkast ut fra tråden")
         if rad.status != AVVIST:
             h["a"] = ("avvis", "avvis — trenger ikke svar")
         if rad.status not in (BESVART, GAMMEL, AVVIST):
@@ -1081,6 +1100,24 @@ class Tower(App):
             return
         self.push_screen(InstruksPrompt(), lambda instruks: self.regenerer(t.id, instruks))
 
+    def kan_gi_innspill(self, rad: Rad) -> bool:
+        """Aktiv Tråd uten åpent utkast for siste Melding, og ingen på vei av seg selv."""
+        u = rad.utkast
+        return (rad.status not in FERDIG and not rad.trenger_utkast
+                and (u is None or u.melding_id != rad.siste_melding_id or u.status in (SENDT, FORKASTET, FEILET)))
+
+    def action_innspill(self) -> None:
+        """Et utkast for siste Melding selv om triagen ikke sa svar. Klart: ↵ → e redigerer."""
+        if not (valgt := self.valgt()) or not self.kan_gi_innspill(valgt[1]):
+            return
+        t = valgt[0]
+        self._hold.discard(t.id)
+        self.db.nytt_utkast(t.id, t.siste.id, self.nå(), INNSPILL)
+        self.rader[t.id] = self.db.rad(t.id)
+        self.planlegg(t)
+        self.tegn_tabell()
+        self.vis_detalj()
+
     def regenerer(self, tråd_id: str, instruks: str | None) -> None:
         """Ny versjon for siste Melding. None = avbrutt; tom = prøv igjen uten verktøy.
 
@@ -1158,12 +1195,13 @@ class Tower(App):
             self.notify(f"Kunne ikke åpne editor: {e}", severity="error")
             return None
 
-    def rediger_i_editor(self, tekst: str) -> str | None:
-        """$EDITOR via suspend, markøren på første plassholder. None hvis editoren feilet."""
+    def rediger_i_editor(self, tekst: str, tråd: Tråd | None = None) -> str | None:
+        """$EDITOR via suspend, markøren på første plassholder. None hvis editoren feilet.
+        Tråden står under en saks-linje, nyeste først; alt fra linja og ned fjernes."""
         linje, kol = første_plassholder(tekst)
         with tempfile.TemporaryDirectory(prefix="tower-") as d:
             sti = Path(d) / "utkast.txt"
-            sti.write_text(tekst + "\n")
+            sti.write_text(tekst + "\n" + (f"\n{SAKS}\n{tråd_ren(tråd)}" if tråd else ""))
             try:
                 with self.suspend():
                     kode = subprocess.call(editor_argv(sti, linje, kol))
@@ -1173,7 +1211,7 @@ class Tower(App):
             if kode != 0:
                 self.notify(f"Editoren avsluttet med {kode}, utkastet er uendret", severity="error")
                 return None
-            return sti.read_text().rstrip("\n")
+            return sti.read_text().split(f"\n{SAKS}\n")[0].rstrip("\n")
 
     def oppdater_status(self) -> None:
         deler = [f"[b red]✗ {k}:[/] {escape(v)}" for k, v in self.hentfeil.items()]

@@ -111,11 +111,15 @@ class Rad:
 
     @property
     def trenger_utkast(self) -> bool:
-        """Triagert som svar for siste Melding, og ingen ferdig eller feilet versjon for den ennå."""
+        """Triagert som svar for siste Melding, og ingen ferdig eller feilet versjon for den ennå.
+        En versjon jeg har bedt om (regenerering, innspill) for siste Melding skrives uansett triage."""
+        u = self.utkast
+        if (u and u.instruks and u.status == GENERERER and u.melding_id == self.siste_melding_id
+                and self.status not in (BESVART, GAMMEL, AVVIST, UTSATT)):
+            return True
         if (self.status != TRIAGERT or self.triage is None or self.triage.kategori != "svar"
                 or self.triage_melding_id != self.siste_melding_id or self.triage_feilet):
             return False
-        u = self.utkast
         return u is None or u.melding_id != self.siste_melding_id or u.status == GENERERER
 
 

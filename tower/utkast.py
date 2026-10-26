@@ -31,6 +31,11 @@ SCHEMA_RESEARCH = {
         "required": ["faktum", "kilde"], "additionalProperties": False}}},
     "required": [*SCHEMA["required"], "research"],
 }
+# Innspill: et utkast jeg ber om selv om triagen ikke sa svar. Lagres som instruks INNSPILL, agenten får teksten.
+INNSPILL = "innspill"
+INNSPILL_INSTRUKS = ("Ingen har nødvendigvis spurt Sander direkte, men han vil bidra i tråden. Skriv det han "
+                     "naturlig kan si nå ut fra det som står: svar, oppklaring, innvending, neste steg eller en "
+                     "kort bekreftelse. Kort, og bare det som tilfører noe.")
 PLASSHOLDER = re.compile(r"\[\[(.+?)\]\]", re.DOTALL)
 
 # Utkast-tilstander. genererer → klart → sendt | forkastet | utdatert, pluss feilet.
@@ -105,6 +110,8 @@ def prompt(t: Tråd, kunnskapsbase: str, instruks: str | None, forrige: str | No
     ut = tråd_tekst(t, kunnskapsbase)
     if verktøy:
         ut += "\n\n<kataloger>\n" + "\n".join(map(str, verktøy.kataloger)) + "\n</kataloger>"
+    if instruks == INNSPILL:
+        instruks = INNSPILL_INSTRUKS
     if instruks:
         ut += f"\n\n<forrige_utkast>\n{forrige or ''}\n</forrige_utkast>\n\n<instruks>\n{instruks}\n</instruks>"
     return ut

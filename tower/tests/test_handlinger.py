@@ -303,3 +303,42 @@ async def test_ny_melding_under_redigering_regenerer(config):
         assert [(v.status, v.redigert is not None) for v in a.db.versjoner(NORDLYS)] == [
             ("utdatert", True), ("klart", False)]  # redigeringen overskrives aldri
         assert "Rekker dere fredag?" in r.utkast_kall[-1]
+
+
+async def test_innspill_på_info_tråd(config):
+    from tower.app import RadHandlinger
+    from tower.utkast import INNSPILL, INNSPILL_INSTRUKS
+
+    r = FalskRunner(bare_nordlys)
+    a = App(config, r)
+    async with a.run_test(size=(160, 40)) as pilot:
+        await klar(a, pilot)
+        info = next(id for id, rad in a.rader.items() if rad.triage and rad.triage.kategori == "info")
+        assert a.rader[info].utkast is None
+        velg(a, info)
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(a.screen, RadHandlinger) and "i" in a.screen.VALG
+        await pilot.press("i")
+        await pilot.pause()
+        await a.agenter.ferdig()
+        await pilot.pause()
+        u = a.rader[info].utkast
+        assert u.status == "klart" and u.instruks == INNSPILL
+        assert INNSPILL_INSTRUKS in r.utkast_kall[-1]
+        assert "Det passer" in tekst(a, "#utkast")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "i" not in a.screen.VALG and "e" in a.screen.VALG  # nå er det et utkast å redigere
+
+
+def test_tråden_står_under_saks_linja_i_editoren():
+    from tower.app import SAKS, tråd_ren
+    from tower.kanal import Melding, Person, Tråd
+
+    m = Melding(id="1", fra=Person("Kari", "kari@x.no"), til=(Person("Sander", "s@visense.no"),), cc=(),
+                tid=NÅ, tekst="Når kommer leveransen?", fra_meg=False, haster=False)
+    vist = "Hei\n\n" + f"\n{SAKS}\n" + tråd_ren(Tråd(id="t", kanal="mail", emne="Levering", meldinger=(m,)))
+    assert "Kari" in vist and "Når kommer leveransen?" in vist
+    assert vist.split(f"\n{SAKS}\n")[0].rstrip("\n") == "Hei"
