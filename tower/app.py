@@ -275,6 +275,23 @@ class JobbHandling(Valg):
         self.TITTEL = f"[b]{j['merke']} {escape(j['name'])}[/]  [dim]{escape(j['every'])}[/]\n{escape(j['linje'])}"
 
 
+class RadHandlinger(Valg):
+    """`enter`: det jeg kan gjøre med raden. Tasten velger handlingen (navnet ut); tastene virker også rett i lista."""
+
+    BINDINGS = [Binding("escape", "esc", "Lukk")]
+
+    def __init__(self, tittel: str, handlinger: dict[str, tuple[str, str]]) -> None:
+        super().__init__()
+        self.TITTEL = f"[b]{escape(tittel)}[/]  [dim]tast = velg · esc lukker[/]"
+        self.VALG = {k: v for k, (_, v) in handlinger.items()}
+        self.handlinger = handlinger
+
+    def on_key(self, e) -> None:
+        if (h := self.handlinger.get(e.character or "")) is not None:
+            e.stop()
+            self.dismiss(h[0])
+
+
 class InstruksPrompt(ModalScreen[str | None]):
     """Instruks til regenerering. Tom = prøv igjen uten verktøy; `escape` = avbryt (None)."""
 
@@ -311,15 +328,17 @@ class Tower(App):
     #utkast.klart { border: round $success; }
     #status { height: 1; background: $panel; padding: 0 1; }
     """
+    # Radens handlinger ligger bak enter (RadHandlinger); tastene virker også direkte, uten å vises i footeren.
     BINDINGS = [
-        Binding("s", "send", "Send"),
-        Binding("e", "rediger", "Rediger"),
-        Binding("r", "regenerer", "Regenerer"),
-        Binding("a", "avvis", "Avvis"),
-        Binding("u", "utsett", "Utsett"),
+        Binding("enter", "handlinger", "Handlinger", key_display="↵"),
+        Binding("s", "send", "Send", show=False),
+        Binding("e", "rediger", "Rediger", show=False),
+        Binding("r", "regenerer", "Regenerer", show=False),
+        Binding("a", "avvis", "Avvis", show=False),
+        Binding("u", "utsett", "Utsett", show=False),
         Binding("space", "merk", "Merk"),
-        Binding("x", "arkiver", "Arkiver"),
-        Binding("c", "kopier", "Kopier"),
+        Binding("x", "arkiver", "Arkiver", show=False),
+        Binding("c", "kopier", "Kopier", show=False),
         Binding("o", "åpne", "Åpne"),
         Binding("k", "kunnskapsbase", "Kunnskapsbase"),
         Binding("J", "jobber", "Jobber"),
@@ -771,6 +790,41 @@ class Tower(App):
         w.set_class(bool(u and u.status == KLART), "klart")
 
     # Handlinger
+
+    @on(DataTable.RowSelected)
+    def rad_valgt(self, *_) -> None:
+        self.action_handlinger()
+
+    def action_handlinger(self) -> None:
+        """Menyen over det som gir mening for raden nå; det som ikke kan gjøres er utelatt."""
+        if not (valgt := self.valgt()):
+            return
+        t, rad = valgt
+        h: dict[str, tuple[str, str]] = {}
+        u = rad.utkast
+        if not self.ikke_klart(t, rad):
+            h |= {"s": ("send", "send utkastet"), "e": ("rediger", "rediger utkastet"),
+                  "c": ("kopier", "kopier utkastet")}
+        if rad.status not in FERDIG and u and u.status not in (GENERERER, SENDT, FORKASTET):
+            h["r"] = ("regenerer", "regenerer utkastet, med instruks")
+        if rad.status != AVVIST:
+            h["a"] = ("avvis", "avvis — trenger ikke svar")
+        if rad.status not in (BESVART, GAMMEL, AVVIST):
+            h["u"] = ("utsett", "utsett til …")
+        if self.merket:
+            h["x"] = ("arkiver", f"arkiver de {len(self.merket)} merkede")
+        elif self.kan_arkiveres(t):
+            h["x"] = ("arkiver", "arkiver tråden")
+        if self.lenke(t):
+            h["o"] = ("åpne", "åpne i Teams")
+        elif any(v.kladd and v.lenke for v in self.db.versjoner(t.id)):
+            h["o"] = ("åpne", "åpne kladden i Outlook")
+
+        def kjør(navn: str | None) -> None:
+            if navn:
+                self.run_worker(self.run_action(navn), exit_on_error=False)
+
+        self.push_screen(RadHandlinger(f"{motpart(t)} · {t.emne}"[:70], h), kjør)
 
     def valgt(self) -> tuple[Tråd, Rad] | None:
         t = self.tråder.get(self.valgt_id() or "")

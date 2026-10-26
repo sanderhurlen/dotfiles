@@ -472,6 +472,31 @@ async def test_merk_og_arkiver(config):
         assert a.query_one(DataTable).row_count == len(a.tråder)
 
 
+async def test_enter_viser_radens_handlinger(config):
+    from tower.app import RadHandlinger
+
+    a = app(config)
+    async with a.run_test(size=(160, 40)) as pilot:
+        await a.poll()
+        await pilot.pause()
+        valgt = a.valgt_id()
+        await pilot.press("enter")
+        await pilot.pause()
+        meny = a.screen
+        assert isinstance(meny, RadHandlinger)
+        assert {"s", "e", "r", "a", "u", "x", "c"} <= set(meny.VALG)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(a.screen, RadHandlinger) and valgt in a.tråder
+
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("x")
+        await a.workers.wait_for_complete()
+        await pilot.pause()
+        assert valgt not in a.tråder
+
+
 async def test_teams_kan_ikke_merkes_eller_arkiveres(config):
     config = dataclasses.replace(config, kanaler=("mail", "teams"))
     a = app(config)
