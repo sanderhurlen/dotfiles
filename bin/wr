@@ -604,7 +604,7 @@ def tui(scr, a):
                 if view == "prs" else
                 "↑↓ flytt · n/enter ny PR · d ny draft · o åpne · tab PRer · a alle · m mine · r oppdater · q avslutt")
         if ask:
-            scr.addnstr(h - 1, 0, ask[0] + "  y/n", w - 1, pal["yellow"] | curses.A_BOLD)
+            scr.addnstr(h - 1, 0, "[y/n] " + ask[0], w - 1, pal["yellow"] | curses.A_BOLD)
         else:
             scr.addnstr(h - 1, 0, msg or keys, w - 1, (pal["red"] if err else pal["green"]) if msg else pal["dim"])
         scr.refresh()
@@ -617,7 +617,7 @@ def tui(scr, a):
                 continue
             q, fn = ask
             ask = None
-            if k in (ord("y"), ord("Y"), ord("j")):
+            if k in (ord("y"), ord("Y")):
                 run(fn)
             continue
         cur = items[sel] if items else None

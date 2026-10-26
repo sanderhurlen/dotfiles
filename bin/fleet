@@ -16,7 +16,7 @@
 #                            keeps the Mac from idle-sleeping while it runs (caffeinate -i)
 #   fleet ls                 same list, printed once
 #   fleet go 8698            background agent on a work item: map → /wayfinder, else /implement
-#   fleet review 6966        background agent reviewing a PR: /code-review → draft (`wr draft`)
+#   fleet review 6966        background agent reviewing a PR: /review-pr → draft (`wr draft`)
 #   fleet fix 7012           background agent fixing my PR: conflicts, failing build, review comments
 #   fleet prune [-n]         remove finished fleet agents whose item/PR is gone from the list
 #   fleet code 9006          VS Code in the item's worktree, .env* copied from the main checkout
@@ -913,7 +913,7 @@ def starts(x):
                  f"mot {x.target} og work items {', '.join(f'#{i}' for i in sorted(x.items)) or '-'}, "
                  f"og oppdater PR-en i ADO.")]
     if isinstance(x, Review):
-        return [(f"/code-review {x.id} → utkast", x, None, None),
+        return [(f"/review-pr {x.id} → utkast", x, None, None),
                 ("forklar PR-en for meg (ingen kommentarer)", x, "explain", explain(x)),
                 ("test lokalt: bygg og kjør testene", x, "test",
                  f"Sjekk ut PR !{x.id} ({x.url}), kildebranch {x.source}, i et worktree. Bygg, kjør testene og "
@@ -1106,14 +1106,9 @@ class Auto:
                     f"`wr draft {x.id} --format` (behold goal fra forrige): resolve for trådene som er løst, replies der svaret ikke holder, "
                     f"comments bare for nye funn i det som er endret, og en stemme ut fra det som gjenstår. "
                     f"Rapporter kort her. Ikke post, ikke stem, ikke push: jeg poster med `wr post {x.id}`.")
-        return (f"Du står i et nytt worktree for PR !{x.id} «{x.title}» av {x.who} ({x.url}). Kjør "
-                f"`git fetch origin {x.source} {x.target}` og `git checkout --detach origin/{x.source}`. Kjør så "
-                f"/code-review med origin/{x.target} som fast punkt; spec er work itemene PR-en lenker (hent dem "
-                f"fra ADO). Finnes ingen spec, hopp over Spec-aksen — ikke spør. Skriv så vurderingen som et "
-                f"utkast etter `wr draft {x.id} --format`: hva PR-en skal løse, kommentarene klare til å postes, en "
-                f"stemme, og det du trenger at jeg avgjør som spørsmål. Rapporter kort her — først hva work itemet og "
-                f"PR-en skal løse og om den løser det (ja/delvis/nei), så funnene — og still spørsmålene. Ikke post, ikke "
-                f"stem, ikke push: jeg poster utkastet med `wr post {x.id}` når vi er enige.")
+        return (f"/review-pr {x.id} «{x.title}» av {x.who} ({x.url}). Du står i et nytt worktree: kjør "
+                f"`git fetch origin {x.source} {x.target}` og `git checkout --detach origin/{x.source}` og review "
+                f"her. Finnes ingen spec, hopp over Spec-aksen — ikke spør. Ikke push.")
 
 
 def untriaged(w):
@@ -2085,7 +2080,7 @@ def tui(scr, a):
         if edit:
             put(h - 1, 0, f"{edit[0]}: {edit[1]}"[-(w - 2):] + "█", w - 1, pal["cyan"] | curses.A_BOLD)
         elif ask:
-            put(h - 1, 0, ask[0] + "  y/n", w - 1, pal["yellow"] | curses.A_BOLD)
+            put(h - 1, 0, "[y/n] " + ask[0], w - 1, pal["yellow"] | curses.A_BOLD)
         else:
             put(h - 1, 0, msg or keys, w - 1, (pal["red"] if err else pal["green"]) if msg else pal["dim"])
         scr.refresh()
@@ -2121,7 +2116,7 @@ def tui(scr, a):
                 continue
             _, fn = ask
             ask = None
-            if k in (ord("y"), ord("Y"), ord("j")):
+            if k in (ord("y"), ord("Y")):
                 act(fn)
             continue
         if pop:
@@ -2402,7 +2397,7 @@ GUIDE = """\
 
 {b}HVA FLEET GJØR{r}  {d}(? i lista viser denne teksten){r}
   Samler   work items tildelt meg, PRer jeg skal reviewe og mine egne PRer i én liste, med hva som blokkerer
-  Reviewer nye PRer av seg selv: /code-review i eget worktree → utkast med hva PR-en skal løse, om den
+  Reviewer nye PRer av seg selv: /review-pr (/code-review) i eget worktree → utkast med hva PR-en skal løse, om den
            løser det, kommentarer og stemme. Jeg leser (`wr draft`), justerer og poster med p — ingenting postes uten meg
   Re-review når forfatteren pusher etter at jeg postet: sjekker om trådene mine er løst
   Grupperer PRer av samme forfatter på samme work item (core + bff) i én review som ser på samspillet
@@ -2479,7 +2474,7 @@ GUIDE = """\
             Worktree hører til itemet når mappe- eller branchnavnet har id-en: fleet-<id>,
             t<id>, feat/<id>-…
   enter     start agent — velg prompt:
-              1   radens egen (/implement, /wayfinder, /code-review → utkast, fiks-prompten)
+              1   radens egen (/implement, /wayfinder, /review-pr → utkast, fiks-prompten)
               2…  work item: fiks lenket PR · /diagnosing-bugs (Bug) el. /tdd · /code-review
                   (har PR/worktree) · /to-tickets (spec) · oppsummer (kart)
                   PR: forklar for meg · test lokalt   min PR: /code-review · /pr
@@ -2493,7 +2488,7 @@ GUIDE = """\
   annet → claude --bg -n fleet-wi-<id>-go "/implement <id>"   i repoet commits/PRer på itemet
           (eller barna) peker til, i worktree fleet-<id> — ellers i {home}
   kart-ticket → "/wayfinder <kart> ticket <id>" i {home}; task-tickets → "/implement <id>"
-  PR    → claude --bg -n fleet-pr-<id>-review: /code-review i worktree fleet-pr-<id>-review, skriver utkast
+  PR    → claude --bg -n fleet-pr-<id>-review: /review-pr (/code-review + utkast) i worktree fleet-pr-<id>-review, skriver utkast
           (`wr draft <id>`: hva den skal løse, om den gjør det, kommentarer, stemme); uten klone: forklar PR-en
   min PR → claude --bg -n fleet-pr-<id>-fix "<hva som blokkerer + instrukser>"  i checkouten som
           allerede har kildebranchen, ellers i worktree fleet-pr-<id>-fix i klonen. Pusher, completer ikke.
@@ -2503,7 +2498,7 @@ GUIDE = """\
 
 {b}AUTOPILOT{r}  {d}(bare mens lista er åpen, og bare i én fleet om gangen){r}
   Starter agenter selv:
-    ny PR der jeg er reviewer (ikke stemt) → fleet-pr-<id>-review: /code-review i worktree fleet-pr-<id>-review
+    ny PR der jeg er reviewer (ikke stemt) → fleet-pr-<id>-review: /review-pr (/code-review) i worktree fleet-pr-<id>-review
                     på kildebranchen, target som fast punkt. Uten lokal klone: forklar PR-en.
                     Poster ingenting i ADO. Én gang per PR.
     min PR får rødt bygg / konflikt → fleet-pr-<id>-fix: merger target inn, fikser, pusher. Ingen

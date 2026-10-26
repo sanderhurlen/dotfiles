@@ -608,9 +608,9 @@ def cmd_triage(a):
         return
     while True:
         c = input(f"\n{bold('y')} skriv til ADO · {bold('e')} rediger · {bold('r')} kjør på nytt · {bold('n')} avbryt: ").strip().lower()
-        if c in ("y", "j"):
+        if c == "y":
             print(apply_proposal(r, raw_item(a.id)))
-            if r["proposal"]["route"] == "wayfinder" and not os.environ.get("WI_NO_GO") and input("start wayfinder nå (wf go)? [y/N] ").strip().lower() in ("y", "j"):
+            if r["proposal"]["route"] == "wayfinder" and not os.environ.get("WI_NO_GO") and input("[y/N] start wayfinder nå (wf go)? ").strip().lower() == "y":
                 os.execvp("wf", ["wf", "go", str(a.id)])
             return
         if c == "e":

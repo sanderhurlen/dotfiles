@@ -163,11 +163,11 @@ export const register: Register = on => {
           if (asking === d.id) {
             return (
               <Box key={`line-${d.id}`} gap={1}>
-                <Text color="yellow">Post på {name}: {d.line}?</Text>
+                <Text color="yellow">[y/n] Post på {name}: {d.line}?</Text>
                 <Button
                   key={`yes-${d.id}`}
-                  label="Ja, post"
-                  hotkey="j"
+                  label="Post"
+                  hotkey="y"
                   onPress={async () => {
                     const { text } = await post($, d.id)
                     $.ui.toast(text)

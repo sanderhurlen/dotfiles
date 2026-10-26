@@ -572,7 +572,7 @@ def cmd_fan(a):
     if not afk:
         die("nothing launchable unattended")
     if not a.yes and not a.dry_run:
-        if input(f"launch {len(afk)} background agent(s) in {repo_name()}? [y/N] ").lower() != "y":
+        if input(f"[y/N] launch {len(afk)} background agent(s) in {repo_name()}? ").lower() != "y":
             return
     a.ids, a.force, a.interactive = [t.id for t in afk], False, False
     cmd_run(a)

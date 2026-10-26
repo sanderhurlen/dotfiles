@@ -160,7 +160,7 @@ def confirm(q, yes=False):
         return True
     if not sys.stdin.isatty():
         die("boardet og ADO er delt — bekreft med -y når det ikke er en terminal")
-    return input(f"{q} [j/N] ").strip().lower() in ("j", "ja", "y", "yes")
+    return input(f"[y/N] {q} ").strip().lower() in ("y", "yes")
 
 
 # ── figma ───────────────────────────────────────────────────────────────────
@@ -1714,7 +1714,7 @@ def log_tui(scr, ctx, done):
             put(y, 14, f"#{t['id']} {t['title']}", w - 34, attr | (curses.A_DIM if isdone else 0))
             put(y, w - 19, f"{(t['who'] or '–')[:18]}", 18, attr | curses.A_DIM)
         if ask:
-            put(h - 1, 0, ask[0] + "  j/n", w - 1, YEL | curses.A_BOLD)
+            put(h - 1, 0, "[y/n] " + ask[0], w - 1, YEL | curses.A_BOLD)
         elif busy:
             put(h - 1, 0, "… " + busy[0], w - 1, YEL)
         else:
@@ -1728,7 +1728,7 @@ def log_tui(scr, ctx, done):
         ch = chr(k) if 32 <= k < 256 else "\0"
         if ask:
             fn, ask = ask[1], None
-            if ch in "jJyY":
+            if ch in "yY":
                 fn()
             continue
         msg = ""

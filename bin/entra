@@ -1475,7 +1475,7 @@ class UI:
             curses.curs_set(0)
 
     def yes(self, question):
-        return (self.ask(f"{question} [y/N] ") or "").lower() in ("y", "j", "ja", "yes")
+        return (self.ask(f"[y/N] {question} ") or "").lower() in ("y", "yes")
 
     def pick(self, title, items, cells):
         """Full-screen chooser; typing filters. The chosen item, or False on esc."""
