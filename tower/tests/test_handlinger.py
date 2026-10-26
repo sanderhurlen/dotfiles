@@ -87,7 +87,7 @@ async def test_send_skriver_replyall_og_tråden_blir_besvart(config):
     async with a.run_test(size=(160, 40)) as pilot:
         await klar(a, pilot)
         indeks = a.query_one(DataTable).cursor_row
-        await pilot.press("s")
+        await pilot.press("s", "y")
         await ferdig_sendt(a, pilot)
         (req,) = outbox(config)
         assert req["path"] == "/me/messages/AAMkADMock-nordlys-erp-1/replyAll"
@@ -131,7 +131,7 @@ async def test_send_feiler_lar_utkastet_stå_med_feil(config):
     a = App(config, kanaler=[kanal])
     async with a.run_test(size=(160, 40)) as pilot:
         await klar(a, pilot)
-        await pilot.press("s")
+        await pilot.press("s", "y")
         await ferdig_sendt(a, pilot)
         u = a.rader[NORDLYS].utkast
         assert (u.status, u.feil) == ("klart", "Graph svarte 503")
@@ -140,7 +140,7 @@ async def test_send_feiler_lar_utkastet_stå_med_feil(config):
         assert outbox(config) == []
 
         kanal.feil = False  # aldri auto-retry: først ny s sender
-        await pilot.press("s")
+        await pilot.press("s", "y")
         await ferdig_sendt(a, pilot)
         assert len(outbox(config)) == 1 and a.rader[NORDLYS].status == "besvart"
 
@@ -227,7 +227,7 @@ async def test_rediger_lagrer_ved_siden_av_agentens_tekst_og_sender_den(config):
         u = a.rader[NORDLYS].utkast
         assert u.tekst == PLASS and "uke 46" in u.redigert and u.status == "klart"
         assert "uke 46" in tekst(a, "#utkast") and "redigert" in a.query_one("#utkast", Static).border_title
-        await pilot.press("s")
+        await pilot.press("s", "y")
         await ferdig_sendt(a, pilot)
         assert "Levering uke 46." in outbox(config)[0]["body"]["comment"]
 
@@ -258,7 +258,7 @@ async def test_ny_melding_under_redigering_send_likevel(config):
         assert "Ny melding kom mens du redigerte" in str(a.screen.query_one(Static).render())
         await a.agenter.ferdig()
         assert [v.status for v in a.db.versjoner(NORDLYS)] == ["utdatert"]  # ingen v2 mens jeg velger
-        await pilot.press("s")
+        await pilot.press("s", "y")
         await ferdig_sendt(a, pilot)
         assert len(a.screen_stack) == 1  # dialogen tok tasten
         assert "Fredag passer" in outbox(config)[0]["body"]["comment"]

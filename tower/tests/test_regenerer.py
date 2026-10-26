@@ -250,7 +250,7 @@ async def test_regenerering_som_feiler_lar_forrige_stå_og_kan_sendes(config):
         assert ("Regenerering feilet: tak: budsjett brukt opp", "error") in a.varsler
         innhold = tekst(a, "#utkast")
         assert "Regenerering feilet" in innhold and "Fredag passer." in innhold
-        await pilot.press("s")
+        await pilot.press("s", "y")
         await a.workers.wait_for_complete()
         await pilot.pause()
         assert [v.status for v in a.db.versjoner(NORDLYS)] == ["sendt", "forkastet"]

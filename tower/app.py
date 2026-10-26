@@ -245,6 +245,17 @@ class NyMeldingValg(Valg):
                 Binding("r", "velg('r')", "Regenerer"), Binding("escape", "esc", "Se meldingen")]
 
 
+class Bekreft(Valg):
+    """`[y/N] spørsmål?` — bare y sier ja; n og esc nei."""
+
+    VALG = {}
+    BINDINGS = [Binding("y", "velg('y')", "Ja"), Binding("n", "esc", "Nei"), Binding("escape", "esc", "Nei")]
+
+    def __init__(self, spørsmål: str) -> None:
+        super().__init__()
+        self.TITTEL = f"[b]\\[y/N][/] {escape(spørsmål)}"
+
+
 class JobbValg(ModalScreen[str | None]):
     """`J`: launchd-jobbene mine — sist og neste kjøring, og hvordan det gikk. Jobbens tast velger den (navn ut)."""
 
@@ -291,7 +302,8 @@ class JobbHandling(Valg):
 
 
 class RadHandlinger(Valg):
-    """`enter`: det jeg kan gjøre med raden. Tasten velger handlingen (navnet ut); tastene virker også rett i lista."""
+    """`enter`: det jeg kan gjøre med raden. Tasten velger handlingen (navnet ut); tastene virker også rett i lista.
+    Øverste valg vises som ↵ og tas av enter igjen; bokstaven virker fortsatt."""
 
     BINDINGS = [Binding("escape", "esc", "Lukk")]
 
@@ -301,8 +313,16 @@ class RadHandlinger(Valg):
         self.VALG = {k: v for k, (_, v) in handlinger.items()}
         self.handlinger = handlinger
 
+    def compose(self) -> ComposeResult:
+        linjer = [self.TITTEL, ""] + [f"[b]{'↵' if i == 0 else k}[/]  {escape(v)}"
+                                      for i, (k, v) in enumerate(self.VALG.items())]
+        yield Static("\n".join(linjer))
+
     def on_key(self, e) -> None:
-        if (h := self.handlinger.get(e.character or "")) is not None:
+        if e.key == "enter" and self.handlinger:
+            e.stop()
+            self.dismiss(next(iter(self.handlinger.values()))[0])
+        elif (h := self.handlinger.get(e.character or "")) is not None:
             e.stop()
             self.dismiss(h[0])
 
@@ -886,10 +906,16 @@ class Tower(App):
         if n := len(rad.utkast.plassholdere):
             self.notify(f"{n} plassholder{'e' if n > 1 else ''} igjen, fyll ut med e", severity="warning")
             return
-        if t.id not in self._sender:
-            self._sender.add(t.id)
-            self.run_worker(self.send(t, rad.utkast, self.query_one(DataTable).cursor_row), group="send",
-                            exit_on_error=False)
+        if t.id in self._sender:
+            return
+
+        def svar(v: str | None) -> None:
+            if v == "y" and t.id not in self._sender:
+                self._sender.add(t.id)
+                self.run_worker(self.send(t, rad.utkast, self.query_one(DataTable).cursor_row), group="send",
+                                exit_on_error=False)
+
+        self.push_screen(Bekreft(f"Send til {motpart(t)}?"), svar)
 
     async def send(self, t: Tråd, u: Utkast, indeks: int) -> None:
         """Sender via kanalen. Feil: Utkastet står som klart med feiltekst, aldri auto-retry."""

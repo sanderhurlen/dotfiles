@@ -497,6 +497,29 @@ async def test_enter_viser_radens_handlinger(config):
         assert valgt not in a.tråder
 
 
+async def test_enter_i_menyen_velger_øverste(config):
+    from tower.app import RadHandlinger
+
+    a = app(config)
+    async with a.run_test(size=(160, 40)) as pilot:
+        await a.poll()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        meny = a.screen
+        assert isinstance(meny, RadHandlinger)
+        kjørt = []
+
+        async def spion(navn, *_):
+            kjørt.append(navn)
+        a.run_action = spion
+        øverste = next(iter(meny.handlinger.values()))[0]
+        await pilot.press("enter")
+        await a.workers.wait_for_complete()
+        await pilot.pause()
+        assert kjørt == [øverste] and not isinstance(a.screen, RadHandlinger)
+
+
 async def test_teams_merkes_og_arkiveres_sammen_med_mail(config):
     config = dataclasses.replace(config, kanaler=("mail", "teams"))
     a = app(config)
