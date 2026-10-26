@@ -496,6 +496,7 @@ class Snapshot:
         self.cleanup = []  # Cleanup: worktrees of Done items fleet couldn't safely remove
         self.cleaned = []  # result lines of what this refresh removed
         self.auto, self.autohead, self.news = {}, "", []  # autopilot: {key: chip}, header text, result lines
+        self.merged = []  # Mine: my PRs that completed since the last snapshot
 
 
 def snapshot(everyone, clean=False):
@@ -981,6 +982,25 @@ def notify_one(subtitle, text):
     script = ("on run argv\n display notification (item 2 of argv) with title \"fleet\" "
               "subtitle (item 1 of argv) sound name \"Glass\"\nend run")
     subprocess.run(["osascript", "-e", script, subtitle, text], capture_output=True)
+
+
+def confetti():
+    """Raycast's confetti, without bringing Raycast forward."""
+    subprocess.run(["open", "-g", "raycast://confetti"], capture_output=True)
+
+
+def merged(before, s):
+    """My PRs in before (Mine by id) that left s.mine because they completed, not abandoned."""
+    out = []
+    for i, m in before.items():
+        if i in {x.id for x in s.mine}:
+            continue
+        try:
+            if rest(f"git/pullrequests/{i}", project=m.project).get("status") == "completed":
+                out.append(m)
+        except RuntimeError:
+            pass
+    return out
 
 
 def finished(before, after):
@@ -1992,10 +2012,14 @@ def tui(scr, a):
 
     def loader():
         nonlocal snap, loading
+        mine_ = None  # {id: Mine} at the last good snapshot, to see which of my PRs merged
         while True:
             loading = True
             try:
                 s = snapshot(a.all, clean=not a.no_clean)
+                if not s.error:
+                    s.merged = merged(mine_, s) if mine_ is not None else []
+                    mine_ = {m.id: m for m in s.mine}
                 pilot.tick(s)
             except (Exception, SystemExit) as e:  # a dead loader would freeze the list on stale data
                 s = Snapshot(at=time.time(), error=f"oppdatering feilet: {e}")
@@ -2029,6 +2053,11 @@ def tui(scr, a):
                 if not a.quiet and pilot.cfg["notify"]["blocked"]:
                     notify(s, names, "venter på deg")
                 msg = f"⏸ venter på deg: {', '.join(names)}"
+            if s.merged:
+                confetti()
+                for m in s.merged:
+                    notify_one(f"🎉 !{m.id} merget", m.title)
+                msg = "🎉 merget: " + ", ".join(f"!{m.id}" for m in s.merged)
             if s.cleaned or s.news:
                 msg = " · ".join(s.news + s.cleaned)
             seen = s.agents
@@ -2421,6 +2450,7 @@ GUIDE = """\
                  <policy> … (kjører/i kø) · draft · auto · klar
                ✗ rødt = noe feiler, ⏸ gult = venter på meg, ✓ = klar til complete.
                Work items som PR-en lenker (eller har id-en i branchen) får «↳ !<pr> ✗/⏸/✓» på linja.
+               Når en av dem merges (completed, ikke abandoned): Raycast-confetti og macOS-varsel.
   Foreldreløse fleet-agenter der work item/PR ikke lenger er i lista (Done, godkjent,
                completed, tatt bort). Ferdige agenter på en borte PR eller et Done work item
                fjernes av seg selv når transkriptet har stått urørt {grace} t (se OPPRYDDING);

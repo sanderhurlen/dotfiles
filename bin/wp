@@ -11,7 +11,7 @@
 #   wp                       live list (TUI); space approves the selected run
 #   wp ls [filters]          same list, printed once
 #   wp approve 23536         approve every pending approval on run 23536
-#   wp follow 23536          notify when it waits for approval or finishes (again: stop)
+#   wp follow 23536          notify when it waits for approval or finishes, confetti when green (again: stop)
 #   wp fix 23536             background Claude agent fixing the failed run (fleet's launcher)
 #   wp open 23536            open run in browser
 #   wp -g                    grouped per pipeline, the last few runs of each
@@ -319,6 +319,8 @@ def watch():
             line = news(f, r)
             if line:
                 notify(f"{r.pipeline} {r.number}", line)
+                if r.state == "succeeded":
+                    subprocess.run(["open", "-g", "raycast://confetti"], capture_output=True)
             if seen(r) != {n: f.get(n) for n in ("state", "stages", "waiting")}:
                 updates[k] = seen(r)
             if r.status == "completed" and not r.approvals:
@@ -663,7 +665,7 @@ GUIDE = """\
   wp [filtre]             levende liste, oppdateres hvert {refresh}. sekund
   wp ls [filtre]          samme liste, skrevet ut én gang (også når stdout ikke er en terminal)
   wp approve <run> [-c k] godkjenn alle ventende approvals på run-en (build id)
-  wp follow <run>         varsel når den venter på godkjenning eller er ferdig (igjen: slutt)
+  wp follow <run>         varsel når den venter på godkjenning eller er ferdig, confetti når grønn (igjen: slutt)
   wp fix <run> [-n]       Claude-agent i bakgrunnen som fikser den feilede run-en (-n: vis bare kommandoen)
   wp open <run>           åpne i nettleser
   wp -g                   gruppert per pipeline: de {group} siste runs i hver
@@ -673,7 +675,7 @@ GUIDE = """\
 
   ↑↓ / j k        flytt            pgup/pgdn, ^u/^d   halv side
   space           godkjenn valgt run — alle stages som venter på den
-  f               følg valgt run (◉) — macOS-varsel ved venting/ferdig; igjen: slutt å følge
+  f               følg valgt run (◉) — macOS-varsel ved venting/ferdig, Raycast-confetti når grønn; igjen: slutt å følge
   x               fiks valgt run — feilet run gis til en Claude-agent i bakgrunnen (se FIKS)
   enter / o       åpne i nettleser
   w               bare runs som venter på godkjenning (av/på)
@@ -762,7 +764,7 @@ def main():
     s.add_argument("-c", "--comment")
     s.set_defaults(fn=cmd_approve)
 
-    s = sub.add_parser("follow", help="notify when the run waits for approval or finishes; again to stop")
+    s = sub.add_parser("follow", help="notify when the run waits for approval or finishes, confetti when green; again to stop")
     s.add_argument("id", type=int)
     s.set_defaults(fn=cmd_follow)
 
