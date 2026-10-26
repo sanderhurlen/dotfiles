@@ -186,8 +186,8 @@ def wiql(when):
 
 
 def work():
-    """(items, Old): my work items in To Do/Doing across the org created the last OLD days: bugs
-    first, then Doing, then by id. Tasks under a map, spec or Issue/Bug only show as its children; the parent
+    """(items, Old): my work items in To Do/Doing across the org created the last OLD days: my bugs
+    first, then mine in the project's current sprint, then the rest; within each Doing first, then by id. Tasks under a map, spec or Issue/Bug only show as its children; the parent
     is listed even if not mine."""
     q = lambda when: [w["id"] for w in rest("wit/wiql", {"query": wiql(when)}, scope="org")["workItems"]]
     ids, old = q(f"[System.CreatedDate] >= @Today - {OLD}"), Old(len(q(f"[System.CreatedDate] < @Today - {OLD}")))
@@ -204,8 +204,22 @@ def work():
     wf.fetch([c for m in folds for c in m.it.links(wf.CHILD)])
     for m in folds:
         unfold(m)
-    return sorted(items, key=lambda w: (w.type.lower() != "bug",
+    now = in_sprint({t.project for t in its}, q)
+    return sorted(items, key=lambda w: (not (w.id in ids and w.type.lower() == "bug"), w.id not in now,
                                         STATES.index(w.state) if w.state in STATES else 9, w.id)), old
+
+
+def in_sprint(projects, q):
+    """Ids of my To Do/Doing items in their project's current sprint (projects without one are skipped)."""
+    paths = []
+    for p in projects:
+        try:
+            paths.append(sprint(p)[1])
+        except Exception:
+            pass
+    if not paths:
+        return set()
+    return set(q("[System.IterationPath] IN (" + ", ".join("'" + p.replace("'", "''") + "'" for p in paths) + ")"))
 
 
 class Review:
