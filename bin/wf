@@ -206,6 +206,20 @@ def blockers(item):
     return [p for p in many(item.links(PRED)) if not p.done]
 
 
+_me = None
+
+
+def taken(t):
+    """Claimed: Doing, or assigned — where the tracker has Doing, a To Do ticket assigned to me is still free."""
+    global _me
+    if t.state == "Doing" or not t.assignee:
+        return t.state == "Doing"
+    if not T().doing:
+        return True
+    _me = _me or (T().me() or "")
+    return t.assignee.lower() != _me.lower()
+
+
 def classify(tickets, need_ready):
     """Split open tickets into (takeable, claimed, blocked). Order: by id."""
     fetch([p for t in tickets for p in t.links(PRED)])
@@ -215,7 +229,7 @@ def classify(tickets, need_ready):
             continue
         if blockers(t):
             blocked.append(t)
-        elif t.assignee or t.state == "Doing":
+        elif taken(t):
             claimed.append(t)
         elif need_ready and "ready-for-agent" not in t.tags:
             blocked.append(t)
@@ -644,8 +658,8 @@ GUIDE = """\
   Spec:  resultatet av et kart (/to-spec). Barna er implementasjonstickets (/to-tickets).
          Kart som bygger selv (task-tickets direkte under kartet) funker også: wf run <id>.
 
-  Kartticket er {g}ledig{r}  når: åpen, ublokkert, ingen assignee.
-  Spec-ticket er {g}klar{r}  når: åpen, ublokkert, ingen assignee, tag ready-for-agent.
+  Kartticket er {g}ledig{r}  når: åpen, ublokkert, ikke Doing og ingen annen assignee enn deg (GitHub: ingen).
+  Spec-ticket er {g}klar{r}  når: som ledig, pluss tag ready-for-agent.
   Valg er deterministisk: laveste id vinner.
 
 {b}FLYTEN{r}
