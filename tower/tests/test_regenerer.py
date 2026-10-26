@@ -113,6 +113,15 @@ def test_config_kilder(tmp_path, monkeypatch):
     assert replace(c, kilder=(tmp_path / "borte",)).verktøy().kataloger == (c.kunnskapsbase,)
 
 
+def test_config_dager_felles_eller_per_kanal(tmp_path):
+    c = last(tmp_path)
+    assert (c.dager_for("mail"), c.dager_for("teams")) == (7, 3)
+    (tmp_path / "config.json").write_text('{"dager": 5}')
+    assert last(tmp_path).dager_for("teams") == 5
+    (tmp_path / "config.json").write_text('{"dager": {"teams": 2}}')
+    assert (last(tmp_path).dager_for("mail"), last(tmp_path).dager_for("teams")) == (7, 2)
+
+
 # --- db
 
 

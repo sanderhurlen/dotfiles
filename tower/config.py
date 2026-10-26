@@ -15,7 +15,7 @@ STANDARD = {
     "kanaler": ["mail", "teams"],
     "graph": [],
     "synk_sekunder": 60,
-    "dager": 7,
+    "dager": {"mail": 7, "teams": 3},
     "poll_sekunder": 2,
     "modell": "sonnet",
     "kilder": ["~/visense"],
@@ -31,12 +31,15 @@ class Config:
     rot: Path
     meg: Person
     kanaler: tuple[str, ...] = ("mail", "teams")
-    dager: int = 7  # Tråder eldre enn dette ved første syn blir `gammel`
+    dager: int | dict[str, int] = 7  # felles eller per kanal: hentes så langt tilbake, eldre ved første syn blir `gammel`
     poll_sekunder: float = 2
     modell: str = "sonnet"  # for triage og utkast
     graph: tuple[str, ...] = ()  # ekte Graph (`tower login`): mail blir kladd i Outlook, Teams kopieres; aldri sendt
     synk_sekunder: float = 60
     kilder: tuple[Path, ...] = ()  # Utkast-agenten kan lese her (og i Kunnskapsbasen) ved regenerering med instruks
+
+    def dager_for(self, kanal: str) -> int:
+        return self.dager if isinstance(self.dager, int) else self.dager.get(kanal, 7)
 
     @property
     def db(self) -> Path:
@@ -71,7 +74,8 @@ def last(rot: Path | None = None) -> Config:
         rot=rot,
         meg=Person(**data["meg"]),
         kanaler=tuple(data["kanaler"]),
-        dager=int(data["dager"]),
+        dager=({k: int(v) for k, v in data["dager"].items()} if isinstance(data["dager"], dict)
+               else int(data["dager"])),
         poll_sekunder=float(data["poll_sekunder"]),
         modell=str(data["modell"]),
         graph=tuple(data["graph"]),
@@ -96,7 +100,7 @@ def lag_kanaler(config: Config) -> list[Kanal]:
                 from tower.kanal.mail_graph import MailGraph
 
                 graph = MailGraph(Graph(), katalog)
-            kanaler.append(MailKanal(GraphFil(katalog, config.outbox), config.meg, graph, config.dager,
+            kanaler.append(MailKanal(GraphFil(katalog, config.outbox), config.meg, graph, config.dager_for("mail"),
                                      config.synk_sekunder))
         elif navn == "teams":
             graph = None
@@ -105,7 +109,7 @@ def lag_kanaler(config: Config) -> list[Kanal]:
                 from tower.kanal.teams_graph import TeamsGraph
 
                 graph = TeamsGraph(Graph(), katalog)
-            kanaler.append(TeamsKanal(GraphFil(katalog, config.outbox), config.meg, graph, config.dager,
+            kanaler.append(TeamsKanal(GraphFil(katalog, config.outbox), config.meg, graph, config.dager_for("teams"),
                                       config.synk_sekunder))
         else:
             raise ValueError(f"ukjent kanal i config: {navn}")

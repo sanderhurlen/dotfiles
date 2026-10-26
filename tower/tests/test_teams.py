@@ -75,3 +75,25 @@ async def test_svar_skriver_outbox_og_trådfil(config):
 async def test_svar_på_ukjent_tråd_kaster(config):
     with pytest.raises(KeyError):
         await kanal(config).svar("teams:finnes-ikke", "hei")
+
+
+async def test_arkivert_er_skjult_til_neste_melding_også_etter_omstart(config):
+    k = kanal(config)
+    await k.hent()
+    await k.arkiver(OLA)
+    assert list(config.outbox.glob("*")) == []  # aldri noe mot Teams
+
+    k = kanal(config)
+    assert OLA not in {t.id for t in await k.hent()}
+
+    sti = config.rot / "teams" / "ola-pr.json"  # ny Melding i chatten
+    data = json.loads(sti.read_text())
+    data["value"].append({**data["value"][-1], "id": "ny", "createdDateTime": "2026-10-26T09:00:00Z"})
+    sti.write_text(json.dumps(data))
+    assert OLA in {t.id for t in await k.hent()}
+    assert OLA in {t.id for t in await kanal(config).hent()}  # arkiveringen gjaldt bare den forrige
+
+
+async def test_arkiver_ukjent_tråd_kaster(config):
+    with pytest.raises(KeyError):
+        await kanal(config).arkiver("teams:finnes-ikke")

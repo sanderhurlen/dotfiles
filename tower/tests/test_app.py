@@ -497,7 +497,7 @@ async def test_enter_viser_radens_handlinger(config):
         assert valgt not in a.tråder
 
 
-async def test_teams_kan_ikke_merkes_eller_arkiveres(config):
+async def test_teams_merkes_og_arkiveres_sammen_med_mail(config):
     config = dataclasses.replace(config, kanaler=("mail", "teams"))
     a = app(config)
     async with a.run_test(size=(160, 40)) as pilot:
@@ -507,20 +507,17 @@ async def test_teams_kan_ikke_merkes_eller_arkiveres(config):
         mail = next(t for t in a.sortert() if t.kanal == "mail")
         velg(a, teams.id)
         await pilot.pause()
-        assert a.check_action("merk", ()) is None and a.check_action("arkiver", ()) is None
+        assert a.check_action("merk", ()) is True and a.check_action("arkiver", ()) is True
+        await pilot.press("space")
+        velg(a, mail.id)
         await pilot.press("space", "x")
         await a.workers.wait_for_complete()
-        assert not a.merket and teams.id in a.tråder
+        assert teams.id not in a.tråder and mail.id not in a.tråder
 
-        velg(a, mail.id)
-        await pilot.press("space")
-        velg(a, teams.id)
-        await pilot.pause()
-        assert a.check_action("arkiver", ()) is True  # det merkede arkiveres, uansett valgt rad
-        await pilot.press("x")
-        await a.workers.wait_for_complete()
-        assert mail.id not in a.tråder and teams.id in a.tråder
-
+    a = app(config)  # Teams-arkiveringen er bare i tower, og varer over omstart
+    async with a.run_test(size=(160, 40)):
+        await a.poll()
+        assert teams.id not in a.tråder
 
 AZURE = "mail:AAQkADMock-azure-newsletter"
 

@@ -456,7 +456,7 @@ class Tower(App):
                     if (forrige := self.tråder.get(t.id)) and forrige.siste.id != t.siste.id:
                         self.merket.discard(t.id)  # ny Melding: merket gjaldt det jeg hadde sett
                     self.tråder[t.id] = t
-                    self.rader[t.id] = self.db.registrer(t, nå, self.config.dager)
+                    self.rader[t.id] = self.db.registrer(t, nå, self.config.dager_for(t.kanal))
                     self.foreslå(t)
                     self.planlegg(t)
                     endret = True
@@ -1019,7 +1019,7 @@ class Tower(App):
         self.oppdater_status()
 
     def action_arkiver(self) -> None:
-        """Merkede Tråder, ellers den valgte: lest og flyttet til Slettede elementer."""
+        """Merkede Tråder, ellers den valgte, ut av lista (se `Arkiv`)."""
         ids = [t.id for t in self.sortert() if t.id in self.merket]
         if not ids and (valgt := self.valgt()) and self.kan_arkiveres(valgt[0]):
             ids = [valgt[0].id]

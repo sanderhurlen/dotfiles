@@ -68,7 +68,7 @@ class Kanal(Protocol):
 
 
 class Arkiv(Protocol):
-    """Kanaler med innboks (mail): arkivert er lest og flyttet til Slettede elementer."""
+    """Mail: arkivert er lest og flyttet til Slettede elementer. Teams: skjult i tower til neste Melding."""
 
     async def arkiver(self, tråd_id: str) -> None:
         """Tråden ut av innboksen. Kaster ved feil."""

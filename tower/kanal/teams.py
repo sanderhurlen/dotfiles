@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from tower.kanal import Melding, Person, Tråd
-from tower.kanal.graph_fil import GraphFil
+from tower.kanal.graph_fil import GraphFil, skriv_atomisk
 from tower.kanal.mail import graph_tid
 from tower.kanal.teams_graph import TeamsGraph
 from tower.kanal.tekst import body_til_tekst
@@ -77,6 +78,7 @@ class TeamsKanal:
         self._neste_synk = 0.0
         self._filer: dict[str, Path] = {}
         self._chatter: dict[str, dict] = {}
+        self._arkiv = transport.katalog / ".arkivert"  # Tråd-id → siste Melding-id da den ble arkivert
 
     async def hent(self) -> list[Tråd]:
         return await asyncio.to_thread(self._hent)
@@ -85,11 +87,16 @@ class TeamsKanal:
         if self.graph and time.monotonic() >= self._neste_synk:
             self._neste_synk = time.monotonic() + self.synk_sekunder
             self.graph.synk(self.dager)
-        ut = []
+        ut, arkivert = [], self._arkivert()
         for sti, data in self.transport.endrede():
             tråd = tråd_fra_graph(data, self.meg)
             if tråd is None:
                 continue
+            if tråd.id in arkivert:
+                if arkivert[tråd.id] == tråd.siste.id:
+                    continue
+                del arkivert[tråd.id]  # ny Melding: tilbake i lista
+                self._lagre_arkiv(arkivert)
             self._filer[tråd.id] = sti
             self._chatter[tråd.id] = data["chat"]
             ut.append(tråd)
@@ -102,6 +109,26 @@ class TeamsKanal:
             del self._filer[id]
             getattr(self, "_siste", {}).pop(id, None)
         return ids
+
+    def _arkivert(self) -> dict[str, str]:
+        try:
+            return json.loads(self._arkiv.read_text())
+        except (FileNotFoundError, ValueError):
+            return {}
+
+    def _lagre_arkiv(self, arkivert: dict[str, str]) -> None:
+        skriv_atomisk(self._arkiv, arkivert)
+
+    async def arkiver(self, tråd_id: str) -> None:
+        await asyncio.to_thread(self._arkiver, tråd_id)
+
+    def _arkiver(self, tråd_id: str) -> None:
+        """Bare i tower (Chat.Read kan ikke merke lest i Teams): skjult til neste Melding i chatten."""
+        if tråd_id not in self._filer:
+            raise KeyError(f"ukjent Tråd: {tråd_id}")
+        tråd = tråd_fra_graph(json.loads(self._filer[tråd_id].read_text()), self.meg)
+        self._lagre_arkiv({**self._arkivert(), tråd_id: tråd.siste.id})
+        del self._filer[tråd_id]
 
     def lenke(self, tråd_id: str) -> str | None:
         """Chatten i Teams."""
