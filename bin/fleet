@@ -1621,17 +1621,14 @@ def set_sprint(w):
 def menu(x, pilot=None):
     """(title, [(key, label, action | submenu-builder, confirm?)]) for the row's `m` menu.
     An action returns its result line; a builder (marked by confirm "sub") returns a menu."""
-    if isinstance(x, Cleanup):
-        what = "ulagrede endringer og ikke-pushede commits går tapt" if x.reasons else "fjernes"
+    if isinstance(x, Cleanup):  # cleanup I do by hand asks nothing: choosing it is the decision
         return (f"#{x.id} {os.path.basename(x.tree.path)}", [
-            ("f", "rydd likevel (force)", lambda: remove(x, sessions(), force=True),
-             f"fjern {short(x.tree.path)} med makt? {what} ({', '.join(x.reasons)})"),
+            ("f", "rydd likevel (force)", lambda: remove(x, sessions(), force=True), False),
             ("v", "VS Code i worktreet", lambda: open_code(x.tree.main, x.tree.path), False),
             *([("o", "åpne work item", lambda: subprocess.run(["open", x.url]) and "", False)] if x.url else [])])
     if isinstance(x, Orphan):
         return (f"{x.name} ({x.state})", [
-            ("x", "fjern sesjonen (stop + rm)", lambda: end(x),
-             False if x.finished else f"{x.name} er {x.state} — stopp og fjern?"),
+            ("x", "fjern sesjonen (stop + rm)", lambda: end(x), False),
             *([("s", "stopp", lambda: stop(x), False)] if not x.finished else [])])
     if isinstance(x, Mine):
         return (f"!{x.id} {x.title[:50]}", [
@@ -2499,7 +2496,7 @@ GUIDE = """\
               min PR     f fix-agent · u auto-complete · c complete · x abandon ·
                          z demp/slå på autopilot · n kjør auto nå · o åpne
               agent      x fjern (stop + rm) · s stopp
-            complete og abandon spør y/n først. esc lukker.
+            complete og abandon spør y/n først; rydding (x, f) gjør det med en gang. esc lukker.
   v         VS Code i itemets worktree (⎇ på linja). Kopierer .env* fra hovedtreet dit
             worktreet har mappa men ikke fila — eksisterende filer røres ikke.
             Worktree hører til itemet når mappe- eller branchnavnet har id-en: fleet-<id>,
