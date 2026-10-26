@@ -139,7 +139,15 @@ class Work:
 
     @property
     def skill(self):
+        if self.kind == "spec":
+            return "/implement" if self.next else "status" if self.children or self.done_children else "/to-tickets"
         return "/wayfinder" if self.kind == "map" or self.decision else "/implement"
+
+    @property
+    def next(self):
+        """A spec's next ready ticket (Work), like `wf next`: free, unblocked, ready-for-agent, first by id."""
+        return next((t for t in self.children if t.status == "ledig" and "ready-for-agent" in t.it.tags), None) \
+            if self.kind == "spec" else None
 
     @property
     def folds(self):
@@ -154,6 +162,13 @@ class Work:
     def prompt(self):
         if self.kind == "map" and not self.children and not self.done_children:
             return wf.chart_prompt(self.it)
+        if self.kind == "spec":
+            if self.next:
+                return self.next.prompt
+            if self.children or self.done_children:  # tickets exist, none ready: say where it stands
+                return (f"Oppsummer spec #{self.id} «{self.title}» ({self.url}): hvilke tickets er gjort, hvilke "
+                        f"kjører, og hva blokkerer resten. Bare les — ikke endre noe.")
+            return f"/to-tickets {self.id}"
         return f"/wayfinder {self.parent.id} ticket {self.id}" if self.decision else f"{self.skill} {self.id}"
 
 
@@ -953,14 +968,17 @@ def starts(x):
                 ("test lokalt: bygg og kjør testene", x, "test",
                  f"Sjekk ut PR !{x.id} ({x.url}), kildebranch {x.source}, i et worktree. Bygg, kjør testene og "
                  f"det som berøres, og rapporter hva som feiler eller oppfører seg rart. Ikke post kommentarer.")]
-    out = [(x.prompt, x, None, None)]
+    own = x.next or x  # a spec's own start is its next ready ticket, run as that ticket's agent
+    out = [(f"{own.prompt}  «{own.title[:40]}»" if own is not x
+            else "oppsummer specen: gjort, kjører, blokkert" if x.skill == "status" else x.prompt, own, None, None)]
     out += [(f"fiks PR !{m.id}: {'; '.join(m.todo) or 'sjekk bygg og kommentarer'}", m, None, None) for m in x.prs]
     if x.kind == "map":
         out.append(("oppsummer kartet: gjort, neste, blokkert", x, "summary",
                     f"Oppsummer kart #{x.id} «{x.title}» ({x.url}): hva er avgjort og gjort, hva er neste ledige "
                     f"ticket, og hva blokkerer. Bare les — ikke endre noe."))
     elif x.kind == "spec":
-        out.append((f"/to-tickets {x.id}", x, "tickets", f"/to-tickets {x.id}"))
+        if x.skill != "/to-tickets":
+            out.append((f"/to-tickets {x.id}", x, "tickets", f"/to-tickets {x.id}"))
     elif not x.decision:
         skill = "/diagnosing-bugs" if x.type.lower() == "bug" else "/tdd"
         out.append((f"{skill} {x.id}", x, skill[1:], f"{skill} #{x.id} «{x.title}» ({x.url})"))
@@ -1697,7 +1715,7 @@ def menu(x, pilot=None):
         *triage,
         ("s", f"endre status ({x.state})", lambda: status_menu(x), "sub"),
         ("i", "sett nåværende sprint", lambda: set_sprint(x), False),
-        ("g", f"start agent ({x.skill})", lambda: launch(x), False),
+        ("g", f"start agent ({x.skill})", lambda: launch(x.next or x), False),
         *code_option(x),
         *pilot_options(pilot, x),
         ("o", "åpne i nettleser", lambda: subprocess.run(["open", x.url]) and "", False)])
@@ -2332,7 +2350,8 @@ def start(x, dry):
 
 
 def cmd_go(a):
-    start(find_work(a.id), a.dry_run)
+    w = find_work(a.id)
+    start(w.next or w, a.dry_run)
 
 
 def cmd_review(a):
@@ -2551,6 +2570,8 @@ GUIDE = """\
   annet → claude --bg -n fleet-wi-<id>-go "/implement <id>"   i repoet commits/PRer på itemet
           (eller barna) peker til, i worktree fleet-<id> — ellers i {home}
   kart-ticket → "/wayfinder <kart> ticket <id>" i {home}; task-tickets → "/implement <id>"
+  spec  → neste klare ticket (ledig, ready-for-agent) som "/implement <ticket>" på ticketens egen agent;
+          ingen tickets → "/to-tickets <id>"; alle tatt/blokkert → oppsummer specen (bare les)
   Agenten setter itemet, og kartet/specen det ligger under, til Doing (ikke oppsummer/code-review/egendefinert)
   PR    → claude --bg -n fleet-pr-<id>-review: /review-pr (/code-review + utkast) i worktree fleet-pr-<id>-review, skriver utkast
           (`wr draft <id>`: hva den skal løse, om den gjør det, kommentarer, stemme); uten klone: forklar PR-en

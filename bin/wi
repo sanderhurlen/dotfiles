@@ -578,7 +578,7 @@ def untriaged():
     cond = ("[System.AssignedTo] = @Me AND [System.WorkItemType] IN ('Issue', 'Bug') AND [System.State] "
             "NOT IN ('Done', 'Closed', 'Removed', 'Resolved')")
     items = wf.many(execute(wiql(["[System.TeamProject] = @project", cond]), LIMIT))
-    return [t for t in items if not any(x in TRIAGED or x.startswith("wayfinder:") or x == "spec" for x in t.tags)]
+    return [t for t in items if not t.is_spec and not any(x in TRIAGED or x.startswith("wayfinder:") for x in t.tags)]
 
 
 def cmd_triage(a):
