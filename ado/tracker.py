@@ -54,7 +54,8 @@ class Item:
 
     @property
     def is_spec(self):
-        return "spec" in self.tags
+        """Tagged spec, or titled «Spec: …» — /to-spec only tags ready-for-agent."""
+        return "spec" in self.tags or self.title.lower().startswith("spec:")
 
     @property
     def hitl(self):

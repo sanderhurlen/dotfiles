@@ -637,7 +637,7 @@ GUIDE = """\
   Kart        wayfinder:map       tag                     label
   Barn        tickets             Parent/Child            sub-issues
   Blokkering  ferdig = lukket     Predecessor-lenke       blocked-by-avhengighet
-  Spec        spec                Related fra kartet      «Spec: #N» i kartets body
+  Spec        spec/«Spec:»-tittel Related fra kartet      «Spec: #N» i kartets body
 
   Kart:  stor, tåkete innsats. Barna er beslutningstickets:
          research (AFK) · grilling/prototype (HITL) · task
