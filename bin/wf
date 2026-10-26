@@ -482,6 +482,8 @@ def cmd_go(a):
     if not t:
         die(f"nothing takeable on {m.id} — `wf map {m.id}`")
     print(line(t))
+    if not a.dry_run and T().start(t):
+        print(dim(f"{t.id} → {T().doing}"))
     afk = t.kind == "research"
     prompt = f"/wayfinder Work through the map {ref(m)}. Ticket: {ref(t)} — \"{t.title}\"."
     cmd = ["claude"]
@@ -688,7 +690,7 @@ GUIDE = """\
   · run/fan {y}skriver til trackeren{r}: setter deg som assignee (ADO: også state Doing)
     før agenten starter, så den ikke startes to ganger. Ticketen lukkes ikke — gjør det
     etter merge med wf done.
-  · go på et kart eller en spec setter det til Doing (ADO) før agenten starter.
+  · go på et kart eller en spec setter det og ticketen agenten tar til Doing (ADO) før den starter.
   · run hopper over Done, blokkerte og andres tickets, og alt som mangler ready-for-agent
     — unntatt task-tickets rett under et kart (-f overstyrer alt).
   · HITL (hitl, ready-for-human, grilling, prototype) startes aldri i bakgrunnen.
