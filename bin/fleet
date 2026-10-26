@@ -902,7 +902,27 @@ def launch(x, prompt=None, role=None):
         raise RuntimeError((r.stderr or r.stdout).strip().splitlines()[-1] if (r.stderr or r.stdout).strip()
                            else f"claude exited {r.returncode}")
     m = re.search(r"backgrounded · (\w+)", r.stdout)
-    return f"▶ {agent_name(x, role)} startet{f' ({m.group(1)})' if m else ''} i {short(cwd)}: {cmd[-1][:60]}"
+    return f"▶ {agent_name(x, role)} startet{f' ({m.group(1)})' if m else ''} i {short(cwd)}: {cmd[-1][:60]}" \
+        + doing(x, role)
+
+
+WORKING = (None, "tickets", "tdd", "diagnosing-bugs")  # roles that start work on the item, not just read it
+
+
+def doing(x, role):
+    """Set a Work row that an agent starts working on, and the map or spec it's under, to Doing.
+    Returns « · #id → Doing» per item moved."""
+    if not isinstance(x, Work) or role not in WORKING:
+        return ""
+    moved = []
+    for w in [x] + ([x.parent] if x.parent else []):
+        try:
+            if A().start(w.it):
+                w.state = w.it.state
+                moved.append(f" · #{w.id} → Doing")
+        except RuntimeError as e:
+            moved.append(f" · #{w.id} ikke Doing: {e}")
+    return "".join(moved)
 
 
 def group_starts(g):
@@ -2531,6 +2551,7 @@ GUIDE = """\
   annet → claude --bg -n fleet-wi-<id>-go "/implement <id>"   i repoet commits/PRer på itemet
           (eller barna) peker til, i worktree fleet-<id> — ellers i {home}
   kart-ticket → "/wayfinder <kart> ticket <id>" i {home}; task-tickets → "/implement <id>"
+  Agenten setter itemet, og kartet/specen det ligger under, til Doing (ikke oppsummer/code-review/egendefinert)
   PR    → claude --bg -n fleet-pr-<id>-review: /review-pr (/code-review + utkast) i worktree fleet-pr-<id>-review, skriver utkast
           (`wr draft <id>`: hva den skal løse, om den gjør det, kommentarer, stemme); uten klone: forklar PR-en
   min PR → claude --bg -n fleet-pr-<id>-fix "<hva som blokkerer + instrukser>"  i checkouten som

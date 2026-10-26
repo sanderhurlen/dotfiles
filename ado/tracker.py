@@ -66,6 +66,9 @@ class Item:
 # comments, claim a ticket, and say how an agent reads an item itself.
 
 
+IN_PROGRESS = ("Doing", "Active", "In Progress")
+
+
 class Ado:
     name = "Azure DevOps"
     noun = "work item"
@@ -166,9 +169,19 @@ class Ado:
 
     def claim(self, item, who):
         ops = [{"op": "add", "path": "/fields/System.AssignedTo", "value": who}]
-        if item.state not in ("Doing", "Active", "In Progress"):
+        if item.state not in IN_PROGRESS:
             ops.append({"op": "add", "path": "/fields/System.State", "value": "Doing"})
         self.api(f"wit/workitems/{item.id}", ops, method="PATCH", ctype="application/json-patch+json")
+
+    def start(self, item):
+        """Move an item that's being worked on to Doing, unless it's already in progress or done.
+        Returns whether it moved."""
+        if item.done or item.state in IN_PROGRESS:
+            return False
+        self.api(f"wit/workitems/{item.id}", [{"op": "add", "path": "/fields/System.State", "value": "Doing"}],
+                 method="PATCH", ctype="application/json-patch+json")
+        item.state = "Doing"
+        return True
 
     def done_state(self, item):
         """The type's Completed-category state: Done, Closed, … depending on the process."""

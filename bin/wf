@@ -153,6 +153,9 @@ class GitHub:
         if not sh("gh", "issue", "edit", str(item.id), "-R", self.repo, "--add-assignee", who):
             die(f"could not assign #{item.id} to {who}")
 
+    def start(self, item):
+        return False  # GitHub issues have no Doing
+
     def close(self, item):
         r = subprocess.run(["gh", "issue", "close", str(item.id), "-R", self.repo, "--reason", "completed"],
                            capture_output=True, text=True)
@@ -471,6 +474,8 @@ def cmd_go(a):
     m = get(a.map)
     if not m.is_map and not m.is_spec:
         return go_item(m, a)
+    if not a.dry_run and T().start(m):
+        print(dim(f"{m.id} → {T().doing}"))
     if m.is_map and not a.ticket and not m.links(CHILD) and not map_specs(m):
         return chart(m, a)
     t = pick(m, a.ticket)
@@ -683,6 +688,7 @@ GUIDE = """\
   · run/fan {y}skriver til trackeren{r}: setter deg som assignee (ADO: også state Doing)
     før agenten starter, så den ikke startes to ganger. Ticketen lukkes ikke — gjør det
     etter merge med wf done.
+  · go på et kart eller en spec setter det til Doing (ADO) før agenten starter.
   · run hopper over Done, blokkerte og andres tickets, og alt som mangler ready-for-agent
     — unntatt task-tickets rett under et kart (-f overstyrer alt).
   · HITL (hitl, ready-for-human, grilling, prototype) startes aldri i bakgrunnen.
