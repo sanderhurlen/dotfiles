@@ -10,7 +10,9 @@
 #                                           (fleet ls) and my teams' standup, through Claude;
 #                                           written once a day, --fresh writes it again
 #   workday last                            the last note
-#   workday start                           log that the day starts (end logs its own end)
+#   workday start                           log that the day starts (end logs its own end) and
+#                                           start a background agent (workday-jobber-<date>,
+#                                           once a day) that sums up how my launchd jobs went
 #   workday times                           start, end and hours per day
 #
 # Notes live in ~/.local/state/workday: <date>.md (end) and plan-<date>.md (plan), kept 7
@@ -127,6 +129,18 @@ $data" 2>/dev/null) || summary=$data
   cat "$dir/$day.md"
 }
 
+# A background agent sums up my launchd jobs (chores status); once a day, so a second start
+# doesn't spawn another. Its output is closed, so Raycast's execFileSync doesn't wait for it.
+cmd_jobs() {
+  local name="workday-jobber-$day"
+  claude agents --json --all 2>/dev/null | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null && return
+  local prompt="Kjør \`chores status\` (og \`chores status <jobb>\` for jobber som ikke er ✓) og oppsummer \
+kort på norsk hvordan launchd-jobbene mine har gått siden forrige arbeidsdag: hva som kjørte, hva som \
+feilet, er forfalt eller trenger meg, og for hver av dem hva jeg bør gjøre (konkret kommando). \
+Ikke kjør jobbene og ikke endre noe. Alt ✓: én linje."
+  (cd "$HOME/.dotfiles" && claude --dangerously-skip-permissions --bg -n "$name" "$prompt" >/dev/null 2>&1 &)
+}
+
 cmd_plan() {
   local out="$dir/plan-$day.md"
   if [[ $1 != --fresh && -s $out ]]; then
@@ -167,8 +181,8 @@ Ingen innledning, ingen overskrift på toppnivå, maks ~25 linjer."
 case $1 in
   end) shift; cmd_end "$@" ;;
   plan) shift; cmd_plan "$@" ;;
-  start) stamp start ;;
+  start) stamp start; cmd_jobs ;;
   times) cmd_times ;;
   last) note=$(last); [[ -n $note ]] && cat "$note" || die "ingen notater ennå" ;;
-  *) sed -n '3,19s/^# \{0,1\}//p' "$0"; exit 1 ;;
+  *) sed -n '3,21s/^# \{0,1\}//p' "$0"; exit 1 ;;
 esac

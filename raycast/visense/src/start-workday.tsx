@@ -2,7 +2,8 @@
 // standup, through Claude; written once a day) above yesterday's note. ↵ starts the day:
 // Ghostty with fleet in tab 1 (splits `claude agents` to its left by itself) and tower in
 // tab 2, logging in only when the session no longer works, then Outlook and Teams. Whatever
-// already runs is left alone. `workday start` logs the time; End Workday logs the end.
+// already runs is left alone. `workday start` logs the time and starts a background agent
+// that sums up my launchd jobs; End Workday logs the end.
 
 import { Action, ActionPanel, Detail, Icon, closeMainWindow, open } from "@raycast/api";
 import { runAppleScript } from "@raycast/utils";
