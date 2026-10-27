@@ -13,6 +13,7 @@
 #   wp approve 23536         approve every pending approval on run 23536
 #   wp follow 23536          notify when it waits for approval or finishes, confetti when green (again: stop)
 #   wp fix 23536             background Claude agent fixing the failed run (fleet's launcher)
+#   wp issues [23536]        warnings and errors in a run, or in each pipeline's last finished run, by message
 #   wp open 23536            open run in browser
 #   wp -g                    grouped per pipeline, the last few runs of each
 #   wp help                  explained (Norwegian)
@@ -364,6 +365,25 @@ def errors(r, most=8):
     return out[:most]
 
 
+def issues(r):
+    """{(type, message): [where]} for the warnings and errors in r's timeline; where is the job,
+    or job › task when the task carries it."""
+    recs = timeline(r)
+    by_id = {x["id"]: x for x in recs}
+    out = {}
+    for rec in recs:
+        for i in rec.get("issues") or []:
+            if i.get("type") not in ("warning", "error"):
+                continue
+            where, parent = rec["name"], by_id.get(rec.get("parentId")) or {}
+            if rec.get("type") == "Task" and parent.get("type") == "Job":
+                where = f"{parent['name']} › {where}"
+            ws = out.setdefault((i["type"], " ".join(i.get("message", "").split())), [])
+            if where not in ws:
+                ws.append(where)
+    return out
+
+
 def about_run(r):
     """The run and what failed, in words, for an agent's prompt."""
     errs = "".join(f"\n- {t}" + (f" (log {l})" if l else "") + (f": {m}" if m else "") for t, m, l in errors(r))
@@ -649,6 +669,30 @@ def cmd_fix(a):
         die(str(e))
 
 
+def cmd_issues(a):
+    if a.id:
+        rs = [find(a.id)]
+    else:
+        a.group, seen = True, set()
+        try:
+            rs = [r for r in runs(a) if r.status == "completed" and not (r.pipeline in seen or seen.add(r.pipeline))]
+        except RuntimeError as e:
+            die(str(e))
+    by = {}  # (type, message) → [(run, [where])]
+    for r in rs:
+        for k, ws in issues(r).items():
+            by.setdefault(k, []).append((r, ws))
+    if not by:
+        return print(dim(f"ingen varsler i {rs[0].pipeline} {rs[0].number}" if a.id
+                         else f"ingen varsler i siste ferdige run av {len(rs)} pipelines"))
+    for (kind, msg), hits in sorted(by.items(), key=lambda kv: (kv[0][0] != "error", -len(kv[1]))):
+        mark = red("✗") if kind == "error" else yellow("⚠")
+        print(f"{mark} {bold(msg)}" + ("" if a.id else dim(f"  ({len(hits)} pipeline{'s' if len(hits) > 1 else ''})")))
+        for r, ws in hits:
+            print("    " + ("" if a.id else f"{r.pipeline}  {dim(f'{r.number} #{r.id}')}  ") + dim(", ".join(ws)))
+        print()
+
+
 def cmd_open(a):
     subprocess.run(["open", find(a.id).url])
 
@@ -667,6 +711,8 @@ GUIDE = """\
   wp approve <run> [-c k] godkjenn alle ventende approvals på run-en (build id)
   wp follow <run>         varsel når den venter på godkjenning eller er ferdig, confetti når grønn (igjen: slutt)
   wp fix <run> [-n]       Claude-agent i bakgrunnen som fikser den feilede run-en (-n: vis bare kommandoen)
+  wp issues [run]         varsler og feil i run-en, eller i siste ferdige run av hver pipeline (med filtre),
+                          samlet per melding: hvilke pipelines og jobber som har den
   wp open <run>           åpne i nettleser
   wp -g                   gruppert per pipeline: de {group} siste runs i hver
   wp help [kommando]      denne teksten, eller flaggene til én kommando
@@ -775,6 +821,11 @@ def main():
 
     s = sub.add_parser("watch", help=argparse.SUPPRESS)
     s.set_defaults(fn=lambda a: watch(), bare=True)
+
+    s = sub.add_parser("issues", help="warnings and errors in a run, or in each pipeline's last finished run")
+    s.add_argument("id", type=int, nargs="?")
+    filters(s)
+    s.set_defaults(fn=cmd_issues)
 
     s = sub.add_parser("open", help="open run in browser")
     s.add_argument("id", type=int)
