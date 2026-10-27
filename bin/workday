@@ -129,8 +129,9 @@ $data" 2>/dev/null) || summary=$data
   cat "$dir/$day.md"
 }
 
-# A background agent sums up my launchd jobs (chores status); once a day, so a second start
-# doesn't spawn another. Its output is closed, so Raycast's execFileSync doesn't wait for it.
+# A background agent sums up my launchd jobs (chores status), on haiku since reading a status
+# needs no more; once a day, so a second start doesn't spawn another. Its output is closed, so
+# Raycast's execFileSync doesn't wait for it.
 cmd_jobs() {
   local name="workday-jobber-$day"
   claude agents --json --all 2>/dev/null | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null && return
@@ -138,7 +139,7 @@ cmd_jobs() {
 kort på norsk hvordan launchd-jobbene mine har gått siden forrige arbeidsdag: hva som kjørte, hva som \
 feilet, er forfalt eller trenger meg, og for hver av dem hva jeg bør gjøre (konkret kommando). \
 Ikke kjør jobbene og ikke endre noe. Alt ✓: én linje."
-  (cd "$HOME/.dotfiles" && claude --dangerously-skip-permissions --bg -n "$name" "$prompt" >/dev/null 2>&1 &)
+  (cd "$HOME/.dotfiles" && claude --dangerously-skip-permissions --bg --model haiku -n "$name" "$prompt" >/dev/null 2>&1 &)
 }
 
 cmd_plan() {
