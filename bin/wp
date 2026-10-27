@@ -714,6 +714,8 @@ def problems(rs):
     (a deprecated task warns twice). Most widespread first."""
     by = {}
     for r in rs:
+        if not r.repo:  # ADO leaves the name out when the repo is deleted: nothing to fix it in
+            continue
         for (kind, msg), ws in issues(r).items():
             if kind == "warning" and not BUILD_OUTPUT.search(msg):
                 by.setdefault(msg, []).append((r, ws))
@@ -831,7 +833,11 @@ def cmd_upkeep(a):
         new = [r for r in repos if not s or r not in s["tasks"]]
         print(f"{yellow('⚠')} {bold(title)}  " + dim(f"#{s['issue']}" if s else "ny Issue")
               + dim(f"  {len(repos)} repo{'s' if len(repos) > 1 else ''}, {len(new)} nye"))
-        if a.dry_run or not new:
+        if a.dry_run:
+            for repo in new:
+                print(dim(f"    + Task {repo}: " + ", ".join(r.pipeline for r, _ in repos[repo])))
+            continue
+        if not new:
             continue
         try:
             if not s:
