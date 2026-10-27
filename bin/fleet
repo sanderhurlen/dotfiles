@@ -13,7 +13,8 @@
 #                            first root) in a pane to the left;
 #                            autopilot: starts review/fix agents by itself, weekdays 07–17 (~/.config/fleet/config.toml),
 #                            and triages new Issues/Bugs assigned to me (`wi triage --save`; m → t to approve);
-#                            keeps the Mac from idle-sleeping while it runs (caffeinate -i)
+#                            keeps the Mac from idle-sleeping while it runs (caffeinate -i);
+#                            shows `wp upkeep`'s pipeline-warning proposals: nothing is created until I accept one
 #   fleet ls                 same list, printed once
 #   fleet go 8698            background agent on a work item: map → /wayfinder, else /implement
 #   fleet review 6966        background agent reviewing a PR: /review-pr → draft (`wr draft`)
@@ -524,6 +525,18 @@ def stop(o):
     return f"■ stoppet {o.name} ({o.sid})"
 
 
+class Proposal:
+    """A pipeline warning `wp upkeep` found and proposes an Issue, Tasks and agents for (wp.proposals())."""
+    def __init__(self, k, p):
+        self.id, self.p, self.key = k, p, f"upkeep-{k}"
+        self.title, self.repos = p["title"], list(p["repos"])
+        self.url = next((h["url"] for hs in p["repos"].values() for h in hs), None)
+
+
+def accept(x, agents=True):
+    return " · ".join(wp.accept(x.id, agents)) or "ingenting å opprette"
+
+
 class Snapshot:
     def __init__(self, items=(), prs=(), agents_=None, at=0.0, error="", mine_=(), old=None):
         self.old = old  # Old, or None before the first fetch
@@ -536,6 +549,7 @@ class Snapshot:
         self.cleaned = []  # result lines of what this refresh removed
         self.auto, self.autohead, self.news = {}, "", []  # autopilot: {key: chip}, header text, result lines
         self.merged = []  # Mine: my PRs that completed since the last snapshot
+        self.proposals = []  # Proposal: `wp upkeep`'s, waiting for me to accept or skip
 
 
 def snapshot(everyone, clean=False):
@@ -561,6 +575,7 @@ def snapshot(everyone, clean=False):
     for w in flat:
         w.prs = by_pr.get(w.id, [])
     s.orphans = orphans(raw, {x.key for x in flat + others + s.mine + s.groups})
+    s.proposals = [Proposal(k, p) for k, p in wp.proposals()]
     ts_ = trees()
     by_id = {}
     for t in ts_:
@@ -1724,6 +1739,17 @@ def menu(x, pilot=None):
             ("f", "rydd likevel (force)", lambda: remove(x, sessions(), force=True), False),
             ("v", "VS Code i worktreet", lambda: open_code(x.tree.main, x.tree.path), False),
             *([("o", "åpne work item", lambda: subprocess.run(["open", x.url]) and "", False)] if x.url else [])])
+    if isinstance(x, Proposal):
+        n, s_ = len(x.repos), "s" if len(x.repos) > 1 else ""
+        what = "Issue" if x.p["portal"] else f"{n} Task{s_} i #{x.p['issue']}" if x.p["issue"] else f"Issue + {n} Task{s_}"
+        agents_ = f"{n} agent{'er' if n > 1 else ''}"
+        return (f"⚠ {x.title[:50]}", [
+            *([] if x.p["portal"] else [("c", f"opprett {what} og start {agents_}", lambda: accept(x),
+                                         f"opprett {what} og start {agents_} for «{x.title[:40]}»?")]),
+            ("t", f"opprett {what}" + ("" if x.p["portal"] else ", uten agenter"), lambda: accept(x, False),
+             f"opprett {what} for «{x.title[:40]}»?"),
+            ("x", "avvis (foreslås ikke igjen)", lambda: wp.skip(x.id), False),
+            *([("o", "åpne run", lambda: subprocess.run(["open", x.url]) and "", False)] if x.url else [])])
     if isinstance(x, Orphan):
         return (f"{x.name} ({x.state})", [
             ("x", "fjern sesjonen (stop + rm)", lambda: end(x), False),
@@ -1946,6 +1972,13 @@ def lines(snap, everyone, open_=()):
                 shown.add(m.group.key)
                 out.append((bundle_row(m.group), m.group))
                 out += [(mine_row(snap, n, wmine, "  "), n) for n in m.group.prs]
+    if snap.proposals:
+        out.append(([], None))
+        out.append(([(f"Pipeline-varsler · forslag fra wp upkeep, ingenting opprettet ({len(snap.proposals)})", "bold")], None))
+        for x in snap.proposals:
+            to = f"#{x.p['issue']}" if x.p["issue"] else "ny Issue"
+            out.append(([("⚠ ", "yellow"), (x.title[:70], None), (f"  {to}", "dim"),
+                         (f"  {'portalen' if x.p['portal'] else ', '.join(x.repos)}", "cyan")], x))
     if snap.orphans:
         out.append(([], None))
         out.append(([(f"Foreldreløse agenter · elementet er borte fra lista ({len(snap.orphans)})", "bold")], None))
@@ -2028,6 +2061,10 @@ def write_state(snap, everyone, open_=(), cur=None, msg=""):
         "cleanup": [{"workItems": [i.id for i in c.items], "pr": c.tree.pr, "title": c.title, "worktree": c.tree.path,
                      "branch": c.tree.branch, "blockedBy": c.reasons, "mergedPr": (c.pr or {}).get("pullRequestId"),
                      "force": f"fleet clean --force {c.tree.path}"} for c in snap.cleanup],
+        "pipelineProposals": [{"key": x.id, "title": x.title, "issue": x.p["issue"], "portal": x.p["portal"],
+                               "repos": x.repos, "messages": x.p["messages"], "found": x.p["found"],
+                               "accept": f"wp upkeep --ok {x.id}", "acceptWithoutAgents": f"wp upkeep --ok {x.id} --no-agents",
+                               "skip": f"wp upkeep --skip {x.id}"} for x in snap.proposals],
         "cleanedThisRefresh": snap.cleaned, "cleanupLog": LOG,
         "autopilot": {"status": snap.autohead or None, "rows": {k: c for k, (c, _) in snap.auto.items()},
                       "config": CONFIG, "state": Pilot.PATH},
@@ -2345,7 +2382,7 @@ def tui(scr, a):
                 subprocess.run(["open", cur.url])
         elif k == ord("m"):
             pop = menu(cur, pilot)
-        elif isinstance(cur, (Cleanup, Orphan, Bundle)) and k in (10, 13, curses.KEY_ENTER, ord("v")):
+        elif isinstance(cur, (Cleanup, Orphan, Bundle, Proposal)) and k in (10, 13, curses.KEY_ENTER, ord("v")):
             pop = menu(cur)
         elif k in (10, 13, curses.KEY_ENTER):
             pop = start_menu(cur, s.agents)
@@ -2613,6 +2650,9 @@ GUIDE = """\
               min PR     f fix-agent · u auto-complete · c complete · x abandon ·
                          z demp/slå på autopilot · n kjør auto nå · o åpne
               agent      x fjern (stop + rm) · s stopp
+              pipeline-varsel  forslag fra `wp upkeep` (launchd kl 11) — ingenting er opprettet ennå:
+                         c opprett Issue + Task per repo og start agentene · t bare Issue + Tasks ·
+                         x avvis (foreslås ikke igjen) · o åpne run · enter viser valgene
             complete og abandon spør y/n først; rydding (x, f) gjør det med en gang. esc lukker.
   v         VS Code i itemets worktree (⎇ på linja). Kopierer .env* fra hovedtreet dit
             worktreet har mappa men ikke fila — eksisterende filer røres ikke.
