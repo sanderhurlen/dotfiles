@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # chores: launchd jobs — `chores sync` every day 07:00, `chores mise` Mondays 07:05,
-# `wp upkeep -A` (pipeline warnings → Issue, Task and fleet agent per repo) every day 13:00.
+# `wp upkeep -A` (pipeline warnings → Issue, Task and fleet agent per repo) every day 11:00.
 # A job missed while the Mac sleeps runs when it wakes.
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -44,4 +44,4 @@ job() { # name, StartCalendarInterval entries, program and args (default: chores
 
 job sync "<key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer>"
 job mise "<key>Weekday</key><integer>1</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>5</integer>"
-job pipelines "<key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer>" "$root/bin/wp" upkeep -A --notify
+job pipelines "<key>Hour</key><integer>11</integer><key>Minute</key><integer>0</integer>" "$root/bin/wp" upkeep -A --notify

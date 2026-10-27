@@ -15,7 +15,7 @@
 #   wp fix 23536             background Claude agent fixing the failed run (fleet's launcher)
 #   wp issues [23536]        warnings and errors in a run, or in each pipeline's last finished run, by message
 #   wp upkeep -A [--dry-run] pipeline warnings → a Teknisk forbedring Issue per problem, a Task per repo, and a
-#                            fleet agent per new Task that fixes it in a worktree and opens a PR (launchd: 13:00)
+#                            fleet agent per new Task that fixes it in a worktree and opens a PR (launchd: 11:00)
 #   wp open 23536            open run in browser
 #   wp -g                    grouped per pipeline, the last few runs of each
 #   wp help                  explained (Norwegian)
@@ -51,7 +51,7 @@ FORGET = datetime.timedelta(days=2)  # followed runs queued longer ago than this
 CACHE = os.path.expanduser("~/.cache/wp")
 FOLLOW = os.path.join(CACHE, "follow.json")
 UPKEEP = os.path.join(CACHE, "upkeep.json")  # {problem: {issue, messages, tasks: {repo: task}}}
-TAG = "Teknisk forbedring"
+TAGS = ("Teknisk forbedring", "Pipeline vedlikehold")
 
 
 def die(msg):
@@ -743,10 +743,24 @@ def affected(hits, esc):
     return [f"{esc(r.pipeline)} <a href=\"{r.url}\">{esc(r.number)}</a>: {esc(', '.join(ws))}" for r, ws in hits]
 
 
+_sprint = None
+
+
+def sprint():
+    """The default team's current iteration path (Visense\\Sprint 17); the project's root without one."""
+    global _sprint
+    if _sprint is None:
+        team = A().rest(f"projects/{urllib.parse.quote(A().project)}")["defaultTeam"]["name"]
+        cur = A().rest("work/teamsettings/iterations?$timeframe=current", project=f"{A().project}/{team}")["value"]
+        _sprint = cur[0]["path"] if cur else A().project
+    return _sprint
+
+
 def create(kind, title, body, parent=None, tags=()):
-    """New work item assigned to me; returns its id."""
+    """New work item assigned to me, in the current sprint; returns its id."""
     f = lambda k, v: {"op": "add", "path": f"/fields/{k}", "value": v}
-    ops = [f("System.Title", title), f("System.Description", body), f("System.AssignedTo", A().me())]
+    ops = [f("System.Title", title), f("System.Description", body), f("System.AssignedTo", A().me()),
+           f("System.IterationPath", sprint())]
     if tags:
         ops.append(f("System.Tags", "; ".join(tags)))
     if parent:
@@ -825,7 +839,7 @@ def cmd_upkeep(a):
                         + html_list(f"<code>{esc(m)}</code>" for m in msgs)
                         + "<p>Berørt, en Task per repo:</p>"
                         + html_list(f"<b>{esc(repo)}</b> — " + "; ".join(affected(h, esc)) for repo, h in repos.items()))
-                s = state[key] = {"issue": create("Issue", f"Pipeline: {title}", body, tags=[TAG]),
+                s = state[key] = {"issue": create("Issue", f"Pipeline: {title}", body, tags=TAGS),
                                   "messages": msgs, "tasks": {}}
                 save()
                 news.append(f"#{s['issue']} {title}")
@@ -868,10 +882,11 @@ GUIDE = """\
   wp issues [run]         varsler og feil i run-en, eller i siste ferdige run av hver pipeline (med filtre),
                           samlet per melding: hvilke pipelines og jobber som har den
   wp upkeep [filtre]      varslene om selve pipelinene (ikke kompilatorvarsler) → én Issue per problem
-                          (tag «{tag}»), en Task per repo, og en fleet-agent per ny Task som fikser i
+                          (tags {tags}, gjeldende sprint, tildelt meg), en Task per repo,
+                          og en fleet-agent per ny Task som fikser i
                           worktree fleet-<task> og lager PR. Husker hva som er laget (~/.cache/wp/upkeep.json);
                           nye repos får Task i samme Issue, ny Issue først når den gamle er lukket.
-                          --dry-run: vis bare hva den ville gjort. launchd kjører `wp upkeep -A --notify` kl 13
+                          --dry-run: vis bare hva den ville gjort. launchd kjører `wp upkeep -A --notify` kl 11
   wp open <run>           åpne i nettleser
   wp -g                   gruppert per pipeline: de {group} siste runs i hver
   wp help [kommando]      denne teksten, eller flaggene til én kommando
@@ -932,7 +947,7 @@ def cmd_help(a, subs):
     repo = current_repo()
     txt = GUIDE.format(b="\033[1m" if on else "", r="\033[0m" if on else "", d="\033[2m" if on else "",
                        where=A().where, repo=f" {dim(f'(repo: {repo})')}" if repo else "",
-                       refresh=REFRESH, count=COUNT, poll=POLL, group=GROUP, tag=TAG)
+                       refresh=REFRESH, count=COUNT, poll=POLL, group=GROUP, tags=" + ".join(f"«{t}»" for t in TAGS))
     if on and txt.count("\n") > os.get_terminal_size().lines:
         subprocess.run(["less", "-RFX"], input=txt, text=True)
     else:
