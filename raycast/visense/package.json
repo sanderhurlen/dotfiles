@@ -34,6 +34,18 @@
       "mode": "view"
     },
     {
+      "name": "tidskonto",
+      "title": "Tidskonto",
+      "description": "Saldoen: timer mot normtid per dag, og dager som mangler start eller slutt",
+      "mode": "view"
+    },
+    {
+      "name": "fri",
+      "title": "Fri",
+      "description": "Ferie, syk eller avspasering for én dag eller flere",
+      "mode": "view"
+    },
+    {
       "name": "wi-new",
       "title": "Nytt Work Item",
       "description": "wi new med type, parent, tags og beskrivelse",

@@ -2,7 +2,8 @@
 #
 # workday — the day's end and start, as notes Claude writes from what happened.
 #
-#   workday end [-f <fokus>] [-n <neste>]   stop fleet and tower, prune finished agents and
+#   workday end [-t HH:MM] [-f <fokus>] [-n <neste>]
+#                                           stop fleet and tower, prune finished agents and
 #                                           worktrees, then write today's note: my own lines
 #                                           (what I focused on, where I stopped) and a summary
 #                                           of today's commits, unfinished worktrees and agents
@@ -10,15 +11,28 @@
 #                                           (fleet ls) and my teams' standup, through Claude;
 #                                           written once a day, --fresh writes it again
 #   workday last                            the last note
-#   workday start                           log that the day starts (end logs its own end) and
-#                                           start a background agent (workday-jobber-<date>,
-#                                           once a day) that sums up how my launchd jobs went
+#   workday start [HH:MM]                   log that the day starts, now or at HH:MM (end logs
+#                                           its own end, -t the same way), and start a
+#                                           background agent (workday-jobber-<date>, once a
+#                                           day) that sums up how my launchd jobs went
 #   workday times                           start, end and hours per day
+#   workday logg <dato> <HH:MM> [<HH:MM>]   log start (and end) of another day, to fill in or
+#                                           correct one
+#   workday fri <dato>[..<dato>] [type]     a day off: ferie (default), syk, avspasering, or
+#                                           ingen to take it back
+#   workday saldo [--json]                  the time account: hours worked minus the norm,
+#                                           per day and in all
 #
 # Notes live in ~/.local/state/workday: <date>.md (end) and plan-<date>.md (plan), kept 7
 # days. Each is written whole at the end, so a reader can wait for the file to change. The Raycast
 # extension (raycast/visense) runs end and plan detached and shows the files. times.tsv (time,
-# start|end) is kept for good; the end note shows the day's hours from it.
+# start|end, or a day off at 00:00) is kept for good; the end note shows the day's hours and the
+# saldo from it. A day's last start, end and day off count, so logging again corrects it.
+#
+# Saldo (the saldo_* settings below): from saldo_fra with balance 0, each weekday's norm is
+# saldo_norm minutes; holidays, ferie and syk have none, avspasering keeps it. A day longer
+# than 5:30 has saldo_lunsj minutes of lunch taken off. Weekdays without start and end (today
+# aside) are flagged, not counted.
 
 # Raycast runs with a bare PATH; claude lives in ~/.local/bin, az/uv in Homebrew.
 export PATH="$HOME/.local/bin:$HOME/.dotfiles/bin:/opt/homebrew/bin:$PATH"
@@ -36,15 +50,145 @@ die() { echo "workday: $*" >&2; exit 1; }
 last() { ls "$dir"/????-??-??.md 2>/dev/null | tail -1; }
 
 times="$dir/times.tsv"
-stamp() { printf '%s\t%s\n' "$(date +%FT%T)" "$1" >>"$times"; }
+saldo_fra=2026-10-27
+saldo_norm=480
+saldo_lunsj=30
 
-# Per day: the first start, the last end and the hours between.
+hhmm() { [[ $1 =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "ugyldig tid: $1 (HH:MM)"; }
+dato() { [[ $(date -j -f %F "$1" +%F 2>/dev/null) == "$1" ]] || die "ugyldig dato: $1 (ÅÅÅÅ-MM-DD)"; }
+
+# stamp start|end [HH:MM] [dato]: now, or at HH:MM, today or on dato.
+stamp() {
+  local t=$(date +%T)
+  if [[ -n $2 ]]; then
+    hhmm "$2"
+    t=$2:00
+  fi
+  printf '%sT%s\t%s\n' "${3:-$day}" "$t" "$1" >>"$times"
+}
+
+cmd_logg() {
+  [[ -n $1 && -n $2 ]] || die "bruk: workday logg <dato> <HH:MM> [<HH:MM>]"
+  dato "$1"
+  hhmm "$2"
+  [[ -z $3 ]] || hhmm "$3"
+  stamp start "$2" "$1"
+  [[ -z $3 ]] || stamp end "$3" "$1"
+}
+
+cmd_fri() {
+  local fra=${1%%..*} til=${1##*..} type=${2:-ferie}
+  [[ -n $1 ]] || die "bruk: workday fri <dato>[..<dato>] [ferie|syk|avspasering|ingen]"
+  [[ $type =~ ^(ferie|syk|avspasering|ingen)$ ]] || die "ukjent type: $type (ferie, syk, avspasering, ingen)"
+  dato "$fra"
+  dato "$til"
+  [[ $til < $fra ]] && die "$til er før $fra"
+  local d=$fra
+  while [[ ! $d > $til ]]; do
+    printf '%sT00:00:00\t%s\n' "$d" "$type" >>"$times"
+    d=$(date -j -v+1d -f %F "$d" +%F)
+  done
+}
+
+cmd_saldo() {
+  [[ -s $times ]] || : >"$times"
+  python3 - "$times" "$saldo_fra" "$saldo_norm" "$saldo_lunsj" "$1" <<'EOF'
+import datetime as dt, json, sys
+
+path, fra, norm, lunsj, fmt = sys.argv[1], dt.date.fromisoformat(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+DAYS = ["man", "tir", "ons", "tor", "fre", "lør", "søn"]
+
+def easter(y):  # anonymous Gregorian algorithm
+    a, b, c = y % 19, y // 100, y % 100
+    d, e = b // 4, b % 4
+    g = (8 * b + 13) // 25
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 19 * l) // 433
+    n = (h + l - 7 * m + 90) // 25
+    return dt.date(y, n, (h + l - 7 * m + 33 * n + 19) % 32)
+
+def holidays(y):
+    e = easter(y)
+    out = {dt.date(y, 1, 1): "nyttårsdag", dt.date(y, 5, 1): "1. mai", dt.date(y, 5, 17): "17. mai",
+           dt.date(y, 12, 25): "1. juledag", dt.date(y, 12, 26): "2. juledag"}
+    for off, name in [(-3, "skjærtorsdag"), (-2, "langfredag"), (0, "1. påskedag"), (1, "2. påskedag"),
+                      (39, "Kristi himmelfartsdag"), (49, "1. pinsedag"), (50, "2. pinsedag")]:
+        out[e + dt.timedelta(days=off)] = name
+    return out
+
+start, end, off = {}, {}, {}
+for line in open(path, encoding="utf-8"):
+    ts, _, kind = line.rstrip("\n").partition("\t")
+    d, t = ts[:10], ts[11:16]
+    if kind == "start":
+        start[d] = t
+    elif kind == "end":
+        end[d] = t
+    elif kind:
+        off[d] = None if kind == "ingen" else kind
+
+def mins(t):
+    return int(t[:2]) * 60 + int(t[3:])
+
+today, days, saldo, hol = dt.date.today(), [], 0, {}
+d = fra
+while d <= today:
+    hol.setdefault(d.year, holidays(d.year))
+    k = d.isoformat()
+    s, e, o, h = start.get(k), end.get(k), off.get(k), hol[d.year].get(d)
+    norm_d = norm if d.weekday() < 5 and not h and o not in ("ferie", "syk") else 0
+    worked = None
+    if s and e:
+        span = mins(e) - mins(s)
+        worked = span - lunsj if span > 330 else span
+    if worked is not None:
+        status = "ok"
+    elif d == today:
+        status = "pågår" if s else None
+    elif norm_d and o != "avspasering":
+        status = "mangler"
+    else:
+        status = "ok" if norm_d or o or h else None  # avspasering, or a day off on a weekday
+        if status and not norm_d and d.weekday() >= 5:
+            status = None
+    if status:
+        diff = (worked or 0) - norm_d if status == "ok" else None
+        saldo += diff or 0
+        days.append({"date": k, "day": DAYS[d.weekday()], "start": s, "end": e, "worked": worked,
+                     "norm": norm_d, "diff": diff, "off": o, "holiday": h, "status": status})
+    d += dt.timedelta(days=1)
+
+def hm(m, sign=False):
+    return ("-" if m < 0 else "+" if sign else "") + f"{abs(m) // 60}:{abs(m) % 60:02}"
+
+if fmt == "--json":
+    print(json.dumps({"saldo": saldo, "text": hm(saldo, True), "fra": fra.isoformat(), "norm": norm,
+                      "lunsj": lunsj, "days": days[::-1]}, ensure_ascii=False))
+    sys.exit()
+print(f"Saldo {hm(saldo, True)}  (fra {fra}, {hm(norm)} per dag, {lunsj} min lunsj over 5:30)")
+for x in days[::-1]:
+    tider = f"{x['start'] or '?':>5} – {x['end'] or '':<5}"
+    note = x["holiday"] or x["off"] or ""
+    if x["status"] == "mangler":
+        note = "⚠ mangler start/slutt: workday logg " + x["date"] + " HH:MM HH:MM"
+    elif x["status"] == "pågår":
+        note = "pågår"
+    worked = hm(x["worked"]) if x["worked"] is not None else ""
+    diff = hm(x["diff"], True) if x["diff"] is not None else ""
+    print(f"{x['date']} {x['day']}  {tider}  {worked:>5}  {diff:>6}  {note}".rstrip())
+EOF
+}
+
+# Per day: the last start, the last end and the hours between.
 cmd_times() {
   [[ -s $times ]] || die "ingen tider ennå"
   awk -F'\t' '
+    $2 != "start" && $2 != "end" { next }
     { d = substr($1, 1, 10); t = substr($1, 12, 5) }
     !(d in seen) { seen[d]; order[++n] = d }
-    $2 == "start" && !(d in s) { s[d] = t }
+    $2 == "start" { s[d] = t }
     $2 == "end" { e[d] = t }
     function min(t) { return substr(t, 1, 2) * 60 + substr(t, 4, 2) }
     END {
@@ -86,15 +230,16 @@ facts() {
 }
 
 cmd_end() {
-  local fokus= neste=
-  while getopts f:n: o; do
+  local fokus= neste= tid=
+  while getopts t:f:n: o; do
     case $o in
+      t) tid=$OPTARG ;;
       f) fokus=$OPTARG ;;
       n) neste=$OPTARG ;;
-      *) die "bruk: workday end [-f <fokus>] [-n <neste>]" ;;
+      *) die "bruk: workday end [-t HH:MM] [-f <fokus>] [-n <neste>]" ;;
     esac
   done
-  stamp end
+  stamp end "$tid"
 
   # fleet's caffeinate is tied to its pid (-w), so it ends with fleet.
   pkill -TERM -f "$HOME/.dotfiles/bin/fleet"
@@ -120,7 +265,9 @@ $data" 2>/dev/null) || summary=$data
   {
     echo "# $day"
     echo
-    cmd_times | awk -v d="$day" '$1 == d { sub(/^[^ ]+ +/, ""); print "Arbeidstid: " $0; print "" }'
+    cmd_times | awk -v d="$day" '$1 == d { sub(/^[^ ]+ +/, ""); print "Arbeidstid: " $0 }'
+    cmd_saldo | head -1
+    echo
     [[ -n $mine ]] && printf '## Mine notater\n\n%s' "$mine"
     echo "## Oppsummering"
     echo
@@ -182,8 +329,11 @@ Ingen innledning, ingen overskrift på toppnivå, maks ~25 linjer."
 case $1 in
   end) shift; cmd_end "$@" ;;
   plan) shift; cmd_plan "$@" ;;
-  start) stamp start; cmd_jobs ;;
+  start) stamp start "$2"; cmd_jobs ;;
   times) cmd_times ;;
+  logg) shift; cmd_logg "$@" ;;
+  fri) shift; cmd_fri "$@" ;;
+  saldo) cmd_saldo "$2" ;;
   last) note=$(last); [[ -n $note ]] && cat "$note" || die "ingen notater ennå" ;;
-  *) sed -n '3,21s/^# \{0,1\}//p' "$0"; exit 1 ;;
+  *) awk 'NR > 2 && !/^#/ { exit } NR > 2 { sub(/^# ?/, ""); print }' "$0"; exit 1 ;;
 esac

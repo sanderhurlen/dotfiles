@@ -1,18 +1,19 @@
 // Start of the day: how to attack it (`workday plan`: yesterday's note, fleet's list and the
-// standup, through Claude; written once a day) above yesterday's note. ↵ starts the day:
+// standup, through Claude; written once a day) above yesterday's note. ↵ asks for the start
+// time (today's logged start, else now) and starts the day:
 // Ghostty with fleet in tab 1 (splits `claude agents` to its left by itself) and tower in
 // tab 2, logging in only when the session no longer works, then Outlook and Teams. Whatever
 // already runs is left alone. `workday start` logs the time and starts a background agent
-// that sums up my launchd jobs; End Workday logs the end.
+// that sums up my launchd jobs; End Workday logs the end. The time account's balance shows on top.
 
-import { Action, ActionPanel, Detail, Icon, closeMainWindow, open } from "@raycast/api";
+import { Action, ActionPanel, Detail, Form, Icon, Toast, closeMainWindow, open, showToast, useNavigation } from "@raycast/api";
 import { runAppleScript } from "@raycast/utils";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { detach } from "./state";
-import { DIR, LOG, lastNote, read, today, useNote } from "./workday";
+import { DIR, HHMM, LOG, lastNote, logged, now, read, saldo, today, useNote } from "./workday";
 
 const HOME = homedir();
 
@@ -48,9 +49,9 @@ on run argv
   end tell
 end run`;
 
-async function startDay() {
+async function startDay(tid: string) {
   await closeMainWindow();
-  execFileSync(join(HOME, ".dotfiles/bin/workday"), ["start"]);
+  execFileSync(join(HOME, ".dotfiles/bin/workday"), ["start", tid]);
   const cmds: string[] = [];
   if (!running("fleet")) cmds.push("az account get-access-token -o none 2>/dev/null || az login; fleet");
   if (!running("tower")) cmds.push("tower login --ved-behov && tower");
@@ -59,7 +60,29 @@ async function startDay() {
   await open("/Applications/Microsoft Teams.app");
 }
 
+function StartTime() {
+  async function submit(v: { tid: string }) {
+    if (!HHMM.test(v.tid)) {
+      await showToast({ style: Toast.Style.Failure, title: "Starttid må være HH:MM" });
+      return;
+    }
+    await startDay(v.tid);
+  }
+  return (
+    <Form
+      actions={
+        <ActionPanel>
+          <Action.SubmitForm title="Start dagen" icon={Icon.Play} onSubmit={submit} />
+        </ActionPanel>
+      }
+    >
+      <Form.TextField id="tid" title="Starttid" defaultValue={logged("start") ?? now()} info="HH:MM" autoFocus />
+    </Form>
+  );
+}
+
 export default function Command() {
+  const { push } = useNavigation();
   const file = join(DIR, `plan-${today()}.md`);
   // Written once a day; started here when missing, so it is under way while I read yesterday.
   const [since, setSince] = useState(() => {
@@ -73,7 +96,13 @@ export default function Command() {
   const plan =
     text ??
     (failed ? `**workday plan feilet**\n\n\`\`\`\n${read(LOG) ?? ""}\n\`\`\`` : "_Claude leser fleet, standup og gårsdagens notat …_");
-  const markdown = `# Forslag til i dag\n\n${plan}\n\n---\n\n${note ? read(note) : "_Ingen notat fra forrige arbeidsdag._"}`;
+  const [konto, setKonto] = useState<string>();
+  useEffect(() => {
+    saldo()
+      .then((s) => setKonto(s.text))
+      .catch(() => undefined);
+  }, []);
+  const markdown = `# Forslag til i dag\n\n${konto ? `_Tidskonto ${konto}_\n\n` : ""}${plan}\n\n---\n\n${note ? read(note) : "_Ingen notat fra forrige arbeidsdag._"}`;
 
   return (
     <Detail
@@ -81,7 +110,7 @@ export default function Command() {
       markdown={markdown}
       actions={
         <ActionPanel>
-          <Action title="Start dagen" icon={Icon.Play} onAction={startDay} />
+          <Action title="Start dagen" icon={Icon.Play} onAction={() => push(<StartTime />)} />
           {text && <Action.CopyToClipboard title="Kopier forslaget" content={text} />}
           <Action
             title="Lag forslaget på nytt"

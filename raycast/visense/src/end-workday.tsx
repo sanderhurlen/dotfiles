@@ -1,11 +1,13 @@
-// End of the day: a few lines on what I focused on and where I stopped, then `workday end`
+// End of the day: the end time (now; a draft keeps the text, not the time), a few lines on
+// what I focused on and where I stopped, then `workday end`
 // stops fleet and tower, prunes, and has Claude add a summary of today's commits, worktrees
 // and agents. The note shows here; Start Workday builds tomorrow's plan from it.
 
-import { Action, ActionPanel, Detail, Form, Icon, useNavigation } from "@raycast/api";
+import { Action, ActionPanel, Detail, Form, Icon, Toast, showToast, useNavigation } from "@raycast/api";
 import { runAppleScript } from "@raycast/utils";
 import { join } from "node:path";
-import { DIR, LOG, read, today, useNote } from "./workday";
+import { useState } from "react";
+import { DIR, HHMM, LOG, now, read, today, useNote } from "./workday";
 import { detach } from "./state";
 
 interface Values {
@@ -34,10 +36,15 @@ function Note({ since }: { since: number }) {
 
 export default function Command() {
   const { push } = useNavigation();
+  const [tid, setTid] = useState(now);
 
   async function submit(v: Values) {
+    if (!HHMM.test(tid)) {
+      await showToast({ style: Toast.Style.Failure, title: "Sluttid må være HH:MM" });
+      return;
+    }
     const since = Date.now();
-    const args = ["end"];
+    const args = ["end", "-t", tid];
     if (v.fokus.trim()) args.push("-f", v.fokus.trim());
     if (v.neste.trim()) args.push("-n", v.neste.trim());
     detach("workday", args, LOG);
@@ -55,6 +62,7 @@ export default function Command() {
       }
     >
       <Form.Description text="Stopper fleet og tower, rydder ferdige agenter og worktrees, lukker Outlook og Teams." />
+      <Form.TextField id="tid" title="Sluttid" value={tid} onChange={setTid} info="HH:MM" />
       <Form.TextArea id="fokus" title="Fokus i dag" placeholder="Hva jeg har fokusert på og holdt på med" autoFocus />
       <Form.TextArea id="neste" title="Hvor jeg slapp" placeholder="Halvferdig, neste steg, hva jeg venter på" />
     </Form>
