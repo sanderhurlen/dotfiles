@@ -1,27 +1,34 @@
 #!/bin/sh
 #
-# chores: launchd jobs — `chores sync` every day 07:00, `chores mise` Mondays 07:05.
+# chores: launchd jobs — `chores sync` every day 07:00, `chores mise` Mondays 07:05,
+# `wp upkeep -A` (pipeline warnings → Issue, Task and fleet agent per repo) every day 11:00.
 # A job missed while the Mac sleeps runs when it wakes.
 
-bin="$(cd "$(dirname "$0")/.." && pwd)/bin/chores"
+root="$(cd "$(dirname "$0")/.." && pwd)"
 agents="$HOME/Library/LaunchAgents"
 log="$HOME/Library/Logs/chores.log"
 mkdir -p "$agents"
 
-job() { # name, StartCalendarInterval entries
+job() { # name, StartCalendarInterval entries, program and args (default: chores <name> --notify)
   label="com.sanderhurlen.chores-$1"
   plist="$agents/$label.plist"
+  name=$1 when=$2
+  shift 2
+  [ $# -gt 0 ] || set -- "$root/bin/chores" "$name" --notify
+  args=""
+  for a in "$@"; do args="$args<string>$a</string>"; done
+  # ~/.local/bin: claude, for the agents wp upkeep starts
   new="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
 <plist version=\"1.0\">
 <dict>
   <key>Label</key><string>$label</string>
   <key>ProgramArguments</key>
-  <array><string>$bin</string><string>$1</string><string>--notify</string></array>
+  <array>$args</array>
   <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
+  <dict><key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
   <key>StartCalendarInterval</key>
-  <dict>$2</dict>
+  <dict>$when</dict>
   <key>StandardOutPath</key><string>$log</string>
   <key>StandardErrorPath</key><string>$log</string>
 </dict>
@@ -37,3 +44,4 @@ job() { # name, StartCalendarInterval entries
 
 job sync "<key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer>"
 job mise "<key>Weekday</key><integer>1</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>5</integer>"
+job pipelines "<key>Hour</key><integer>11</integer><key>Minute</key><integer>0</integer>" "$root/bin/wp" upkeep -A --notify
