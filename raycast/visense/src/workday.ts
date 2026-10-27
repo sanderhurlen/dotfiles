@@ -49,6 +49,7 @@ export interface Saldo {
   saldo: number;
   text: string; // +1:30
   fra: string;
+  inn: number; // the balance at fra
   norm: number;
   lunsj: number;
   days: Day[]; // newest first
@@ -57,6 +58,41 @@ export interface Saldo {
 /** `workday saldo --json`: the time account, per day and in all. */
 export async function saldo(): Promise<Saldo> {
   return JSON.parse(await run("workday", ["saldo", "--json"]));
+}
+
+export interface Hours {
+  jobbet: string;
+  norm: string;
+  diff: string; // +1:30
+}
+
+export interface Left {
+  dager: number;
+  timer: string;
+}
+
+export interface Off {
+  fra: string;
+  til: string;
+  type: string; // ferie | syk | avspasering
+  dager: number; // workdays in it
+}
+
+export interface Oversikt {
+  saldo: string;
+  "i dag": string;
+  igjen: { uke: Left; maned: Left; ar: Left };
+  ferie: { rett: number; brukt: number; planlagt: number; igjen: number };
+  syk: number;
+  avspasering: { brukt: number; planlagt: number };
+  timer: { uke: Hours; maned: Hours; ar: Hours };
+  "neste helligdag": { date: string; day: string; name: string } | null;
+  fri: Off[];
+}
+
+/** `workday oversikt --json`: the year around the account. */
+export async function oversikt(): Promise<Oversikt> {
+  return JSON.parse(await run("workday", ["oversikt", "--json"]));
 }
 
 /** Minutes as 8:00, or +1:30 / -0:45 with sign. */

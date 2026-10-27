@@ -22,6 +22,9 @@
 #                                           ingen to take it back
 #   workday saldo [--json]                  the time account: hours worked minus the norm,
 #                                           per day and in all
+#   workday oversikt [--json]               the year around it: ferie used, planned and left,
+#                                           syk, workdays left (week, month, year), hours
+#                                           against the norm, the next holiday, days off
 #
 # Notes live in iCloud, Documents/visense/workday: <date>.md (end, kept for good: the log of my
 # work) and plan-<date>.md (plan, kept 7 days). Each is written whole at the end, so a reader can wait for the file to change. The Raycast
@@ -29,10 +32,11 @@
 # start|end, or a day off at 00:00) is kept for good; the end note shows the day's hours and the
 # saldo from it. A day's last start, end and day off count, so logging again corrects it.
 #
-# Saldo (the saldo_* settings below): from saldo_fra with balance 0, each weekday's norm is
-# saldo_norm minutes; holidays, ferie and syk have none, avspasering keeps it. A day longer
-# than 5:30 has saldo_lunsj minutes of lunch taken off. Weekdays without start and end (today
-# aside) are flagged, not counted.
+# Saldo, set per year in ~/.config/workday/config.toml: from [saldo] fra with balance inn,
+# each weekday's norm; holidays, ferie and syk have none, avspasering keeps it. A day longer
+# than 5:30 has lunsj minutes taken off. Weekdays without start and end (today aside) are
+# flagged, not counted. Ferie: ferie days a year, of the weekdays that aren't holidays;
+# ferie_brukt_for adds the ones taken before they were logged here.
 
 # Raycast runs with a bare PATH; claude lives in ~/.local/bin, az/uv in Homebrew.
 export PATH="$HOME/.local/bin:$HOME/.dotfiles/bin:/opt/homebrew/bin:$PATH"
@@ -50,9 +54,7 @@ die() { echo "workday: $*" >&2; exit 1; }
 last() { ls "$dir"/????-??-??.md 2>/dev/null | tail -1; }
 
 times="$dir/times.tsv"
-saldo_fra=2026-10-27
-saldo_norm=480
-saldo_lunsj=30
+config="${WORKDAY_CONFIG:-$HOME/.config/workday/config.toml}"  # workday/config.toml
 
 hhmm() { [[ $1 =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "ugyldig tid: $1 (HH:MM)"; }
 dato() { [[ $(date -j -f %F "$1" +%F 2>/dev/null) == "$1" ]] || die "ugyldig dato: $1 (ÅÅÅÅ-MM-DD)"; }
@@ -90,13 +92,43 @@ cmd_fri() {
   done
 }
 
-cmd_saldo() {
+# konto saldo|oversikt [--json]: the time account (saldo) or the year around it (oversikt).
+konto() {
   [[ -s $times ]] || : >"$times"
-  python3 - "$times" "$saldo_fra" "$saldo_norm" "$saldo_lunsj" "$1" <<'EOF'
-import datetime as dt, json, sys
+  python3 - "$times" "$config" "$@" <<'EOF'
+import datetime as dt, json, sys, tomllib
 
-path, fra, norm, lunsj, fmt = sys.argv[1], dt.date.fromisoformat(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+path, config, mode = sys.argv[1:4]
+as_json = sys.argv[4:] == ["--json"]
 DAYS = ["man", "tir", "ons", "tor", "fre", "lør", "søn"]
+ONE = dt.timedelta(days=1)
+
+def mins(t):
+    return int(t[:2]) * 60 + int(t[3:])
+
+def signed_mins(t):
+    return -mins(t.lstrip("+-").zfill(5)) if t.startswith("-") else mins(t.lstrip("+-").zfill(5))
+
+try:
+    with open(config, "rb") as f:
+        CFG = tomllib.load(f)
+except FileNotFoundError:
+    CFG = {}
+except tomllib.TOMLDecodeError as e:
+    sys.exit(f"workday: {config}: {e}")
+fra = CFG.get("saldo", {}).get("fra", dt.date.today())
+inn = signed_mins(CFG.get("saldo", {}).get("inn", "+0:00"))
+YEARS = sorted(int(k) for k in CFG if k.isdigit())
+DEFAULT = {"norm": "8:00", "lunsj": 30, "ferie": 25}
+
+def year(y):
+    """The year's settings: its own table over the years' before it, over the defaults."""
+    out = dict(DEFAULT)
+    for k in (k for k in YEARS if k <= y):
+        out.update({key: v for key, v in CFG[str(k)].items() if key != "ferie_brukt_for"})
+    out["ferie_brukt_for"] = CFG.get(str(y), {}).get("ferie_brukt_for", 0)
+    out["norm"] = mins(out["norm"].zfill(5))
+    return out
 
 def easter(y):  # anonymous Gregorian algorithm
     a, b, c = y % 19, y // 100, y % 100
@@ -109,14 +141,16 @@ def easter(y):  # anonymous Gregorian algorithm
     n = (h + l - 7 * m + 90) // 25
     return dt.date(y, n, (h + l - 7 * m + 33 * n + 19) % 32)
 
-def holidays(y):
-    e = easter(y)
-    out = {dt.date(y, 1, 1): "nyttårsdag", dt.date(y, 5, 1): "1. mai", dt.date(y, 5, 17): "17. mai",
-           dt.date(y, 12, 25): "1. juledag", dt.date(y, 12, 26): "2. juledag"}
-    for off, name in [(-3, "skjærtorsdag"), (-2, "langfredag"), (0, "1. påskedag"), (1, "2. påskedag"),
-                      (39, "Kristi himmelfartsdag"), (49, "1. pinsedag"), (50, "2. pinsedag")]:
-        out[e + dt.timedelta(days=off)] = name
-    return out
+HOL = {}
+def holiday(d):
+    if d.year not in HOL:
+        y, e = d.year, easter(d.year)
+        HOL[y] = {dt.date(y, 1, 1): "nyttårsdag", dt.date(y, 5, 1): "1. mai", dt.date(y, 5, 17): "17. mai",
+                  dt.date(y, 12, 25): "1. juledag", dt.date(y, 12, 26): "2. juledag"}
+        for off, name in [(-3, "skjærtorsdag"), (-2, "langfredag"), (0, "1. påskedag"), (1, "2. påskedag"),
+                          (39, "Kristi himmelfartsdag"), (49, "1. pinsedag"), (50, "2. pinsedag")]:
+            HOL[y][e + dt.timedelta(days=off)] = name
+    return HOL[d.year].get(d)
 
 start, end, off = {}, {}, {}
 for line in open(path, encoding="utf-8"):
@@ -129,20 +163,23 @@ for line in open(path, encoding="utf-8"):
     elif kind:
         off[d] = None if kind == "ingen" else kind
 
-def mins(t):
-    return int(t[:2]) * 60 + int(t[3:])
+def hm(m, sign=False):
+    return ("-" if m < 0 else "+" if sign else "") + f"{abs(m) // 60}:{abs(m) % 60:02}"
 
-today, days, saldo, hol = dt.date.today(), [], 0, {}
-d = fra
-while d <= today:
-    hol.setdefault(d.year, holidays(d.year))
+def workday(d):
+    """A weekday that isn't a holiday: one that has a norm unless I'm off."""
+    return d.weekday() < 5 and not holiday(d)
+
+def day(d, today):
+    """One day of the account, or None when there is nothing to show (a weekend without work)."""
     k = d.isoformat()
-    s, e, o, h = start.get(k), end.get(k), off.get(k), hol[d.year].get(d)
-    norm_d = norm if d.weekday() < 5 and not h and o not in ("ferie", "syk") else 0
+    s, e, o, h = start.get(k), end.get(k), off.get(k), holiday(d)
+    c = year(d.year)
+    norm_d = c["norm"] if workday(d) and o not in ("ferie", "syk") else 0
     worked = None
     if s and e:
         span = mins(e) - mins(s)
-        worked = span - lunsj if span > 330 else span
+        worked = span - c["lunsj"] if span > 330 else span
     if worked is not None:
         status = "ok"
     elif d == today:
@@ -150,34 +187,107 @@ while d <= today:
     elif norm_d and o != "avspasering":
         status = "mangler"
     else:
-        status = "ok" if norm_d or o or h else None  # avspasering, or a day off on a weekday
-        if status and not norm_d and d.weekday() >= 5:
-            status = None
-    if status:
-        diff = (worked or 0) - norm_d if status == "ok" else None
-        saldo += diff or 0
-        days.append({"date": k, "day": DAYS[d.weekday()], "start": s, "end": e, "worked": worked,
-                     "norm": norm_d, "diff": diff, "off": o, "holiday": h, "status": status})
-    d += dt.timedelta(days=1)
+        status = "ok" if d.weekday() < 5 and (norm_d or o or h) else None
+    if not status:
+        return None
+    return {"date": k, "day": DAYS[d.weekday()], "start": s, "end": e, "worked": worked, "norm": norm_d,
+            "diff": (worked or 0) - norm_d if status == "ok" else None, "off": o, "holiday": h, "status": status}
 
-def hm(m, sign=False):
-    return ("-" if m < 0 else "+" if sign else "") + f"{abs(m) // 60}:{abs(m) % 60:02}"
+today = dt.date.today()
+days, d = [], fra
+while d <= today:
+    if x := day(d, today):
+        days.append(x)
+    d += ONE
+saldo = inn + sum(x["diff"] or 0 for x in days)
+now = year(today.year)
 
-if fmt == "--json":
-    print(json.dumps({"saldo": saldo, "text": hm(saldo, True), "fra": fra.isoformat(), "norm": norm,
-                      "lunsj": lunsj, "days": days[::-1]}, ensure_ascii=False))
-    sys.exit()
-print(f"Saldo {hm(saldo, True)}  (fra {fra}, {hm(norm)} per dag, {lunsj} min lunsj over 5:30)")
-for x in days[::-1]:
-    tider = f"{x['start'] or '?':>5} – {x['end'] or '':<5}"
-    note = x["holiday"] or x["off"] or ""
-    if x["status"] == "mangler":
-        note = "⚠ mangler start/slutt: workday logg " + x["date"] + " HH:MM HH:MM"
-    elif x["status"] == "pågår":
-        note = "pågår"
-    worked = hm(x["worked"]) if x["worked"] is not None else ""
-    diff = hm(x["diff"], True) if x["diff"] is not None else ""
-    print(f"{x['date']} {x['day']}  {tider}  {worked:>5}  {diff:>6}  {note}".rstrip())
+def account():
+    return {"saldo": saldo, "text": hm(saldo, True), "fra": fra.isoformat(), "inn": inn, "norm": now["norm"],
+            "lunsj": now["lunsj"], "days": days[::-1]}
+
+def left(a, b):
+    """Workdays from a through b that I'm not off, and today counts until it has ended."""
+    n, d = 0, a
+    while d <= b:
+        if workday(d) and not off.get(d.isoformat()) and not (d == today and end.get(d.isoformat())):
+            n += 1
+        d += ONE
+    return {"dager": n, "timer": hm(n * now["norm"])}
+
+def span(a, b):
+    """Hours worked against the norm over the account's days from a through b."""
+    xs = [x for x in days if a.isoformat() <= x["date"] <= b.isoformat() and x["status"] == "ok"]
+    w, n = sum(x["worked"] or 0 for x in xs), sum(x["norm"] for x in xs)
+    return {"jobbet": hm(w), "norm": hm(n), "diff": hm(w - n, True)}
+
+def overview():
+    y0, y1 = dt.date(today.year, 1, 1), dt.date(today.year, 12, 31)
+    m1 = (today.replace(day=28) + dt.timedelta(days=4)).replace(day=1) - ONE
+    # the year's days off: only workdays count, a weekend inside a ferie is free anyway
+    counts = {}
+    for k, o in off.items():
+        d = dt.date.fromisoformat(k)
+        if o and d.year == today.year and workday(d):
+            counts.setdefault(o, [0, 0])[d > today] += 1
+    brukt, plan = counts.get("ferie", [0, 0])
+    brukt += now["ferie_brukt_for"]
+    # days off as ranges: consecutive dates of one type, from this year on
+    fri, prev = [], None
+    for k in sorted(k for k, o in off.items() if o and k >= y0.isoformat()):
+        d, o = dt.date.fromisoformat(k), off[k]
+        if fri and fri[-1]["type"] == o and prev == d - ONE:
+            fri[-1]["til"] = k
+        else:
+            fri.append({"fra": k, "til": k, "type": o, "dager": 0})
+        fri[-1]["dager"] += workday(d)
+        prev = d
+    fri = [r for r in fri if r["dager"]]
+    nxt = next(((d, holiday(d)) for d in (today + ONE * i for i in range(1, 400)) if holiday(d) and d.weekday() < 5), None)
+    monday = today - ONE * today.weekday()
+    return {
+        "saldo": hm(saldo, True), "i dag": today.isoformat(),
+        "igjen": {"uke": left(today, monday + ONE * 4), "maned": left(today, m1), "ar": left(today, y1)},
+        "ferie": {"rett": now["ferie"], "brukt": brukt, "planlagt": plan, "igjen": now["ferie"] - brukt - plan},
+        "syk": counts.get("syk", [0, 0])[0],
+        "avspasering": {"brukt": counts.get("avspasering", [0, 0])[0], "planlagt": counts.get("avspasering", [0, 0])[1]},
+        "timer": {"uke": span(monday, today), "maned": span(today.replace(day=1), today), "ar": span(y0, today)},
+        "neste helligdag": nxt and {"date": nxt[0].isoformat(), "day": DAYS[nxt[0].weekday()], "name": nxt[1]},
+        "fri": fri,
+    }
+
+if mode == "saldo" and as_json:
+    print(json.dumps(account(), ensure_ascii=False))
+elif mode == "saldo":
+    print(f"Saldo {hm(saldo, True)}  (fra {fra}{f' med {hm(inn, True)}' if inn else ''}, {hm(now['norm'])} per dag, {now['lunsj']} min lunsj over 5:30)")
+    for x in days[::-1]:
+        tider = f"{x['start'] or '?':>5} – {x['end'] or '':<5}"
+        note = x["holiday"] or x["off"] or ""
+        if x["status"] == "mangler":
+            note = "⚠ mangler start/slutt: workday logg " + x["date"] + " HH:MM HH:MM"
+        elif x["status"] == "pågår":
+            note = "pågår"
+        worked = hm(x["worked"]) if x["worked"] is not None else ""
+        diff = hm(x["diff"], True) if x["diff"] is not None else ""
+        print(f"{x['date']} {x['day']}  {tider}  {worked:>5}  {diff:>6}  {note}".rstrip())
+elif as_json:
+    print(json.dumps(overview(), ensure_ascii=False))
+else:
+    o = overview()
+    f, i, t = o["ferie"], o["igjen"], o["timer"]
+    print(f"Saldo {o['saldo']}")
+    print(f"Ferie {today.year}: {f['brukt']} brukt, {f['planlagt']} planlagt, {f['igjen']} igjen av {f['rett']}")
+    print(f"Syk: {o['syk']} {'dag' if o['syk'] == 1 else 'dager'} · avspasering: {o['avspasering']['brukt']} brukt, {o['avspasering']['planlagt']} planlagt")
+    print(f"Arbeidsdager igjen: uka {i['uke']['dager']} · måneden {i['maned']['dager']} ({i['maned']['timer']}) · året {i['ar']['dager']} ({i['ar']['timer']})")
+    for k, label in [("uke", "Uka"), ("maned", "Måneden"), ("ar", "Året")]:
+        print(f"{label}: {t[k]['jobbet']} av {t[k]['norm']} ({t[k]['diff']})")
+    if h := o["neste helligdag"]:
+        print(f"Neste helligdag: {h['day']} {h['date']} {h['name']}")
+    if o["fri"]:
+        print("Fri:")
+        for r in o["fri"]:
+            when = r["fra"] if r["fra"] == r["til"] else f"{r['fra']} – {r['til']}"
+            print(f"  {when}  {r['type']}  {r['dager']} {'dag' if r['dager'] == 1 else 'dager'}")
 EOF
 }
 
@@ -266,7 +376,7 @@ $data" 2>/dev/null) || summary=$data
     echo "# $day"
     echo
     cmd_times | awk -v d="$day" '$1 == d { sub(/^[^ ]+ +/, ""); print "Arbeidstid: " $0 }'
-    cmd_saldo | head -1
+    konto saldo | head -1
     echo
     [[ -n $mine ]] && printf '## Mine notater\n\n%s' "$mine"
     echo "## Oppsummering"
@@ -333,7 +443,8 @@ case $1 in
   times) cmd_times ;;
   logg) shift; cmd_logg "$@" ;;
   fri) shift; cmd_fri "$@" ;;
-  saldo) cmd_saldo "$2" ;;
+  saldo) konto saldo "$2" ;;
+  oversikt) konto oversikt "$2" ;;
   last) note=$(last); [[ -n $note ]] && cat "$note" || die "ingen notater ennå" ;;
   *) awk 'NR > 2 && !/^#/ { exit } NR > 2 { sub(/^# ?/, ""); print }' "$0"; exit 1 ;;
 esac

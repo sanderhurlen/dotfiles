@@ -1,0 +1,14 @@
+# workday — linked to ~/.config/workday/config.toml by workday/install.sh; read by `workday
+# saldo` and `workday oversikt`. A missing key keeps its default (the values below).
+
+[saldo]
+fra = 2026-10-27  # the time account starts here …
+inn = "+0:00"     # … with this balance
+
+# One table per year. A year without one, or a key missing from it, takes the year before's;
+# ferie_brukt_for is each year's own (0 when missing).
+[2026]
+norm = "8:00"        # per weekday that isn't a holiday
+lunsj = 30           # minutes taken off a day longer than 5:30
+ferie = 25           # ferie days a year, Monday to Friday (5 weeks)
+ferie_brukt_for = 0  # ferie days taken this year before times.tsv knew them

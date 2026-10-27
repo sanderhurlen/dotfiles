@@ -36,7 +36,7 @@
     {
       "name": "tidskonto",
       "title": "Tidskonto",
-      "description": "Saldoen: timer mot normtid per dag, og dager som mangler start eller slutt",
+      "description": "Saldo, ferie brukt og igjen, arbeidsdager igjen, timer mot normtid, dag for dag og fri",
       "mode": "view"
     },
     {
