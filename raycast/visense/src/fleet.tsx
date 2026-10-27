@@ -78,33 +78,20 @@ export default function Command() {
       {s.error && <List.Item icon={Icon.Warning} title={`FEIL: ${s.error}`} actions={<ActionPanel>{refresh}</ActionPanel>} />}
 
       <List.Section title="Mine PRer" subtitle={String(s.myPullRequests.length)}>
-        {s.myPullRequests.map((m) => (
-          <List.Item
-            key={m.id}
-            icon={m.todo.length ? { source: Icon.XMarkCircle, tintColor: Color.Red } : Icon.Circle}
-            title={m.title}
-            subtitle={`!${m.id} ${m.repo}`}
-            keywords={[String(m.id), m.repo]}
-            accessories={[...agentTags(m.agents), ...myPrTags(m)]}
-            actions={
-              <ActionPanel>
-                <Action.OpenInBrowser url={m.url} />
-                <Action
-                  title="Fiks med agent"
-                  icon={Icon.Hammer}
-                  onAction={() => act(`Agent på !${m.id}`, "fleet", ["fix", String(m.id)])}
-                />
-                <Action
-                  title="Auto-complete"
-                  icon={Icon.CheckCircle}
-                  onAction={() => act(`Auto-complete !${m.id}`, "fleet", ["pr", String(m.id), "auto"])}
-                />
-                <Common url={m.url} refresh={refresh} />
-              </ActionPanel>
-            }
-          />
-        ))}
+        {s.myPullRequests
+          .filter((m) => !m.group)
+          .map((m) => (
+            <MyPrItem key={m.id} m={m} act={act} refresh={refresh} />
+          ))}
       </List.Section>
+
+      {bundles(s.myPullRequests).map(([g, ms]) => (
+        <List.Section key={g.id} title={`Mine PRer · #${g.id} ${g.title}`} subtitle={String(ms.length)}>
+          {ms.map((m) => (
+            <MyPrItem key={m.id} m={m} act={act} refresh={refresh} />
+          ))}
+        </List.Section>
+      ))}
 
       <List.Section title="Til review" subtitle={String(review.length)}>
         {review.map((p) => (
@@ -122,6 +109,46 @@ export default function Command() {
 }
 
 type Act = (title: string, bin: string, args: string[], confirm?: string) => Promise<void>;
+
+/** My PRs that share a work item, per item, in the order fleet lists them. */
+function bundles(mine: MyPr[]): [NonNullable<MyPr["group"]>, MyPr[]][] {
+  const by = new Map<number, [NonNullable<MyPr["group"]>, MyPr[]]>();
+  for (const m of mine) {
+    if (!m.group) continue;
+    if (!by.has(m.group.id)) by.set(m.group.id, [m.group, []]);
+    by.get(m.group.id)![1].push(m);
+  }
+  return [...by.values()];
+}
+
+function MyPrItem({ m, act, refresh }: { m: MyPr; act: Act; refresh: ReactNode }) {
+  return (
+    <List.Item
+      icon={m.todo.length ? { source: Icon.XMarkCircle, tintColor: Color.Red } : Icon.Circle}
+      title={m.title}
+      subtitle={`!${m.id} ${m.repo}`}
+      keywords={[String(m.id), m.repo, ...(m.group ? [String(m.group.id)] : [])]}
+      accessories={[...agentTags(m.agents), ...myPrTags(m)]}
+      actions={
+        <ActionPanel>
+          <Action.OpenInBrowser url={m.url} />
+          <Action
+            title="Fiks med agent"
+            icon={Icon.Hammer}
+            onAction={() => act(`Agent på !${m.id}`, "fleet", ["fix", String(m.id)])}
+          />
+          <Action
+            title="Auto-complete"
+            icon={Icon.CheckCircle}
+            onAction={() => act(`Auto-complete !${m.id}`, "fleet", ["pr", String(m.id), "auto"])}
+          />
+          {m.group && <Action.OpenInBrowser title={`Åpne work item #${m.group.id}`} url={m.group.url} />}
+          <Common url={m.url} refresh={refresh} />
+        </ActionPanel>
+      }
+    />
+  );
+}
 
 function ReviewItem({ p, act, refresh }: { p: ReviewPr; act: Act; refresh: ReactNode }) {
   const d = draft(p.id);
