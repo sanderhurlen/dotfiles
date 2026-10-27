@@ -54,6 +54,7 @@ export interface MyPr {
   conflicts: boolean;
   autoComplete: boolean;
   todo: string[];
+  group: { id: number; title: string; url: string } | null; // the work item it shares with my other PRs
   agents: Record<string, AgentState>;
 }
 

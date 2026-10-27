@@ -282,10 +282,18 @@ class Group:
         return Auto(self).prompt
 
 
-def groups(prs):
-    """Groups of two or more Reviews by the same author sharing a work item; sets each member's group.
-    The item with the fewest PRs goes first, so a shared Epic doesn't swallow a feature's own item.
-    A PR is in one group at most."""
+class Bundle:
+    """My PRs that link the same work item — a ticket split over repos — shown under it. Only a header:
+    each PR keeps its own fix agent."""
+    def __init__(self, item, prs):
+        self.id, self.prs, self.title, self.url, self.project = item.id, prs, item.title, item.url, item.project
+        self.key = f"fleet-mine-wi-{item.id}"
+
+
+def groups(prs, make=Group):
+    """Groups of two or more PRs (Review or Mine) by the same author sharing a work item, made by make;
+    sets each member's group. The item with the fewest PRs goes first, so a shared Epic doesn't swallow
+    a feature's own item. A PR is in one group at most."""
     by = {}
     for r in prs:
         for i in r.items:
@@ -297,7 +305,7 @@ def groups(prs):
         rs = [r for r in rs if r.group is None]
         if len(rs) < 2:
             continue
-        g = Group(wf.get(i), sorted(rs, key=lambda r: r.id))
+        g = make(wf.get(i), sorted(rs, key=lambda r: r.id))
         for r in rs:
             r.group = g
         out.append(g)
@@ -328,7 +336,9 @@ class Mine:
         self.source, self.target, self.created = p.source, p.target, p.created
         self.votes = [(n.split(" ")[0], v) for n, v, _ in p.reviewers if v < 0]  # (first name, -5/-10)
         self.threads = 0  # active comment threads, see detail()
+        self.who = p.who
         self.items = set()  # work item ids it links, or its branch carries
+        self.group = None  # the Bundle it's shown under, when it shares a work item with another
         self.key, self.role = f"fleet-pr-{self.id}", "fix"
 
     @property
@@ -538,6 +548,7 @@ def snapshot(everyone, clean=False):
         with concurrent.futures.ThreadPoolExecutor(8) as ex:
             list(ex.map(link_items, s.prs))
         s.groups = groups(s.prs)
+        groups(s.mine, Bundle)
         s.quiet = quiet(raw)
         others = reviews(prs, True)
     except RuntimeError as e:
@@ -1725,6 +1736,10 @@ def menu(x, pilot=None):
             ("x", "abandon", lambda: abandon(x), f"abandon !{x.id} {x.title[:40]}?"),
             *pilot_options(pilot, x),
             ("o", "åpne i nettleser", lambda: subprocess.run(["open", x.url]) and "", False)])
+    if isinstance(x, Bundle):
+        return (f"#{x.id} {x.title[:50]} · {len(x.prs)} PRer", [
+            ("f", "start fix-agent på hver PR", lambda: " · ".join(launch(m) for m in x.prs), False),
+            ("o", "åpne work item", lambda: subprocess.run(["open", x.url]) and "", False)])
     if isinstance(x, Group):
         return (f"#{x.id} {x.title[:50]} · {len(x.prs)} PRer", [
             ("g", "start review-agent for gruppa", lambda: launch(Auto(x)), False),
@@ -1867,9 +1882,13 @@ def pr_row(snap, r, wrepo, indent=""):
     return parts + agent_chip(snap, r) + draft_chip(r) + auto_chip(snap, r)
 
 
-def mine_row(snap, m, wrepo):
+def bundle_row(b):
+    return [("▾ ", "cyan"), (f"#{b.id:<5} ", "dim"), (b.title[:60], "bold"), (f"  {len(b.prs)} PRer", "dim")]
+
+
+def mine_row(snap, m, wrepo, indent=""):
     icon, tone, chips = mine_status(m)
-    parts = [(icon + " ", tone), (f"!{m.id:<5} ", "dim"), (f"{m.repo:<{wrepo}}  ", "bold"),
+    parts = [(indent + icon + " ", tone), (f"!{m.id:<5} ", "dim"), (f"{m.repo:<{wrepo}}  ", "bold"),
              (m.title[:60], None), (f"  {ago(m.created)}", "dim")]
     for c, t in chips:
         parts.append((f"  {c}", t))
@@ -1919,8 +1938,14 @@ def lines(snap, everyone, open_=()):
         out.append(([], None))
         out.append(([(f"Mine PRer ({len(snap.mine)})", "bold")], None))
         wmine = max([len(m.repo) for m in snap.mine] + [4])
+        shown = set()
         for m in snap.mine:
-            out.append((mine_row(snap, m, wmine), m))
+            if not m.group:
+                out.append((mine_row(snap, m, wmine), m))
+            elif m.group.key not in shown:  # like the review groups: header where its first PR would be
+                shown.add(m.group.key)
+                out.append((bundle_row(m.group), m.group))
+                out += [(mine_row(snap, n, wmine, "  "), n) for n in m.group.prs]
     if snap.orphans:
         out.append(([], None))
         out.append(([(f"Foreldreløse agenter · elementet er borte fra lista ({len(snap.orphans)})", "bold")], None))
@@ -1991,7 +2016,9 @@ def write_state(snap, everyone, open_=(), cur=None, msg=""):
                             "autoComplete": m.pr.auto, "ready": m.pr.ready, "conflicts": m.pr.conflicts,
                             "policies": [{"name": n, "status": st, "blocking": b} for n, st, b in m.pr.policies],
                             "negativeVotes": dict(m.votes), "activeThreads": m.threads,
-                            "workItems": sorted(m.items), "todo": m.todo, "agent": agent_name(m),
+                            "workItems": sorted(m.items), "todo": m.todo,
+                            "group": {"id": m.group.id, "title": m.group.title, "url": m.group.url}
+                            if m.group else None, "agent": agent_name(m),
                             "agents": dict(owned(snap.agents, m)), "start": f"fleet fix {m.id}"}
                            for m in snap.mine],
         "orphanAgents": [{"name": o.name, "id": o.sid, "state": o.state, "cwd": o.cwd,
@@ -2318,7 +2345,7 @@ def tui(scr, a):
                 subprocess.run(["open", cur.url])
         elif k == ord("m"):
             pop = menu(cur, pilot)
-        elif isinstance(cur, (Cleanup, Orphan)) and k in (10, 13, curses.KEY_ENTER, ord("v")):
+        elif isinstance(cur, (Cleanup, Orphan, Bundle)) and k in (10, 13, curses.KEY_ENTER, ord("v")):
             pop = menu(cur)
         elif k in (10, 13, curses.KEY_ENTER):
             pop = start_menu(cur, s.agents)
@@ -2535,6 +2562,8 @@ GUIDE = """\
                  <policy> … (kjører/i kø) · draft · auto · klar
                ✗ rødt = noe feiler, ⏸ gult = venter på meg, ✓ = klar til complete.
                Work items som PR-en lenker (eller har id-en i branchen) får «↳ !<pr> ✗/⏸/✓» på linja.
+               To eller flere som deler et work item står under det («▾ #<wi>»); enter der:
+               fix-agent på hver PR, eller åpne work itemet.
                Når en av dem merges (completed, ikke abandoned): Raycast-confetti og macOS-varsel.
   Foreldreløse fleet-agenter der work item/PR ikke lenger er i lista (Done, godkjent,
                completed, tatt bort). Ferdige agenter på en borte PR eller et Done work item
