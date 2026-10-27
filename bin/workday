@@ -23,8 +23,8 @@
 #   workday saldo [--json]                  the time account: hours worked minus the norm,
 #                                           per day and in all
 #
-# Notes live in ~/.local/state/workday: <date>.md (end) and plan-<date>.md (plan), kept 7
-# days. Each is written whole at the end, so a reader can wait for the file to change. The Raycast
+# Notes live in iCloud, Documents/visense/workday: <date>.md (end, kept for good: the log of my
+# work) and plan-<date>.md (plan, kept 7 days). Each is written whole at the end, so a reader can wait for the file to change. The Raycast
 # extension (raycast/visense) runs end and plan detached and shows the files. times.tsv (time,
 # start|end, or a day off at 00:00) is kept for good; the end note shows the day's hours and the
 # saldo from it. A day's last start, end and day off count, so logging again corrects it.
@@ -37,12 +37,12 @@
 # Raycast runs with a bare PATH; claude lives in ~/.local/bin, az/uv in Homebrew.
 export PATH="$HOME/.local/bin:$HOME/.dotfiles/bin:/opt/homebrew/bin:$PATH"
 
-dir="$HOME/.local/state/workday"
+dir="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Documents/visense/workday"
 root="$HOME/visense"
 day=$(date +%F)
 mkdir -p "$dir"
-# Notes are history (what did I do that week?), not a queue; a week is enough.
-find "$dir" -name '*.md' -mtime +7 -delete
+# A plan is for its day; a week of them is enough.
+find "$dir" -name 'plan-*.md' -mtime +7 -delete
 
 die() { echo "workday: $*" >&2; exit 1; }
 

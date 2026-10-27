@@ -560,15 +560,14 @@ def snapshot(everyone, clean=False):
     try:
         if clean:
             for o in stale(s.orphans):
-                try:
-                    line = end(o).replace("✓", "🧹", 1)
+                line = end_line(o)
+                if not line.startswith("✗"):
                     s.orphans.remove(o)
-                except RuntimeError as e:
-                    line = f"✗ {e}"
-                log(line)
                 s.cleaned.append(line)
             raw = sessions()
         cands = candidates(ts_, raw) + pr_cleanups(ts_, raw, {r.id for r in others} | {m.id for m in s.mine})
+        done_ = {r.id for r in others if settled(r)} if clean else set()
+        quiet_ = [Cleanup(t, [], *check(t, ts_, raw)) for t in linked() if t.pr in done_] if done_ else []
     except RuntimeError as e:
         s.error = f"opprydding: {e}"
         return s
@@ -577,7 +576,43 @@ def snapshot(everyone, clean=False):
             s.cleaned.append(remove(c, raw))
         else:
             s.cleanup.append(c)
+    # a settled review's worktrees go only when nothing's in the way; else they wait, unlisted
+    for c in quiet_:
+        c.label = f"!{c.id} avklart"
+    s.cleaned += [remove(c, raw) for c in quiet_ if not c.reasons]
+    if done_:
+        s.cleaned += [end_line(o) for o in settled_agents(sessions(), done_)]
     return s
+
+
+def settled(r):
+    """A Review I'm done with for now: I've posted my review or voted, and no draft waits to be
+    posted. Its finished agents and worktrees go after GRACE, like a gone PR's; a new push starts
+    a fresh re-review anyway."""
+    try:
+        d = wr.load_draft(r.id)
+    except RuntimeError:
+        return False
+    if d and not d.get("posted"):
+        return False
+    return bool(d) or r.vote != 0
+
+
+def settled_agents(raw, ids):
+    """Finished sessions on the settled PRs ids, untouched for GRACE (those outside a worktree)."""
+    keys = {f"fleet-pr-{i}" for i in ids}
+    return [o for a in raw if (a.get("name") or "").startswith("fleet-") and owner(a["name"]) in keys
+            for o in [Orphan(a)] if o.finished and o.idle >= GRACE]
+
+
+def end_line(o):
+    """end() as a cleanup line, logged."""
+    try:
+        line = end(o).replace("✓", "🧹", 1)
+    except RuntimeError as e:
+        line = f"✗ {e}"
+    log(line)
+    return line
 
 
 # ── worktrees ───────────────────────────────────────────────────────────────
@@ -2612,6 +2647,9 @@ GUIDE = """\
   PR-worktrees (fleet-pr-<id>-<rolle>, og gamle fleet-review<id>/fleet-pr<id>) er ferdige når PR-en
   er borte fra lista (completed, abandoned, godkjent av meg), og fjernes likt — men først når agentene
   der har stått urørt {grace} t, så det de fant kan leses.
+  Review-PR-er som fortsatt er i lista, men avklart (jeg har postet eller stemt, og ikke noe utkast
+  venter): ferdige agenter og PR-worktrees fjernes likt etter {grace} t urørt — men bare når ingenting
+  står i veien; ellers blir de stående, uten å listes. Ny push → «ny runde» starter en fersk agent.
   Foreldreløse agenter som er ferdige (done/failed) fjernes også ({d}claude rm{r}) når PR-en er borte
   eller work itemet er Done, og transkriptet har stått urørt {grace} t. Kjørende og ⏸ røres ikke.
   Det som står i veien listes under «Opprydding» med grunnen; enter/m → f rydd likevel.

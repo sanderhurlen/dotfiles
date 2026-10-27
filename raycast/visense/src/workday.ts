@@ -1,5 +1,5 @@
 // What Start and End Workday share: `workday` (bin/workday) writes its notes whole to
-// ~/.local/state/workday, so the views run it detached and wait for the file to change.
+// iCloud's Documents/visense/workday, so the views run it detached and wait for the file to change.
 // Closing Raycast while Claude writes loses nothing; the command shows the file next time.
 // Tidskonto and Fri read and write the time account through `workday saldo|logg|fri`.
 
@@ -9,8 +9,8 @@ import { join } from "node:path";
 import { useEffect, useState } from "react";
 import { run } from "./state";
 
-export const DIR = join(homedir(), ".local/state/workday");
-export const LOG = join(DIR, "raycast.log");
+export const DIR = join(homedir(), "Library/Mobile Documents/com~apple~CloudDocs/Documents/visense/workday");
+export const LOG = join(homedir(), ".local/state/workday/raycast.log"); // detach's output, not worth syncing
 const GIVE_UP_MS = 5 * 60 * 1000;
 
 export const today = () => new Date().toLocaleDateString("sv-SE"); // 2026-10-25
