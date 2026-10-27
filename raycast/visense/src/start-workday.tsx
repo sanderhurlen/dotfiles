@@ -4,7 +4,8 @@
 // Ghostty with fleet in tab 1 (splits `claude agents` to its left by itself) and tower in
 // tab 2, logging in only when the session no longer works, then Outlook and Teams. Whatever
 // already runs is left alone. `workday start` logs the time and starts a background agent
-// that sums up my launchd jobs; End Workday logs the end. The time account's balance shows on top.
+// that sums up my launchd jobs; End Workday logs the end. The time account's balance shows on top,
+// with the days that miss a start or end (⌘T fills in the newest).
 
 import { Action, ActionPanel, Detail, Form, Icon, Toast, closeMainWindow, open, showToast, useNavigation } from "@raycast/api";
 import { runAppleScript } from "@raycast/utils";
@@ -13,7 +14,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { useEffect, useState } from "react";
 import { detach } from "./state";
-import { DIR, HHMM, LOG, lastNote, logged, now, read, saldo, today, useNote } from "./workday";
+import { LoggForm } from "./tidskonto";
+import { DIR, HHMM, LOG, Saldo, lastNote, logged, now, read, saldo, today, useNote } from "./workday";
 
 const HOME = homedir();
 
@@ -82,7 +84,7 @@ function StartTime() {
 }
 
 export default function Command() {
-  const { push } = useNavigation();
+  const { push, pop } = useNavigation();
   const file = join(DIR, `plan-${today()}.md`);
   // Written once a day; started here when missing, so it is under way while I read yesterday.
   const [since, setSince] = useState(() => {
@@ -96,13 +98,20 @@ export default function Command() {
   const plan =
     text ??
     (failed ? `**workday plan feilet**\n\n\`\`\`\n${read(LOG) ?? ""}\n\`\`\`` : "_Claude leser fleet, standup og gårsdagens notat …_");
-  const [konto, setKonto] = useState<string>();
-  useEffect(() => {
+  const [konto, setKonto] = useState<Saldo>();
+  const load = () =>
     saldo()
-      .then((s) => setKonto(s.text))
+      .then(setKonto)
       .catch(() => undefined);
+  useEffect(() => {
+    load();
   }, []);
-  const markdown = `# Forslag til i dag\n\n${konto ? `_Tidskonto ${konto}_\n\n` : ""}${plan}\n\n---\n\n${note ? read(note) : "_Ingen notat fra forrige arbeidsdag._"}`;
+  const missing = konto?.days.filter((d) => d.status === "mangler") ?? [];
+  const what = (d: Saldo["days"][number]) => `${d.day} ${d.date} (${d.start ? "slutt" : "start og slutt"})`;
+  const head = konto
+    ? `_Tidskonto ${konto.text}_${missing.length ? ` · **⚠ mangler tider:** ${missing.map(what).join(", ")} — ⌘T` : ""}\n\n`
+    : "";
+  const markdown = `# Forslag til i dag\n\n${head}${plan}\n\n---\n\n${note ? read(note) : "_Ingen notat fra forrige arbeidsdag._"}`;
 
   return (
     <Detail
@@ -111,6 +120,24 @@ export default function Command() {
       actions={
         <ActionPanel>
           <Action title="Start dagen" icon={Icon.Play} onAction={() => push(<StartTime />)} />
+          {missing[0] && (
+            <Action
+              title={`Rett tider for ${missing[0].day} ${missing[0].date}`}
+              icon={Icon.Clock}
+              shortcut={{ modifiers: ["cmd"], key: "t" }}
+              onAction={() =>
+                push(
+                  <LoggForm
+                    d={missing[0]}
+                    done={() => {
+                      pop();
+                      load();
+                    }}
+                  />,
+                )
+              }
+            />
+          )}
           {text && <Action.CopyToClipboard title="Kopier forslaget" content={text} />}
           <Action
             title="Lag forslaget på nytt"

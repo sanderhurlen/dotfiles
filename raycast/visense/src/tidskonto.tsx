@@ -7,7 +7,7 @@ import { FriForm } from "./fri";
 import { run } from "./state";
 import { Day, HHMM, Saldo, hm, saldo } from "./workday";
 
-function LoggForm({ d, done }: { d: Day; done: () => void }) {
+export function LoggForm({ d, done }: { d: Day; done: () => void }) {
   async function submit(v: { start: string; end: string }) {
     if (!HHMM.test(v.start) || (v.end && !HHMM.test(v.end))) {
       await showToast({ style: Toast.Style.Failure, title: "Tidene må være HH:MM" });
