@@ -14,6 +14,8 @@
 #   wp follow 23536          notify when it waits for approval or finishes, confetti when green (again: stop)
 #   wp fix 23536             background Claude agent fixing the failed run (fleet's launcher)
 #   wp issues [23536]        warnings and errors in a run, or in each pipeline's last finished run, by message
+#   wp upkeep -A [--dry-run] pipeline warnings → a Teknisk forbedring Issue per problem, a Task per repo, and a
+#                            fleet agent per new Task that fixes it in a worktree and opens a PR (launchd: 13:00)
 #   wp open 23536            open run in browser
 #   wp -g                    grouped per pipeline, the last few runs of each
 #   wp help                  explained (Norwegian)
@@ -26,9 +28,12 @@ import concurrent.futures
 import curses
 import datetime
 import fcntl
+import hashlib
+import html
 import json
 import locale
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -45,6 +50,8 @@ POLL = 30     # seconds between the follow watcher's checks
 FORGET = datetime.timedelta(days=2)  # followed runs queued longer ago than this are dropped
 CACHE = os.path.expanduser("~/.cache/wp")
 FOLLOW = os.path.join(CACHE, "follow.json")
+UPKEEP = os.path.join(CACHE, "upkeep.json")  # {problem: {issue, messages, tasks: {repo: task}}}
+TAG = "Teknisk forbedring"
 
 
 def die(msg):
@@ -669,15 +676,17 @@ def cmd_fix(a):
         die(str(e))
 
 
+def latest(a):
+    """Each pipeline's newest finished run, among the runs the filters match."""
+    a.group, seen = True, set()
+    try:
+        return [r for r in runs(a) if r.status == "completed" and not (r.pipeline in seen or seen.add(r.pipeline))]
+    except RuntimeError as e:
+        die(str(e))
+
+
 def cmd_issues(a):
-    if a.id:
-        rs = [find(a.id)]
-    else:
-        a.group, seen = True, set()
-        try:
-            rs = [r for r in runs(a) if r.status == "completed" and not (r.pipeline in seen or seen.add(r.pipeline))]
-        except RuntimeError as e:
-            die(str(e))
+    rs = [find(a.id)] if a.id else latest(a)
     by = {}  # (type, message) → [(run, [where])]
     for r in rs:
         for k, ws in issues(r).items():
@@ -691,6 +700,151 @@ def cmd_issues(a):
         for r, ws in hits:
             print("    " + ("" if a.id else f"{r.pipeline}  {dim(f'{r.number} #{r.id}')}  ") + dim(", ".join(ws)))
         print()
+
+
+# ── upkeep: pipeline warnings → Teknisk forbedring Issue, a Task and a fleet agent per repo ────
+
+BUILD_OUTPUT = re.compile(r"\(\d+(,\d+)*\)\s*:\s*warning\b", re.I)  # file(line,col): warning X — the build's own
+DONE = ("Done", "Closed", "Removed")
+
+
+def problems(rs):
+    """[(messages, {repo: [(run, [where])]})] for the warnings ADO, agents and tasks give about the
+    pipelines in rs — not compiler/linter output. Messages on exactly the same jobs are one problem
+    (a deprecated task warns twice). Most widespread first."""
+    by = {}
+    for r in rs:
+        for (kind, msg), ws in issues(r).items():
+            if kind == "warning" and not BUILD_OUTPUT.search(msg):
+                by.setdefault(msg, []).append((r, ws))
+    same = {}
+    for msg, hits in by.items():
+        same.setdefault(frozenset((r.id, w) for r, ws in hits for w in ws), ([], hits))[0].append(msg)
+    out = []
+    for msgs, hits in same.values():
+        repos = {}
+        for r, ws in hits:
+            repos.setdefault(r.repo, []).append((r, ws))
+        out.append((msgs, repos))
+    return sorted(out, key=lambda p: -len(p[1]))
+
+
+def headline(msgs):
+    """A title from the first message: its gist, on a word boundary."""
+    s = msgs[0].replace('"', "").removeprefix("Remote machine provider issue: ")
+    return s if len(s) <= 100 else s[:100].rsplit(" ", 1)[0] + " …"
+
+
+def html_list(rows):
+    return "<ul>" + "".join(f"<li>{r}</li>" for r in rows) + "</ul>"
+
+
+def affected(hits, esc):
+    return [f"{esc(r.pipeline)} <a href=\"{r.url}\">{esc(r.number)}</a>: {esc(', '.join(ws))}" for r, ws in hits]
+
+
+def create(kind, title, body, parent=None, tags=()):
+    """New work item assigned to me; returns its id."""
+    f = lambda k, v: {"op": "add", "path": f"/fields/{k}", "value": v}
+    ops = [f("System.Title", title), f("System.Description", body), f("System.AssignedTo", A().me())]
+    if tags:
+        ops.append(f("System.Tags", "; ".join(tags)))
+    if parent:
+        ops.append({"op": "add", "path": "/relations/-", "value": {
+            "rel": "System.LinkTypes.Hierarchy-Reverse", "url": f"{A().org}/_apis/wit/workItems/{parent}"}})
+    return A().rest(f"wit/workitems/${urllib.parse.quote(kind)}", ops, "POST", project=A().project,
+                    ctype="application/json-patch+json")["id"]
+
+
+def still_open(id):
+    try:
+        return rest(f"wit/workitems/{id}?fields=System.State")["fields"]["System.State"] not in DONE
+    except RuntimeError:
+        return False
+
+
+def item_url(id):
+    return f"{A().org}/{urllib.parse.quote(A().project)}/_workitems/edit/{id}"
+
+
+class Upkeep:
+    """A pipeline-warning Task, as fleet.launch wants it: the Task's own fleet agent (fleet-wi-<id>-go)
+    in the repo's clone, worktree fleet-<id> — so fleet shows it on the Task's row."""
+    role = "go"
+
+    def __init__(self, task, repo, msgs, hits):
+        self.task, self.repo, self.key = task, repo, f"fleet-wi-{task}"
+        where = "".join(f"\n- {r.pipeline} {r.number} ({r.url}): {', '.join(ws)}" for r, ws in hits)
+        self.prompt = (
+            f"Task #{task} ({item_url(task)}): pipelinene i {repo} gir dette varselet i Azure DevOps:\n"
+            + "".join(f"\n> {m}" for m in msgs) + f"\n\nBerørt:{where}\n\n"
+            f"`wi set {task} -s Doing`. Oppdater pipeline-oppsettet i repoet så varselet forsvinner — minst mulig, "
+            f"ikke noe annet. Kommer det fra en template i et annet repo (pipeline-templates), fiks bare det som "
+            f"ligger her og si hva som må endres der. Commit, push branchen og lag PR mot default-branchen med "
+            f"tasken lenket (`az repos pr create --work-items {task}`). Ikke complete PR-en. Kan det ikke fikses i "
+            f"repoet (service connection, innstilling i portalen, …): ikke endre noe, men skriv hva som må gjøres "
+            f"manuelt i tasken (`wi comment {task} \"…\"`).")
+
+    def where(self):
+        main = fleet().clones().get((A().project.lower(), self.repo.lower()))
+        if not main:
+            raise RuntimeError(f"ingen lokal klone av {A().project}/{self.repo}")
+        return main, f"fleet-{self.task}"
+
+
+def cmd_upkeep(a):
+    esc = lambda s: html.escape(str(s))
+    try:
+        with open(UPKEEP) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        state = {}
+
+    def save():
+        os.makedirs(CACHE, exist_ok=True)
+        with open(UPKEEP + ".tmp", "w") as f:
+            json.dump(state, f, indent=1)
+        os.replace(UPKEEP + ".tmp", UPKEEP)
+
+    rs = latest(a)
+    news = []
+    for msgs, repos in problems(rs):
+        key = hashlib.sha1("\n".join(sorted(msgs)).encode()).hexdigest()[:12]
+        s = state.get(key)
+        if s and not still_open(s["issue"]):
+            s = None  # done or gone, and the warning is still there: a new round
+        title = headline(msgs)
+        new = [r for r in repos if not s or r not in s["tasks"]]
+        print(f"{yellow('⚠')} {bold(title)}  " + dim(f"#{s['issue']}" if s else "ny Issue")
+              + dim(f"  {len(repos)} repo{'s' if len(repos) > 1 else ''}, {len(new)} nye"))
+        if a.dry_run or not new:
+            continue
+        try:
+            if not s:
+                body = ("<p>Pipelinene gir varsel i Azure DevOps (funnet av <code>wp upkeep</code>):</p>"
+                        + html_list(f"<code>{esc(m)}</code>" for m in msgs)
+                        + "<p>Berørt, en Task per repo:</p>"
+                        + html_list(f"<b>{esc(repo)}</b> — " + "; ".join(affected(h, esc)) for repo, h in repos.items()))
+                s = state[key] = {"issue": create("Issue", f"Pipeline: {title}", body, tags=[TAG]),
+                                  "messages": msgs, "tasks": {}}
+                save()
+                news.append(f"#{s['issue']} {title}")
+            for repo in new:
+                hits = repos[repo]
+                body = (html_list(f"<code>{esc(m)}</code>" for m in msgs) + "<p>Berørt:</p>"
+                        + html_list(affected(hits, esc)))
+                tid = s["tasks"][repo] = create("Task", f"{repo}: {title}", body, parent=s["issue"])
+                save()
+                try:
+                    print("    " + green(fleet().launch(Upkeep(tid, repo, msgs, hits))))
+                except RuntimeError as e:
+                    print("    " + red(f"#{tid} {repo}: ingen agent — {e}"))
+        except RuntimeError as e:
+            print("    " + red(str(e)))
+    if not rs:
+        print(dim("ingen ferdige runs"))
+    if a.notify and news:
+        notify(f"{len(news)} nye pipeline-varsler", "; ".join(news))
 
 
 def cmd_open(a):
@@ -713,6 +867,11 @@ GUIDE = """\
   wp fix <run> [-n]       Claude-agent i bakgrunnen som fikser den feilede run-en (-n: vis bare kommandoen)
   wp issues [run]         varsler og feil i run-en, eller i siste ferdige run av hver pipeline (med filtre),
                           samlet per melding: hvilke pipelines og jobber som har den
+  wp upkeep [filtre]      varslene om selve pipelinene (ikke kompilatorvarsler) → én Issue per problem
+                          (tag «{tag}»), en Task per repo, og en fleet-agent per ny Task som fikser i
+                          worktree fleet-<task> og lager PR. Husker hva som er laget (~/.cache/wp/upkeep.json);
+                          nye repos får Task i samme Issue, ny Issue først når den gamle er lukket.
+                          --dry-run: vis bare hva den ville gjort. launchd kjører `wp upkeep -A --notify` kl 13
   wp open <run>           åpne i nettleser
   wp -g                   gruppert per pipeline: de {group} siste runs i hver
   wp help [kommando]      denne teksten, eller flaggene til én kommando
@@ -773,7 +932,7 @@ def cmd_help(a, subs):
     repo = current_repo()
     txt = GUIDE.format(b="\033[1m" if on else "", r="\033[0m" if on else "", d="\033[2m" if on else "",
                        where=A().where, repo=f" {dim(f'(repo: {repo})')}" if repo else "",
-                       refresh=REFRESH, count=COUNT, poll=POLL, group=GROUP)
+                       refresh=REFRESH, count=COUNT, poll=POLL, group=GROUP, tag=TAG)
     if on and txt.count("\n") > os.get_terminal_size().lines:
         subprocess.run(["less", "-RFX"], input=txt, text=True)
     else:
@@ -826,6 +985,12 @@ def main():
     s.add_argument("id", type=int, nargs="?")
     filters(s)
     s.set_defaults(fn=cmd_issues)
+
+    s = sub.add_parser("upkeep", help="pipeline warnings → Issue per problem, Task + fleet agent per repo")
+    filters(s)
+    s.add_argument("--dry-run", action="store_true", help="show what it would create, create nothing")
+    s.add_argument("--notify", action="store_true", help="macOS notification for new Issues (launchd)")
+    s.set_defaults(fn=cmd_upkeep)
 
     s = sub.add_parser("open", help="open run in browser")
     s.add_argument("id", type=int)
