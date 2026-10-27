@@ -14,8 +14,10 @@
 #   wp follow 23536          notify when it waits for approval or finishes, confetti when green (again: stop)
 #   wp fix 23536             background Claude agent fixing the failed run (fleet's launcher)
 #   wp issues [23536]        warnings and errors in a run, or in each pipeline's last finished run, by message
-#   wp upkeep -A [--dry-run] pipeline warnings → a Teknisk forbedring Issue per problem, a Task per repo, and a
-#                            fleet agent per new Task that fixes it in a worktree and opens a PR (launchd: 11:00)
+#   wp upkeep -A [--dry-run] pipeline warnings → proposals (launchd: 11:00); nothing is created until I decide,
+#                            here or in fleet: a Teknisk forbedring Issue per problem, a Task per repo, and a
+#                            fleet agent per new Task that fixes it in a worktree and opens a PR
+#   wp upkeep --ok KEY [--no-agents] · --skip KEY   create a proposal / don't propose it again
 #   wp open 23536            open run in browser
 #   wp -g                    grouped per pipeline, the last few runs of each
 #   wp help                  explained (Norwegian)
@@ -50,7 +52,7 @@ POLL = 30     # seconds between the follow watcher's checks
 FORGET = datetime.timedelta(days=2)  # followed runs queued longer ago than this are dropped
 CACHE = os.path.expanduser("~/.cache/wp")
 FOLLOW = os.path.join(CACHE, "follow.json")
-UPKEEP = os.path.join(CACHE, "upkeep.json")  # {problem: {issue, messages, tasks: {repo: task}}}
+UPKEEP = os.path.join(CACHE, "upkeep.json")  # {problem: {issue, messages, tasks: {repo: task}, proposed, skipped}}
 TAGS = ("Teknisk forbedring", "Pipeline vedlikehold")
 
 
@@ -702,7 +704,7 @@ def cmd_issues(a):
         print()
 
 
-# ── upkeep: pipeline warnings → Teknisk forbedring Issue, a Task and a fleet agent per repo ────
+# ── upkeep: pipeline warnings → proposals; accepted: Teknisk forbedring Issue, a Task and a fleet agent per repo ────
 
 BUILD_OUTPUT = re.compile(r"\(\d+(,\d+)*\)\s*:\s*warning\b", re.I)  # file(line,col): warning X — the build's own
 DONE = ("Done", "Closed", "Removed")
@@ -816,66 +818,150 @@ class Upkeep:
         return main, f"fleet-{self.task}"
 
 
-def cmd_upkeep(a):
-    esc = lambda s: html.escape(str(s))
+def upkeep_state():
+    """{key: {issue?, messages, tasks: {repo: task}, proposed?, skipped?}} — see find_upkeep()."""
     try:
         with open(UPKEEP) as f:
-            state = json.load(f)
+            return json.load(f)
     except (OSError, ValueError):
-        state = {}
+        return {}
 
-    def save():
-        os.makedirs(CACHE, exist_ok=True)
-        with open(UPKEEP + ".tmp", "w") as f:
-            json.dump(state, f, indent=1)
-        os.replace(UPKEEP + ".tmp", UPKEEP)
 
+def save_upkeep(state):
+    os.makedirs(CACHE, exist_ok=True)
+    with open(UPKEEP + ".tmp", "w") as f:
+        json.dump(state, f, indent=1)
+    os.replace(UPKEEP + ".tmp", UPKEEP)
+
+
+def proposals():
+    """[(key, proposal)] waiting for my decision (`wp upkeep --ok/--skip`, fleet), most repos first.
+    proposal: {title, messages, portal, issue (open Issue it adds to, or None), repos: {repo: [hit]},
+    found}; hit: {pipeline, number, url, where: [job]}."""
+    out = [(k, s["proposed"]) for k, s in upkeep_state().items() if s.get("proposed") and not s.get("skipped")]
+    return sorted(out, key=lambda kv: -len(kv[1]["repos"]))
+
+
+def find_upkeep(a, save=True):
+    """Pipeline warnings → proposals in UPKEEP; creates nothing in ADO. A problem whose Issue is open
+    is proposed again only for repos it has no Task for; a skipped one keeps its proposal up to date
+    but isn't returned. Returns [(key, proposal, new)]: new = not proposed like this before."""
+    state, out, seen = upkeep_state(), [], set()
     rs = latest(a)
-    news = []
     for msgs, repos, portal in problems(rs):
         # a portal problem is known by its title, so a new service connection lands in the same Issue
         key = hashlib.sha1((portal or "\n".join(sorted(msgs))).encode()).hexdigest()[:12]
-        s = state.get(key)
-        if s and not still_open(s["issue"]):
-            s = None  # done or gone, and the warning is still there: a new round
-        title = portal or headline(msgs)
-        new = [] if portal else [r for r in repos if not s or r not in s["tasks"]]
-        print(f"{yellow('⚠')} {bold(title)}  " + dim(f"#{s['issue']}" if s else "ny Issue")
-              + dim(f"  {len(repos)} repo{'s' if len(repos) > 1 else ''}, "
-                    + ("fikses i portalen" if portal else f"{len(new)} nye")))
-        if a.dry_run:
-            for repo in new:
-                print(dim(f"    + Task {repo}: " + ", ".join(r.pipeline for r, _ in repos[repo])))
+        seen.add(key)
+        s = state.setdefault(key, {"messages": msgs, "tasks": {}})
+        if s.get("issue") and not still_open(s["issue"]):
+            s.pop("issue")  # done or gone, and the warning is still there: a new round
+            s["tasks"] = {}
+        new = [] if portal else [r for r in repos if r not in s["tasks"]]
+        if s.get("issue") and not new:
+            s.pop("proposed", None)
             continue
-        if s and not new:
-            continue
-        try:
-            if not s:
-                body = ("<p>Pipelinene gir varsel i Azure DevOps (funnet av <code>wp upkeep</code>):</p>"
-                        + html_list(f"<code>{esc(m)}</code>" for m in msgs)
-                        + ("<p>Fikses i Azure DevOps (Project settings → Service connections), ikke i repoene. "
-                           "Berørt:</p>" if portal else "<p>Berørt, en Task per repo:</p>")
-                        + html_list(f"<b>{esc(repo)}</b> — " + "; ".join(affected(h, esc)) for repo, h in repos.items()))
-                s = state[key] = {"issue": create("Issue", f"Pipeline: {title}", body, tags=TAGS),
-                                  "messages": msgs, "tasks": {}}
-                save()
-                news.append(f"#{s['issue']} {title}")
-            for repo in new:
-                hits = repos[repo]
-                body = (html_list(f"<code>{esc(m)}</code>" for m in msgs) + "<p>Berørt:</p>"
-                        + html_list(affected(hits, esc)))
-                tid = s["tasks"][repo] = create("Task", f"{repo}: {title}", body, parent=s["issue"])
-                save()
-                try:
-                    print("    " + green(fleet().launch(Upkeep(tid, repo, msgs, hits))))
-                except RuntimeError as e:
-                    print("    " + red(f"#{tid} {repo}: ingen agent — {e}"))
-        except RuntimeError as e:
-            print("    " + red(str(e)))
+        old = s.get("proposed")
+        p = s["proposed"] = {
+            "title": portal or headline(msgs), "messages": msgs, "portal": bool(portal), "issue": s.get("issue"),
+            "repos": {repo: [{"pipeline": r.pipeline, "number": r.number, "url": r.url, "where": ws} for r, ws in hits]
+                      for repo, hits in repos.items() if portal or repo in new},
+            "found": old["found"] if old else datetime.datetime.now().astimezone().isoformat(timespec="seconds")}
+        out.append((key, p, not old or set(old["repos"]) != set(p["repos"])))
+    if a.all and not (a.pipeline or a.branch or a.mine):  # saw every pipeline: what's gone is fixed
+        for k, s in list(state.items()):
+            if k not in seen and s.pop("proposed", None) is not None and not s.get("issue"):
+                del state[k]
+    if save:
+        save_upkeep(state)
     if not rs:
         print(dim("ingen ferdige runs"))
+    return [(k, p, n) for k, p, n in out if not state[k].get("skipped")]
+
+
+def pick(key):
+    """The upkeep state and the full key a key (or its prefix) names."""
+    state = upkeep_state()
+    hit = [k for k in state if k.startswith(key)]
+    if len(hit) != 1:
+        raise RuntimeError(f"{'ingen' if not hit else 'flere'} pipeline-varsler med nøkkel {key}")
+    return state, hit[0]
+
+
+def accept(key, agents=True):
+    """Create what the proposal asks for: the Issue (unless an open one exists), a Task per repo, and
+    unless agents=False a fleet agent per Task. Returns result lines; raises RuntimeError."""
+    state, key = pick(key)
+    s = state[key]
+    p = s.get("proposed")
+    if not p:
+        raise RuntimeError(f"{key}: ingenting foreslått")
+    esc = lambda v: html.escape(str(v))
+    hits = lambda repo: [(argparse.Namespace(**h), h["where"]) for h in p["repos"][repo]]
+    out = []
+    if s.get("issue") and not still_open(s["issue"]):
+        s.pop("issue")
+        s["tasks"] = {}
+    if not s.get("issue"):
+        body = ("<p>Pipelinene gir varsel i Azure DevOps (funnet av <code>wp upkeep</code>):</p>"
+                + html_list(f"<code>{esc(m)}</code>" for m in p["messages"])
+                + ("<p>Fikses i Azure DevOps (Project settings → Service connections), ikke i repoene. "
+                   "Berørt:</p>" if p["portal"] else "<p>Berørt, en Task per repo:</p>")
+                + html_list(f"<b>{esc(repo)}</b> — " + "; ".join(affected(hits(repo), esc)) for repo in p["repos"]))
+        s["issue"] = create("Issue", f"Pipeline: {p['title']}", body, tags=TAGS)
+        save_upkeep(state)
+        out.append(f"#{s['issue']} {p['title']}")
+    for repo in [] if p["portal"] else p["repos"]:
+        if repo in s["tasks"]:
+            continue
+        body = (html_list(f"<code>{esc(m)}</code>" for m in p["messages"]) + "<p>Berørt:</p>"
+                + html_list(affected(hits(repo), esc)))
+        tid = s["tasks"][repo] = create("Task", f"{repo}: {p['title']}", body, parent=s["issue"])
+        save_upkeep(state)
+        if not agents:
+            out.append(f"#{tid} {repo}")
+            continue
+        try:
+            out.append(fleet().launch(Upkeep(tid, repo, p["messages"], hits(repo))))
+        except RuntimeError as e:
+            out.append(f"#{tid} {repo}: ingen agent — {e}")
+    s.pop("proposed")
+    s.pop("skipped", None)
+    save_upkeep(state)
+    return out
+
+
+def skip(key):
+    """Don't propose this problem again (`wp upkeep --ok` still creates it)."""
+    state, key = pick(key)
+    state[key]["skipped"] = True
+    save_upkeep(state)
+    return f"avvist: {state[key].get('proposed', {}).get('title', key)}"
+
+
+def cmd_upkeep(a):
+    try:
+        if a.skip or a.ok:
+            for k in a.skip:
+                print(dim(skip(k)))
+            for k in a.ok:
+                for line in accept(k, agents=not a.no_agents):
+                    print(green(line))
+            return
+    except RuntimeError as e:
+        die(str(e))
+    found = find_upkeep(a, save=not a.dry_run)
+    for key, p, _ in found:
+        n = len(p["repos"])
+        print(f"{yellow('⚠')} {bold(p['title'])}  " + dim(f"#{p['issue']}" if p["issue"] else "ny Issue")
+              + dim(f"  {n} repo{'s' if n > 1 else ''}, " + ("fikses i portalen" if p["portal"] else f"{n} ny{'e' if n > 1 else ''} Task{'s' if n > 1 else ''}"))
+              + "  " + cyan(key))
+        for repo, hs in [] if p["portal"] else p["repos"].items():
+            print(dim(f"    + Task {repo}: " + ", ".join(h["pipeline"] for h in hs)))
+    if found and not a.dry_run:
+        print(dim("\nopprett: wp upkeep --ok <nøkkel> [--no-agents] · avvis: wp upkeep --skip <nøkkel> · eller i fleet"))
+    news = [p["title"] for _, p, new in found if new]
     if a.notify and news:
-        notify(f"{len(news)} nye pipeline-varsler", "; ".join(news))
+        notify(f"{len(news)} nye pipeline-varsler", "avgjør i fleet: " + "; ".join(news))
 
 
 def cmd_open(a):
@@ -898,12 +984,15 @@ GUIDE = """\
   wp fix <run> [-n]       Claude-agent i bakgrunnen som fikser den feilede run-en (-n: vis bare kommandoen)
   wp issues [run]         varsler og feil i run-en, eller i siste ferdige run av hver pipeline (med filtre),
                           samlet per melding: hvilke pipelines og jobber som har den
-  wp upkeep [filtre]      varslene om selve pipelinene (ikke kompilatorvarsler) → én Issue per problem
-                          (tags {tags}, gjeldende sprint, tildelt meg), en Task per repo,
-                          og en fleet-agent per ny Task som fikser i
-                          worktree fleet-<task> og lager PR. Husker hva som er laget (~/.cache/wp/upkeep.json);
-                          nye repos får Task i samme Issue, ny Issue først når den gamle er lukket.
-                          --dry-run: vis bare hva den ville gjort. launchd kjører `wp upkeep -A --notify` kl 11
+  wp upkeep [filtre]      varslene om selve pipelinene (ikke kompilatorvarsler) → forslag, ett per problem
+                          med nøkkel. Oppretter ingenting i ADO; launchd kjører `wp upkeep -A --notify` kl 11
+                          og varsler om nye forslag. Avgjør i fleet (seksjonen «Pipeline-varsler») eller her:
+  wp upkeep --ok <nøkkel> én Issue (tags {tags}, gjeldende sprint, tildelt meg), en Task per repo
+                          og en fleet-agent per ny Task som fikser i worktree fleet-<task> og lager PR
+                          (--no-agents: bare Issue og Tasks). Nye repos får Task i samme Issue, ny Issue
+                          først når den gamle er lukket. Nøkkelen kan forkortes.
+  wp upkeep --skip <nøkkel>  avvis: foreslås ikke igjen (--ok oppretter den likevel)
+                          Alt huskes i ~/.cache/wp/upkeep.json. --dry-run: finn, men lagre ikke forslagene
   wp open <run>           åpne i nettleser
   wp -g                   gruppert per pipeline: de {group} siste runs i hver
   wp help [kommando]      denne teksten, eller flaggene til én kommando
@@ -1018,10 +1107,13 @@ def main():
     filters(s)
     s.set_defaults(fn=cmd_issues)
 
-    s = sub.add_parser("upkeep", help="pipeline warnings → Issue per problem, Task + fleet agent per repo")
+    s = sub.add_parser("upkeep", help="pipeline warnings → proposals; --ok: Issue per problem, Task + fleet agent per repo")
     filters(s)
-    s.add_argument("--dry-run", action="store_true", help="show what it would create, create nothing")
-    s.add_argument("--notify", action="store_true", help="macOS notification for new Issues (launchd)")
+    s.add_argument("--dry-run", action="store_true", help="find, but don't save the proposals")
+    s.add_argument("--ok", action="append", default=[], metavar="KEY", help="create the proposal's Issue, Tasks and agents")
+    s.add_argument("--no-agents", action="store_true", help="with --ok: Issue and Tasks, no agents")
+    s.add_argument("--skip", action="append", default=[], metavar="KEY", help="don't propose it again")
+    s.add_argument("--notify", action="store_true", help="macOS notification for new proposals (launchd)")
     s.set_defaults(fn=cmd_upkeep)
 
     s = sub.add_parser("open", help="open run in browser")

@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # chores: launchd jobs — `chores sync` every day 07:00, `chores mise` Mondays 07:05,
-# `wp upkeep -A` (pipeline warnings → Issue, Task and fleet agent per repo) every day 11:00.
+# `wp upkeep -A` (pipeline warnings → proposals I accept in fleet) every day 11:00.
 # A job missed while the Mac sleeps runs when it wakes.
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
