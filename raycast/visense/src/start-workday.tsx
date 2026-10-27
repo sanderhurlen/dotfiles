@@ -2,7 +2,7 @@
 // standup, through Claude; written once a day) above yesterday's note. ↵ starts the day:
 // Ghostty with fleet in tab 1 (splits `claude agents` to its left by itself) and tower in
 // tab 2, logging in only when the session no longer works, then Outlook and Teams. Whatever
-// already runs is left alone.
+// already runs is left alone. `workday start` logs the time; End Workday logs the end.
 
 import { Action, ActionPanel, Detail, Icon, closeMainWindow, open } from "@raycast/api";
 import { runAppleScript } from "@raycast/utils";
@@ -49,6 +49,7 @@ end run`;
 
 async function startDay() {
   await closeMainWindow();
+  execFileSync(join(HOME, ".dotfiles/bin/workday"), ["start"]);
   const cmds: string[] = [];
   if (!running("fleet")) cmds.push("az account get-access-token -o none 2>/dev/null || az login; fleet");
   if (!running("tower")) cmds.push("tower login --ved-behov && tower");

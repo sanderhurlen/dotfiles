@@ -10,10 +10,13 @@
 #                                           (fleet ls) and my teams' standup, through Claude;
 #                                           written once a day, --fresh writes it again
 #   workday last                            the last note
+#   workday start                           log that the day starts (end logs its own end)
+#   workday times                           start, end and hours per day
 #
 # Notes live in ~/.local/state/workday: <date>.md (end) and plan-<date>.md (plan), kept 7
 # days. Each is written whole at the end, so a reader can wait for the file to change. The Raycast
-# extension (raycast/visense) runs end and plan detached and shows the files.
+# extension (raycast/visense) runs end and plan detached and shows the files. times.tsv (time,
+# start|end) is kept for good; the end note shows the day's hours from it.
 
 # Raycast runs with a bare PATH; claude lives in ~/.local/bin, az/uv in Homebrew.
 export PATH="$HOME/.local/bin:$HOME/.dotfiles/bin:/opt/homebrew/bin:$PATH"
@@ -29,6 +32,27 @@ die() { echo "workday: $*" >&2; exit 1; }
 
 # The newest end note, today's included.
 last() { ls "$dir"/????-??-??.md 2>/dev/null | tail -1; }
+
+times="$dir/times.tsv"
+stamp() { printf '%s\t%s\n' "$(date +%FT%T)" "$1" >>"$times"; }
+
+# Per day: the first start, the last end and the hours between.
+cmd_times() {
+  [[ -s $times ]] || die "ingen tider ennå"
+  awk -F'\t' '
+    { d = substr($1, 1, 10); t = substr($1, 12, 5) }
+    !(d in seen) { seen[d]; order[++n] = d }
+    $2 == "start" && !(d in s) { s[d] = t }
+    $2 == "end" { e[d] = t }
+    function min(t) { return substr(t, 1, 2) * 60 + substr(t, 4, 2) }
+    END {
+      for (i = 1; i <= n; i++) {
+        d = order[i]; h = ""
+        if ((d in s) && (d in e)) { m = min(e[d]) - min(s[d]); h = sprintf("%d:%02d", m / 60, m % 60) }
+        printf "%s  %5s – %-5s  %s\n", d, (d in s) ? s[d] : "?", (d in e) ? e[d] : "", h
+      }
+    }' "$times"
+}
 
 # Writes stdin to $1 in one go.
 put() { cat >"$1.tmp" && mv "$1.tmp" "$1"; }
@@ -68,6 +92,7 @@ cmd_end() {
       *) die "bruk: workday end [-f <fokus>] [-n <neste>]" ;;
     esac
   done
+  stamp end
 
   # fleet's caffeinate is tied to its pid (-w), so it ends with fleet.
   pkill -TERM -f "$HOME/.dotfiles/bin/fleet"
@@ -93,6 +118,7 @@ $data" 2>/dev/null) || summary=$data
   {
     echo "# $day"
     echo
+    cmd_times | awk -v d="$day" '$1 == d { sub(/^[^ ]+ +/, ""); print "Arbeidstid: " $0; print "" }'
     [[ -n $mine ]] && printf '## Mine notater\n\n%s' "$mine"
     echo "## Oppsummering"
     echo
@@ -141,6 +167,8 @@ Ingen innledning, ingen overskrift på toppnivå, maks ~25 linjer."
 case $1 in
   end) shift; cmd_end "$@" ;;
   plan) shift; cmd_plan "$@" ;;
+  start) stamp start ;;
+  times) cmd_times ;;
   last) note=$(last); [[ -n $note ]] && cat "$note" || die "ingen notater ennå" ;;
-  *) sed -n '3,16s/^# \{0,1\}//p' "$0"; exit 1 ;;
+  *) sed -n '3,19s/^# \{0,1\}//p' "$0"; exit 1 ;;
 esac
