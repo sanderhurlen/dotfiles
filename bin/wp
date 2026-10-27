@@ -706,12 +706,16 @@ def cmd_issues(a):
 
 BUILD_OUTPUT = re.compile(r"\(\d+(,\d+)*\)\s*:\s*warning\b", re.I)  # file(line,col): warning X — the build's own
 DONE = ("Done", "Closed", "Removed")
+# fixed outside the repos (ADO's portal): one Issue for every message that matches, no Tasks or agents
+PORTAL = [(re.compile(r"service connection is using the Azure DevOps issuer"),
+           "Service connections bruker utfaset Azure DevOps-issuer: bytt til Entra (portalen)")]
 
 
 def problems(rs):
-    """[(messages, {repo: [(run, [where])]})] for the warnings ADO, agents and tasks give about the
-    pipelines in rs — not compiler/linter output. Messages on exactly the same jobs are one problem
-    (a deprecated task warns twice). Most widespread first."""
+    """[(messages, {repo: [(run, [where])]}, portal title or None)] for the warnings ADO, agents and
+    tasks give about the pipelines in rs — not compiler/linter output. Messages on exactly the same
+    jobs are one problem (a deprecated task warns twice), and so are those of a PORTAL entry.
+    Most widespread first."""
     by = {}
     for r in rs:
         if not r.repo:  # ADO leaves the name out when the repo is deleted: nothing to fix it in
@@ -721,13 +725,17 @@ def problems(rs):
                 by.setdefault(msg, []).append((r, ws))
     same = {}
     for msg, hits in by.items():
-        same.setdefault(frozenset((r.id, w) for r, ws in hits for w in ws), ([], hits))[0].append(msg)
+        portal = next((t for rx, t in PORTAL if rx.search(msg)), None)
+        g = same.setdefault(portal or frozenset((r.id, w) for r, ws in hits for w in ws), ([], [], portal))
+        g[0].append(msg)
+        if portal or not g[1]:
+            g[1].extend(hits)
     out = []
-    for msgs, hits in same.values():
+    for msgs, hits, portal in same.values():
         repos = {}
         for r, ws in hits:
             repos.setdefault(r.repo, []).append((r, ws))
-        out.append((msgs, repos))
+        out.append((msgs, repos, portal))
     return sorted(out, key=lambda p: -len(p[1]))
 
 
@@ -824,26 +832,29 @@ def cmd_upkeep(a):
 
     rs = latest(a)
     news = []
-    for msgs, repos in problems(rs):
-        key = hashlib.sha1("\n".join(sorted(msgs)).encode()).hexdigest()[:12]
+    for msgs, repos, portal in problems(rs):
+        # a portal problem is known by its title, so a new service connection lands in the same Issue
+        key = hashlib.sha1((portal or "\n".join(sorted(msgs))).encode()).hexdigest()[:12]
         s = state.get(key)
         if s and not still_open(s["issue"]):
             s = None  # done or gone, and the warning is still there: a new round
-        title = headline(msgs)
-        new = [r for r in repos if not s or r not in s["tasks"]]
+        title = portal or headline(msgs)
+        new = [] if portal else [r for r in repos if not s or r not in s["tasks"]]
         print(f"{yellow('⚠')} {bold(title)}  " + dim(f"#{s['issue']}" if s else "ny Issue")
-              + dim(f"  {len(repos)} repo{'s' if len(repos) > 1 else ''}, {len(new)} nye"))
+              + dim(f"  {len(repos)} repo{'s' if len(repos) > 1 else ''}, "
+                    + ("fikses i portalen" if portal else f"{len(new)} nye")))
         if a.dry_run:
             for repo in new:
                 print(dim(f"    + Task {repo}: " + ", ".join(r.pipeline for r, _ in repos[repo])))
             continue
-        if not new:
+        if s and not new:
             continue
         try:
             if not s:
                 body = ("<p>Pipelinene gir varsel i Azure DevOps (funnet av <code>wp upkeep</code>):</p>"
                         + html_list(f"<code>{esc(m)}</code>" for m in msgs)
-                        + "<p>Berørt, en Task per repo:</p>"
+                        + ("<p>Fikses i Azure DevOps (Project settings → Service connections), ikke i repoene. "
+                           "Berørt:</p>" if portal else "<p>Berørt, en Task per repo:</p>")
                         + html_list(f"<b>{esc(repo)}</b> — " + "; ".join(affected(h, esc)) for repo, h in repos.items()))
                 s = state[key] = {"issue": create("Issue", f"Pipeline: {title}", body, tags=TAGS),
                                   "messages": msgs, "tasks": {}}
