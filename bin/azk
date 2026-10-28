@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+#
+# azk — kostnadsforslag per resource group i Azure-subscriptionen: hva som koster mest, hva som
+# har steget, og tiltak verdt å se på. Bare lesing (az + Cost Management); ingenting endres.
+#
+#   azk                    siste 30 dager mot de 30 før
+#   azk --days 7           siste 7 dager mot de 7 før
+#   azk --rg visense-dev   bare denne resource group (kan gjentas)
+#   azk --json             maskinlesbart
+#
+# Forslagene er heuristikk: de peker på hva jeg bør sjekke, ikke på hva som er trygt å slette.
+# Cost Management henger 1–2 dager etter, så sluttdato er i går.
+
+import argparse
+import concurrent.futures
+import datetime
+import json
+import subprocess
+import sys
+import time
+from collections import defaultdict
+
+API = "2023-03-01"
+MIN_DELTA = 500  # kr: under dette varsles ikke økning
+MIN_HINT = 1000  # kr: under dette gir ikke tjenestehint og tagg-sjekk støy
+ENV_WORDS = ("dev", "test", "staging", "stg", "demo", "sandbox")
+PROD_WORDS = ("prod", "production")
+# ServiceName i Cost Management → hva jeg sjekker først når den dominerer (over 30 %)
+HINTS = {
+    "Log Analytics": "logg-inntak: sett retention og daglig kvote, se hvilke tabeller som vokser",
+    "Azure Monitor": "logg-inntak: sett retention og daglig kvote, se hvilke tabeller som vokser",
+    "Application Insights": "App Insights: sjekk sampling og daglig kvote",
+    "Virtual Machines": "VM-er: kan de stoppes utenfor arbeidstid eller nedskaleres?",
+    "Storage": "lagring: livssyklusregler (Cool/Archive) og ubrukte kontoer",
+    "SQL Database": "SQL: sjekk nivå (DTU/vCore) og om databasene trengs",
+    "Azure App Service": "App Service: sjekk plan-størrelse og om planer er tomme",
+    "Azure Databricks": "Databricks: sjekk at clusters terminerer automatisk",
+    "Azure Cosmos DB": "Cosmos DB: sjekk RU/s-provisjonering og autoscale",
+    "Azure Kubernetes Service": "AKS: sjekk node-pooler, størrelse og autoscaling",
+    "Bandwidth": "utgående trafikk: sjekk hva som sender mest data og hvor",
+}
+ORDER = {"!": 0, "~": 1, "i": 2}
+TTY = sys.stdout.isatty()
+
+
+def c(code, s):
+    return f"\033[{code}m{s}\033[0m" if TTY else s
+
+
+bold = lambda s: c("1", s)
+dim = lambda s: c("2", s)
+red = lambda s: c("31", s)
+yellow = lambda s: c("33", s)
+
+
+def die(msg):
+    print(f"azk: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def run(args):
+    r = subprocess.run(["az", *args], capture_output=True, text=True)
+    return r.returncode, r.stdout
+
+
+def az_list(args):
+    """JSON fra en az-liste; feil gir tom liste med varsel, så resten fortsatt virker."""
+    code, out = run([*args, "-o", "json"])
+    if code:
+        print(f"azk: az {' '.join(args[:3])} feilet, hopper over", file=sys.stderr)
+        return []
+    return json.loads(out or "[]")
+
+
+def az_graph(query):
+    """Resource Graph-spørring: rader for ressurser som az list ikke gir felt for (f.eks. disk-eier)."""
+    code, out = run(["graph", "query", "-q", query, "--first", "1000", "-o", "json"])
+    if code:
+        print("azk: az graph feilet, hopper over", file=sys.stderr)
+        return []
+    return json.loads(out)["data"]
+
+
+def cost(sub, start, end, grouping):
+    """ActualCost summert per dimensjon i perioden [start, end]."""
+    body = json.dumps({
+        "type": "ActualCost",
+        "timeframe": "Custom",
+        "timePeriod": {"from": start, "to": end},
+        "dataset": {
+            "granularity": "None",
+            "aggregation": {"totalCost": {"name": "Cost", "function": "Sum"}},
+            "grouping": [{"type": "Dimension", "name": g} for g in grouping],
+        },
+    })
+    url = f"https://management.azure.com/subscriptions/{sub}/providers/Microsoft.CostManagement/query?api-version={API}"
+    rows = []
+    while url:
+        # Cost Management strupes hardt (429): prøv på nytt med økende pause
+        for wait in (0, 5, 15, 30):
+            time.sleep(wait)
+            code, out = run(["rest", "--method", "post", "--url", url, "--body", body])
+            if not code:
+                break
+        else:
+            die("Cost Management-spørring feilet (429 eller tilgang: az login, Cost Management Reader?)")
+        props = json.loads(out)["properties"]
+        cols = [col["name"] for col in props["columns"]]
+        rows += [dict(zip(cols, row)) for row in props["rows"]]
+        url = props.get("nextLink")
+    return rows
+
+
+def kr(x):
+    return f"{x:,.0f}".replace(",", " ") + " kr"
+
+
+def pct(new, old):
+    return (new - old) / old * 100 if old else None
+
+
+def nonprod(rg, tags):
+    """Miljø fra env-tag hvis den finnes, ellers fra navnet på gruppa."""
+    env = next((v for k, v in tags.items() if "env" in k.lower()), "").lower()
+    if env:
+        return env not in PROD_WORDS
+    return any(w in rg.lower() for w in ENV_WORDS)
+
+
+def age_days(ts, now):
+    if not ts:
+        return 0
+    # Azure gir 7 desimaler på tidspunkt, fromisoformat tåler bare 6: UTC, så vi kutter dem
+    return (now - datetime.datetime.fromisoformat(ts[:19]).replace(tzinfo=datetime.timezone.utc)).days
+
+
+def by_rg(items):
+    out = defaultdict(list)
+    for i in items:
+        out[(i.get("resourceGroup") or "").lower()].append(i)
+    return out
+
+
+def forslag(rg, cur, prev, svc, tags, res, vms, disks, pips, apps, snaps, wss, now):
+    """pips: offentlige IP-er uten tilkobling (allerede filtrert)."""
+    """[(nivå, tekst)] for én resource group. ! = gjør snart, ~ = vurder, i = info."""
+    out = []
+    np = nonprod(rg, tags)
+
+    p = pct(cur, prev)
+    if p is not None and p > 25 and cur - prev > MIN_DELTA:
+        out.append(("!" if cur - prev > 2000 else "~", f"kostnad opp {p:.0f} %: se topptjenestene"))
+
+    if svc and cur >= MIN_HINT:
+        name, sc = max(svc.items(), key=lambda kv: kv[1])
+        if name in HINTS and sc / cur >= 0.3:
+            out.append(("~", f"{name} {sc / cur * 100:.0f} %: {HINTS[name]}"))
+
+    if not res and cur > MIN_DELTA:
+        out.append(("~", "ingen ressurser i gruppa, men kostnad: slettede ressurser eller reservasjon?"))
+    if res and cur >= MIN_HINT and not any("env" in k.lower() for k in tags):
+        out.append(("i", "ingen environment-tag: kostnaden kan ikke fordeles på miljø"))
+
+    unattached = [d for d in disks if not d.get("managedBy")]
+    if unattached:
+        gb = sum(d.get("sizeGb") or 0 for d in unattached)
+        out.append(("~", f"{len(unattached)} frakoblede disker ({gb} GB): slett om ikke trengt, snapshot først"))
+
+    for vm in vms:
+        state = vm.get("powerState") or ""
+        if state == "VM deallocated":
+            out.append(("i", f"VM {vm['name']} er deallocated: diskene er fortsatt fakturert"))
+        elif state == "VM running" and np:
+            out.append(("~", f"VM {vm['name']} kjører i ikke-prod: auto-shutdown utenfor arbeidstid?"))
+
+    if pips:
+        out.append(("i", f"{len(pips)} offentlige IP-er uten tilkobling: slett"))
+
+    for plan in (r for r in res if r["type"].lower() == "microsoft.web/serverfarms"):
+        sku = plan.get("sku") or {}
+        tier = sku.get("tier") or ""
+        mine = [a for a in apps if (a.get("appServicePlanId") or "").lower() == plan["id"].lower()]
+        if np and tier.startswith(("Premium", "Isolated", "Elastic")):
+            out.append(("!", f"App Service-plan {plan['name']} ({sku.get('name')}) i ikke-prod: lavere nivå?"))
+        if not mine and tier not in ("Dynamic", "Free", "Shared"):
+            out.append(("~", f"App Service-plan {plan['name']} har ingen apper: slett om den ikke trengs"))
+        elif mine and all(a.get("state") == "Stopped" for a in mine):
+            out.append(("~", f"App Service-plan {plan['name']}: alle {len(mine)} apper stoppet, planen koster likevel"))
+
+    for db in res:
+        if db["type"].lower() != "microsoft.sql/servers/databases" or db["name"].endswith("/master"):
+            continue
+        tier = (db.get("sku") or {}).get("tier") or ""
+        if np and tier in ("Premium", "BusinessCritical", "Hyperscale"):
+            out.append(("!", f"SQL {db['name'].split('/')[-1]} ({tier}) i ikke-prod: lavere nivå?"))
+
+    old = [s for s in snaps if age_days(s.get("timeCreated"), now) > 90]
+    if old:
+        out.append(("~", f"{len(old)} snapshots eldre enn 90 dager: trengs de?"))
+
+    for w in wss:
+        if (w.get("retentionInDays") or 0) > 31:
+            out.append(("i", f"Log Analytics {w['name']}: retention {w['retentionInDays']} dager, over 31 koster ekstra"))
+
+    return sorted(out, key=lambda f: ORDER[f[0]])
+
+
+def collect(days):
+    today = datetime.date.today()
+    end = today - datetime.timedelta(days=1)
+    start = end - datetime.timedelta(days=days - 1)
+    pend = start - datetime.timedelta(days=1)
+    pstart = pend - datetime.timedelta(days=days - 1)
+    cur_w = (f"{start}T00:00:00Z", f"{end}T23:59:59Z")
+    prev_w = (f"{pstart}T00:00:00Z", f"{pend}T23:59:59Z")
+
+    code, sub = run(["account", "show", "--query", "id", "-o", "tsv"])
+    if code:
+        die("ikke innlogget: kjør az login")
+    sub = sub.strip()
+
+    jobs = {
+        # én tråd for kostnad: Cost Management tåler ikke samtidige spørringer
+        "costs": lambda: [cost(sub, *cur_w, ["ResourceGroupName"]),
+                          cost(sub, *prev_w, ["ResourceGroupName"]),
+                          cost(sub, *cur_w, ["ResourceGroupName", "ServiceName"])],
+        "groups": lambda: az_list(["group", "list"]),
+        "res": lambda: az_list(["resource", "list"]),
+        "vms": lambda: az_list(["vm", "list", "-d"]),
+        "disks": lambda: az_graph("Resources | where type =~ 'microsoft.compute/disks' "
+                                  "| project name, resourceGroup, managedBy, sizeGb = properties.diskSizeGB"),
+        "pips": lambda: az_graph("Resources | where type =~ 'microsoft.network/publicipaddresses' "
+                                 "| where isempty(properties.ipConfiguration) and isempty(properties.natGateway) "
+                                 "| project name, resourceGroup"),
+        "apps": lambda: az_list(["webapp", "list"]),
+        "snaps": lambda: az_list(["snapshot", "list"]),
+        "wss": lambda: az_list(["monitor", "log-analytics", "workspace", "list"]),
+    }
+    with concurrent.futures.ThreadPoolExecutor(len(jobs)) as pool:
+        futs = {k: pool.submit(f) for k, f in jobs.items()}
+        got = {k: f.result() for k, f in futs.items()}
+    got["cur"], got["prev"], got["svc"] = got.pop("costs")
+    return got, cur_w, prev_w
+
+
+def build(days, only):
+    got, cur_w, prev_w = collect(days)
+
+    cur, prev = defaultdict(float), defaultdict(float)
+    for r in got["cur"]:
+        cur[r["ResourceGroupName"].lower()] += r["Cost"]
+    for r in got["prev"]:
+        prev[r["ResourceGroupName"].lower()] += r["Cost"]
+    svc = defaultdict(lambda: defaultdict(float))
+    for r in got["svc"]:
+        svc[r["ResourceGroupName"].lower()][r["ServiceName"]] += r["Cost"]
+
+    tags = {g["name"].lower(): g.get("tags") or {} for g in got["groups"]}
+    res, vms, disks, pips, apps, snaps, wss = (
+        by_rg(got[k]) for k in ("res", "vms", "disks", "pips", "apps", "snaps", "wss")
+    )
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    rows = []
+    for rg in set(cur) | set(prev):
+        if only and rg not in only:
+            continue
+        if not cur[rg] and not prev[rg]:
+            continue
+        p = pct(cur[rg], prev[rg])
+        rows.append({
+            "name": rg or "(uten resource group)",
+            "cost": cur[rg],
+            "prev": prev[rg],
+            "pct": p,
+            "top": max(svc[rg], key=svc[rg].get) if svc[rg] else None,
+            "forslag": [
+                {"nivå": lvl, "tekst": txt}
+                for lvl, txt in forslag(rg, cur[rg], prev[rg], svc[rg], tags.get(rg, {}), res[rg],
+                                        vms[rg], disks[rg], pips[rg], apps[rg], snaps[rg], wss[rg], now)
+            ],
+        })
+    rows.sort(key=lambda r: -r["cost"])
+    # med --rg: totalen er for de valgte gruppene, ikke hele subscriptionen
+    total = sum(r["cost"] for r in rows) if only else sum(cur.values())
+    prev_total = sum(r["prev"] for r in rows) if only else sum(prev.values())
+    return {
+        "dager": days,
+        "vindu": {"nå": cur_w, "før": prev_w},
+        "totalt": total,
+        "totalt_før": prev_total,
+        "pct": pct(total, prev_total),
+        "rg": rows,
+    }
+
+
+def show(data):
+    d = data["dager"]
+    trend = f" ({data['pct']:+.0f} %)" if data["pct"] is not None else ""
+    print(bold(f"azk  {d} dager til {data['vindu']['nå'][1][:10]} mot {d} før: {kr(data['totalt'])}{trend}"))
+    print()
+    quiet = []
+    for r in data["rg"]:
+        if not r["forslag"]:
+            quiet.append(r)
+            continue
+        trend = "ny" if r["pct"] is None and r["cost"] else ("–" if r["pct"] is None else f"{r['pct']:+.0f} %")
+        print(f"{bold(r['name'])}  {kr(r['cost'])}  {trend}  {dim('størst: ' + r['top'] if r['top'] else '')}")
+        for f in r["forslag"]:
+            mark = {"!": red("!"), "~": yellow("~"), "i": dim("i")}[f["nivå"]]
+            print(f"  [{mark}] {f['tekst']}")
+        print()
+    if quiet:
+        print(dim("uten forslag: " + ", ".join(f"{r['name']} {kr(r['cost'])}" for r in quiet)))
+    print(dim("heuristikk: sjekk før du sletter eller endrer. Ingen besparelse beregnet."))
+
+
+def main():
+    p = argparse.ArgumentParser(prog="azk", description="kostnadsforslag per resource group i Azure")
+    p.add_argument("--days", type=int, default=30, help="vindu i dager (default 30)")
+    p.add_argument("--rg", action="append", default=[], help="bare denne resource group (kan gjentas)")
+    p.add_argument("--json", action="store_true", help="JSON i stedet for tekst")
+    a = p.parse_args()
+    if a.days < 1:
+        die("--days må være minst 1")
+
+    data = build(a.days, {r.lower() for r in a.rg})
+    if a.json:
+        print(json.dumps(data, ensure_ascii=False, indent=1))
+    else:
+        show(data)
+
+
+if __name__ == "__main__":
+    main()
