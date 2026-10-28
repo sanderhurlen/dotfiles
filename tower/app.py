@@ -11,14 +11,15 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.app import SuspendNotSupported
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Input, Static
+from textual.message import Message
+from textual.widgets import DataTable, Footer, Static, TextArea
 
 from tower import jobber
 from tower.agent import AgentFeil, Agenter, ClaudeRunner, Jobb, Runner
@@ -327,25 +328,47 @@ class RadHandlinger(Valg):
             self.dismiss(h[0])
 
 
+class InstruksFelt(TextArea):
+    """Instruks over flere linjer: enter sender, shift+enter/ctrl+j gir ny linje."""
+
+    class Sendt(Message):
+        def __init__(self, verdi: str) -> None:
+            super().__init__()
+            self.verdi = verdi
+
+    async def _on_key(self, e: events.Key) -> None:
+        if e.key == "enter":
+            e.stop()
+            e.prevent_default()
+            self.post_message(self.Sendt(self.text))
+        elif e.key in ("shift+enter", "ctrl+j"):
+            e.stop()
+            e.prevent_default()
+            self.insert("\n")
+        else:
+            await super()._on_key(e)
+
+
 class InstruksPrompt(ModalScreen[str | None]):
     """Instruks til regenerering. Tom = prøv igjen uten verktøy; `escape` = avbryt (None)."""
 
     DEFAULT_CSS = """
     InstruksPrompt { align: center middle; }
     InstruksPrompt > Vertical { width: 80; height: auto; border: round $accent; padding: 1 2; background: $surface; }
-    InstruksPrompt Input { margin-top: 1; }
+    InstruksPrompt InstruksFelt { margin-top: 1; height: auto; min-height: 3; max-height: 12; }
     """
     BINDINGS = [Binding("escape", "avbryt", "Avbryt")]
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static("[b]Regenerer utkast[/]\n[dim]Instruks til agenten, tom = prøv igjen. Med instruks kan den "
-                         "lese Kunnskapsbasen og kildene dine.[/]")
-            yield Input(placeholder="f.eks. kortere, og sjekk leveransedato i docs-repoet", id="instruks")
+                         "lese Kunnskapsbasen og kildene dine. enter sender, shift+enter/ctrl+j ny linje.[/]")
+            yield InstruksFelt(placeholder="f.eks. kortere, og sjekk leveransedato i docs-repoet",
+                               show_line_numbers=False, soft_wrap=True, id="instruks")
 
-    @on(Input.Submitted)
-    def send_inn(self, e: Input.Submitted) -> None:
-        self.dismiss(e.value.strip())
+    @on(InstruksFelt.Sendt)
+    def send_inn(self, e: InstruksFelt.Sendt) -> None:
+        self.dismiss(e.verdi.strip())
 
     def action_avbryt(self) -> None:
         self.dismiss(None)

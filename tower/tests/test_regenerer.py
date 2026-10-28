@@ -219,6 +219,21 @@ async def test_regenerer_tom_instruks_prøver_igjen_uten_verktøy(config):
         assert [(v.status, v.instruks) for v in a.db.versjoner(NORDLYS)] == [("forkastet", None), ("klart", None)]
 
 
+async def test_regenerer_instruks_over_flere_linjer(config):
+    r = FalskRunner(bare_nordlys)
+    a = App(config, r)
+    async with a.run_test(size=(160, 40)) as pilot:
+        await klar(a, pilot)
+        await pilot.press("r")
+        await pilot.pause()
+        await pilot.press(*"kortere", "shift+enter", *"du-form", "ctrl+j", *"ingen hilsen", "enter")
+        await pilot.pause()
+        await a.agenter.ferdig()
+        await pilot.pause()
+        assert "<instruks>\nkortere\ndu-form\ningen hilsen\n</instruks>" in r.utkast_kall[-1]
+        assert a.db.versjoner(NORDLYS)[-1].instruks == "kortere\ndu-form\ningen hilsen"
+
+
 async def test_regenerer_avbrutt_med_escape(config):
     r = FalskRunner(bare_nordlys)
     a = App(config, r)
