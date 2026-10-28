@@ -51,10 +51,11 @@ import threading
 import time
 import tomllib
 import urllib.parse
+import zlib
 
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-from ado import TTY, ago, bold, cyan, dim, green, load, red, yellow
+from ado import TTY, ago, bold, cyan, dim, green, load, red, ts, yellow
 
 wf, wp, wr, wi, chores = load("wf"), load("wp"), load("wr"), load("wi"), load("chores")
 A, rest, me = wp.A, wr.rest, wr.me
@@ -337,6 +338,7 @@ class Mine:
         self.source, self.target, self.created = p.source, p.target, p.created
         self.votes = [(n.split(" ")[0], v) for n, v, _ in p.reviewers if v < 0]  # (first name, -5/-10)
         self.threads = 0  # active comment threads, see detail()
+        self.waiting = []  # (thread id, comment id, when) of active threads where someone else has the last word
         self.who = p.who
         self.items = set()  # work item ids it links, or its branch carries
         self.group = None  # the Bundle it's shown under, when it shares a work item with another
@@ -373,6 +375,11 @@ def detail(m):
         ts_ = rest(f"{base}/threads", project=p.project)["value"]
         m.threads = sum(1 for t in ts_ if t.get("status") == "active" and not t.get("isDeleted")
                         and (t.get("comments") or [{}])[0].get("commentType") != "system")
+        for t in ts_:
+            cs = [c for c in t.get("comments") or [] if c.get("commentType") != "system" and not c.get("isDeleted")]
+            if t.get("status") == "active" and not t.get("isDeleted") and cs \
+                    and (cs[-1].get("author") or {}).get("id") != me()[0]:
+                m.waiting.append((t["id"], cs[-1]["id"], ts(cs[-1].get("publishedDate"))))
         m.items |= {int(w["id"]) for w in rest(f"{base}/workitems", project=p.project)["value"]}
     except RuntimeError:
         pass
@@ -1129,12 +1136,12 @@ def short(path):
 
 # ── autopilot ───────────────────────────────────────────────────────────────
 # While the TUI runs, new PRs I'm reviewer on get a /code-review agent and my PRs that
-# turn red or conflict get a fix agent — on working hours unless allowed for the session.
-# Neither posts in ADO: the review only reports; the fix pushes to its branch but doesn't
-# answer threads. One fleet at a time runs it (autopilot.lock). Tuned in CONFIG.
+# turn red, conflict or get comments get a fix agent — on working hours unless allowed for the session.
+# Neither posts in ADO: the review only reports; the fix pushes to its branch and writes its
+# answers to threads as a draft (`wr draft`) I post. One fleet at a time runs it (autopilot.lock). Tuned in CONFIG.
 
 CONFIG = os.path.expanduser(os.environ.get("FLEET_CONFIG", "~/.config/fleet/config.toml"))
-DEFAULTS = {"autopilot": {"enabled": True, "triggers": ["review", "rereview", "build", "conflict", "triage"], "max_parallel": 2,
+DEFAULTS = {"autopilot": {"enabled": True, "triggers": ["review", "rereview", "build", "conflict", "comments", "triage"], "max_parallel": 2,
                           "backlog_hours": 24, "max_fix_attempts": 2, "hours": "07-17", "weekdays": "mon-fri",
                           "blocked_minutes": 30},
             "notify": {"start": True, "done": True, "blocked": True}}
@@ -1191,6 +1198,22 @@ def explain(r):
 
 
 REREVIEW = "nye commits etter min review"
+COMMENTS = "å svare på"  # in why when a Mine has threads where someone else has the last word
+
+
+def answer(m):
+    """Prompt tail: deal with the threads waiting on me, answers as a draft I post."""
+    ids = ", ".join(str(t) for t, _, _ in m.waiting)
+    return (f" Tråder der noen andre har siste ord: {ids} (`wr threads {m.id}` viser dem). Fiks det som skal "
+            f"fikses i koden, commit og push. Svarene skriver du som utkast etter `wr draft {m.id} --format` — hele "
+            f"fila på nytt, vote \"none\", ingen comments: replies med hva du gjorde (eller hvorfor ikke), resolve "
+            f"for trådene du har fikset. Er du uenig eller usikker, svar uten resolve og legg spørsmålet i questions. "
+            f"Jeg poster med `wr post {m.id}`.")
+
+
+def fp_parts(fp):
+    """What an autopilot fingerprint stands for: «fleet-pr-1@abc+c-1f2e#169…» → {"abc", "c-1f2e"}."""
+    return set(fp.partition("@")[2].partition("#")[0].split("+"))
 
 
 class Auto:
@@ -1223,7 +1246,7 @@ class Auto:
                     f"{x.source} (`git fetch origin && git switch {x.source}` om du ikke står på den). Løs konflikter "
                     f"ved å merge origin/{x.target} inn — ikke rebase, aldri force-push. Er en konflikt tvetydig, "
                     f"stopp og spør meg. Få bygget grønt, commit og push til {x.source}. Ikke svar i eller resolve "
-                    f"review-tråder, ikke stem, ikke complete PR-en.")
+                    f"review-tråder, ikke stem, ikke complete PR-en." + (answer(x) if COMMENTS in self.why else ""))
         if isinstance(x, Group):
             return group_prompt(self)
         if not self.clone():
@@ -1344,11 +1367,16 @@ class Pilot:
             return "review", f"{x.key}@review", None  # age from when fleet first saw me asked, not PR creation
         fails = x.failing if "build" in trig and not x.pr.draft else []  # a draft may be red on purpose, not conflict
         why = (["merge-konflikter"] if "conflict" in trig and x.pr.conflicts else []) + [f"{n} feiler" for n in fails]
+        fp = [((x.pr.raw.get("lastMergeSourceCommit") or {}).get("commitId") or "")[:10]] if why else []
+        at = [x.pr.done_at[n] for n in fails if x.pr.done_at.get(n)]
+        if "comments" in trig and x.waiting:
+            # one round per set of last comments, not per commit: my push doesn't re-trigger, a new comment does
+            why.append(f"{len(x.waiting)} tråd{'er' if len(x.waiting) > 1 else ''} {COMMENTS}")
+            fp.append(f"c-{zlib.crc32(repr(sorted((t, c) for t, c, _ in x.waiting)).encode()):08x}")
+            at += [w for _, _, w in x.waiting if w]
         if not why:
             return None
-        commit = ((x.pr.raw.get("lastMergeSourceCommit") or {}).get("commitId") or "")[:10]
-        at = max((x.pr.done_at[n] for n in fails if x.pr.done_at.get(n)), default=None)
-        return "; ".join(why), f"{x.key}@{commit}", at
+        return "; ".join(why), f"{x.key}@{'+'.join(fp)}", max(at, default=None)
 
     def holds(self, st, idle):
         """Whether an agent holds a slot. One blocked longer than blocked_minutes (idle: seconds since
@@ -1409,12 +1437,17 @@ class Pilot:
             name = agent_name(Auto(x, why) if why == REREVIEW else x)
             agent = s.agents.get(name)
             tries = st["started"].get(x.key, [])
-            if x.key in st["muted"] or fp in tries or agent in BUSY or name in self.pending:
+            done = set().union(*map(fp_parts, tries))
+            if x.key in st["muted"] or fp_parts(fp) <= done or agent in BUSY or name in self.pending:
                 continue
             if agent and not tries:  # I started that one myself
                 continue
-            # a re-review runs once per push (fp carries the commit), so it never gives up
-            if "@re-" not in fp and len(tries) >= (1 if isinstance(x, (Review, Group)) else self.c["max_fix_attempts"]):
+            # a re-review runs once per push (fp carries the commit), an answer round once per new comment —
+            # neither gives up; fixing conflicts and builds does after max_fix_attempts
+            fixes = [t for t in tries if any(not q.startswith("c-") for q in fp_parts(t))]
+            if "@re-" not in fp and (len(tries) >= 1 if isinstance(x, (Review, Group)) else
+                                     any(not q.startswith("c-") for q in fp_parts(fp))
+                                     and len(fixes) >= self.c["max_fix_attempts"]):
                 chips[x.key] = ("🤖 ga opp", "red")
                 if x.key not in st["gaveup"]:
                     st["gaveup"].append(x.key)
@@ -1533,7 +1566,7 @@ class Pilot:
             return f"🧭 triagerer #{x.id} i bakgrunnen …"
         t = self.trigger(x)
         if not t and isinstance(x, Mine):
-            raise RuntimeError(f"!{x.id}: ingen konflikt eller rødt bygg å fikse")
+            raise RuntimeError(f"!{x.id}: ingen konflikt, rødt bygg eller tråd å svare på")
         why, fp, _ = t or ("review", f"{x.key}@review", None)
         line = self.start(x, st, why, f"{fp}#{int(time.time())}", notify_=False)
         self.save(st)
@@ -1760,6 +1793,7 @@ def menu(x, pilot=None):
             ("u", "sett auto-complete", lambda: auto_complete(x), False),
             ("c", "complete nå", lambda: complete_now(x), f"complete !{x.id} {x.title[:40]} → {x.target}?"),
             ("x", "abandon", lambda: abandon(x), f"abandon !{x.id} {x.title[:40]}?"),
+            *post_option(x),
             *pilot_options(pilot, x),
             ("o", "åpne i nettleser", lambda: subprocess.run(["open", x.url]) and "", False)])
     if isinstance(x, Bundle):
@@ -1918,6 +1952,11 @@ def mine_row(snap, m, wrepo, indent=""):
              (m.title[:60], None), (f"  {ago(m.created)}", "dim")]
     for c, t in chips:
         parts.append((f"  {c}", t))
+    try:
+        d = wr.load_draft(m.id)
+        parts += [(f"  📝 {wr.draft_line(d)}", "yellow")] if d and not d.get("posted") else []
+    except RuntimeError:
+        parts.append(("  📝 utkast feil", "red"))
     return parts + agent_chip(snap, m) + auto_chip(snap, m)
 
 
@@ -2580,7 +2619,8 @@ GUIDE = """\
            løser det, kommentarer og stemme. Jeg leser (`wr draft`), justerer og poster med p — ingenting postes uten meg
   Re-review når forfatteren pusher etter at jeg postet: sjekker om trådene mine er løst
   Grupperer PRer av samme forfatter på samme work item (core + bff) i én review som ser på samspillet
-  Fikser   mine PRer: konflikter og rødt bygg (merger target inn, pusher, aldri force-push)
+  Fikser   mine PRer: konflikter og rødt bygg (merger target inn, pusher, aldri force-push), og nye
+           review-kommentarer: fikser koden, svarene blir et utkast jeg poster med p
   Triagerer nye Issues/Bugs til meg: forslag (agent-klar / for meg / trenger info / kart), y skriver til ADO
   Starter  agenter på work items: /implement, /wayfinder, /tdd, /diagnosing-bugs, /code-review, /to-tickets
   Handler  approve, auto-complete, complete, abandon, state, sprint — uten å åpne ADO
@@ -2648,7 +2688,7 @@ GUIDE = """\
                          s endre status (1–9) · i nåværende sprint · g agent · v VS Code ·
                          z demp/slå på auto-triage · n triager nå (utriagerte) · o åpne
               min PR     f fix-agent · u auto-complete · c complete · x abandon ·
-                         z demp/slå på autopilot · n kjør auto nå · o åpne
+                         p post svar-utkastet (📝) · z demp/slå på autopilot · n kjør auto nå · o åpne
               agent      x fjern (stop + rm) · s stopp
               pipeline-varsel  forslag fra `wp upkeep` (launchd kl 11) — ingenting er opprettet ennå:
                          c opprett Issue + Task per repo og start agentene · t bare Issue + Tasks ·
@@ -2692,6 +2732,9 @@ GUIDE = """\
                     Poster ingenting i ADO. Én gang per PR.
     min PR får rødt bygg / konflikt → fleet-pr-<id>-fix: merger target inn, fikser, pusher. Ingen
                     force-push, svarer ikke i tråder. Én gang per commit, maks {tries} forsøk, så «🤖 ga opp».
+    min PR får kommentar (aktiv tråd der siste ord ikke er mitt; trigger «comments») → samme fix-agent:
+                    fikser og pusher, svarene skrives som utkast (`wr draft <id>`, 📝 på linja, m → p poster).
+                    Én runde per ny kommentar — min egen push starter ingen ny; gir ikke opp.
   Triagerer selv (trigger «triage»):
     Issue/Bug tildelt meg i To Do uten triage-tag (og ikke wayfinder) → `wi triage <id> --save` i
                     bakgrunnen, maks 2 om gangen, én gang per item. Bare et forslag i ~/.cache/wi/triage —
