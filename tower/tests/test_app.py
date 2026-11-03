@@ -293,6 +293,36 @@ async def test_triage_feiler_og_omstart_tar_resten(config):
         assert r.kall == []  # alt triagert eller feilet for siste Melding
 
 
+async def test_feilet_triage_kan_kjøres_på_nytt(config):
+    from tower.app import RadHandlinger
+
+    harbor = "mail:AAQkADMock-harbor-outage"
+    ny_melding(config, harbor, "brann", "BRANN")
+    r = FalskRunner(triage_etter_emne)
+    a = app(config, r)
+    async with a.run_test(size=(160, 40)) as pilot:
+        await a.poll()
+        await a.agenter.ferdig()
+        await pilot.pause()
+        assert a.rader[harbor].triage_feilet
+        velg(a, harbor)
+        await pilot.press("enter")
+        await pilot.pause()
+        meny = a.screen
+        assert isinstance(meny, RadHandlinger) and next(iter(meny.handlinger)) == "t"
+        r.svar = lambda prompt: {"kategori": "svar", "haster": False, "sammendrag": "ok nå", "begrunnelse": "b"}
+        await pilot.press("enter")
+        await a.workers.wait_for_complete()
+        await a.agenter.ferdig()
+        await pilot.pause()
+        rad = a.rader[harbor]
+        assert not rad.triage_feilet and rad.triage.sammendrag == "ok nå" and rad.status == "triagert"
+
+        await pilot.press("t")  # ikke feilet: bare en melding
+        await a.agenter.ferdig()
+        assert a.rader[harbor].triage.sammendrag == "ok nå"
+
+
 def utkastkolonne(a: Tower) -> dict[str, str]:
     dt = a.query_one(DataTable)
     return {k.value: str(dt.get_row_at(dt.get_row_index(k))[4]) for k in dt.rows}

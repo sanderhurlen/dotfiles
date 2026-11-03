@@ -398,6 +398,7 @@ class Tower(App):
         Binding("x", "arkiver", "Arkiver", show=False),
         Binding("c", "kopier", "Kopier", show=False),
         Binding("i", "innspill", "Innspill", show=False),
+        Binding("t", "triager", "Triager på nytt", show=False),
         Binding("o", "åpne", "Åpne"),
         Binding("k", "kunnskapsbase", "Kunnskapsbase"),
         Binding("J", "jobber", "Jobber"),
@@ -862,6 +863,8 @@ class Tower(App):
         t, rad = valgt
         h: dict[str, tuple[str, str]] = {}
         u = rad.utkast
+        if rad.triage_feilet:
+            h["t"] = ("triager", "triager på nytt")
         if not self.ikke_klart(t, rad):
             h |= {"s": ("send", "send utkastet"), "e": ("rediger", "rediger utkastet"),
                   "c": ("kopier", "kopier utkastet")}
@@ -1148,6 +1151,20 @@ class Tower(App):
             self.notify(grunn, severity="warning")
             return
         self.push_screen(InstruksPrompt(), lambda instruks: self.regenerer(t.id, instruks))
+
+    def action_triager(self) -> None:
+        """Ny triage når den for siste Melding feilet (aldri auto-retry utover agentens ene nye forsøk)."""
+        if not (valgt := self.valgt()):
+            return
+        t, rad = valgt
+        if not rad.triage_feilet:
+            self.notify("Triagen har ikke feilet", severity="warning")
+            return
+        if rad := self.db.ny_triage(t.id):
+            self.rader[t.id] = rad
+            self.planlegg(t)
+            self.tegn_tabell()
+            self.vis_detalj()
 
     def kan_gi_innspill(self, rad: Rad) -> bool:
         """Aktiv Tråd uten åpent utkast for siste Melding, og ingen på vei av seg selv."""

@@ -246,6 +246,15 @@ class Db:
                 "WHERE id = ? AND siste_melding_id = ?", (feil, nå.isoformat(), tråd_id, melding_id)).rowcount
         return self.rad(tråd_id) if n else None
 
+    def ny_triage(self, tråd_id: str) -> Rad | None:
+        """Feilet triage for siste Melding glemmes, så `trenger_triage` køer en ny. None hvis den ikke feilet."""
+        with self.con:
+            n = self.con.execute(
+                "UPDATE trad SET triage_melding_id = NULL, triage_feil = NULL "
+                "WHERE id = ? AND triage_feil IS NOT NULL AND triage_melding_id = siste_melding_id",
+                (tråd_id,)).rowcount
+        return self.rad(tråd_id) if n else None
+
     def utkast(self, tråd_id: str) -> Utkast | None:
         """Siste versjon (ikke nødvendigvis den synlige, se `Rad.utkast`)."""
         r = self.con.execute(f"SELECT {U_KOLONNER} FROM utkast WHERE trad = ? ORDER BY versjon DESC LIMIT 1",
