@@ -1842,8 +1842,50 @@ def status_menu(w):
 AGENT = {"running": ("▶", "cyan"), "working": ("▶", "cyan"), "blocked": ("⏸", "yellow"),
          "done": ("✓", "green"), "idle": ("✓", "green"), "failed": ("✗", "red"), "error": ("✗", "red")}
 VOTE = {-10: ("✗", "red"), -5: ("⏸", "yellow"), 0: ("○", "dim")}
-KIND = {"map": ("kart", "cyan"), "spec": ("spec", "green")}
+KIND = {"map": ("kart", "b-map"), "spec": ("spec", "b-spec")}
+TYPE = {"bug": ("bug", "b-bug"), "issue": ("issue", "b-issue"), "task": ("task", "b-task"),
+        "user story": ("story", "b-task"), "feature": ("feat", "b-issue"), "epic": ("epic", "b-issue")}
 STATUS = {"ledig": "green", "tatt": "yellow", "blokkert": "red"}
+
+# Tones a row part can carry: name → (fg, bg, attr). Colours are (256-colour, 8-colour) pairs, None = terminal default.
+_HUES = [(81, 6), (213, 5), (141, 4), (114, 2), (221, 3), (209, 1), (44, 6), (177, 5)]
+_BADGE = lambda bg: ((16, 0), bg, "bold")
+TONES = {"green": ((114, 2), None, ""), "red": ((203, 1), None, ""), "yellow": ((221, 3), None, ""),
+         "cyan": ((81, 6), None, ""), "magenta": ((177, 5), None, ""), "blue": ((75, 4), None, ""),
+         "dim": (None, None, "dim"), "bold": (None, None, "bold"), "rule": ((239, 0), None, ""),
+         "run": ((81, 6), None, "bold"), "skill": ((141, 5), None, ""),
+         "b-bug": _BADGE((203, 1)), "b-issue": _BADGE((177, 5)), "b-map": _BADGE((81, 6)),
+         "b-spec": _BADGE((114, 2)), "b-task": _BADGE((75, 4)), "b-item": _BADGE((250, 7)),
+         "b-warn": _BADGE((221, 3)), "b-ok": _BADGE((114, 2)), "b-bad": _BADGE((203, 1)),
+         "b-title": _BADGE((81, 6)),
+         **{f"h{i}": (c, None, "bold") for i, c in enumerate(_HUES)},
+         **{f"H{i}": (c, None, "") for i, c in enumerate(_HUES)}}
+SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+SECTION = {"work": "yellow", "review": "magenta", "mine": "green", "warn": "yellow", "orphan": "red", "clean": "dim"}
+
+
+def hue(s, strong=True):
+    """A stable colour per name (repo, person), so the same one reads the same everywhere."""
+    return f"{'h' if strong else 'H'}{zlib.crc32(s.encode()) % len(_HUES)}"
+
+
+def age_tone(t):
+    """Fresh green, a few days plain, a week yellow, two weeks red."""
+    if not t:
+        return "dim"
+    d = (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() / 86400
+    return "green" if d < 1 else "dim" if d < 3 else "yellow" if d < 14 else "red"
+
+
+def badge(label, tone):
+    return [(f" {label} ", tone), (" ", None)]
+
+
+def section(key, title, n, note=""):
+    """Header: «━━ Mine PRer  3  ─────────»; the rule runs to the edge of the screen."""
+    tone = SECTION[key]
+    return [("━━ ", tone), (title, "bold"), (f"  {n}", tone)] + ([(f"  {note}", "dim")] if note else []) \
+        + [(" ", None), ("", "rule")]
 
 
 def agent_chip(snap, x):
@@ -1852,7 +1894,11 @@ def agent_chip(snap, x):
     for role, st in owned(snap.agents, x):
         icon, tone = AGENT.get(st, ("●", "dim"))
         sec = snap.quiet.get(f"{x.key}-{role}")
-        out.append((f"  {icon} {role} {st}" + (f" {span(sec)}" if st == "blocked" and sec is not None else ""), tone))
+        txt = f"{icon} {role} {st}" + (f" {span(sec)}" if st == "blocked" and sec is not None else "")
+        if st == "blocked":
+            out += [("  ", None), (f" {txt} ", "b-warn")]
+        else:
+            out.append((f"  {txt}", "run" if tone == "cyan" else tone))
     return out
 
 
@@ -1865,7 +1911,7 @@ def mine_status(m):
     """(icon, tone, [(chip, tone)]) — worst first."""
     chips = []
     if m.pr.conflicts:
-        chips.append(("konflikt", "red"))
+        chips.append((" konflikt ", "b-bad"))
     chips += [(f"{n} ✗", "red") for n in m.failing]
     chips += [(f"@{n} {'✗' if v == -10 else '⏸'}", "red" if v == -10 else "yellow") for n, v in m.votes]
     if m.threads:
@@ -1877,12 +1923,12 @@ def mine_status(m):
     if m.pr.auto:
         chips.append(("auto", "cyan"))
     tones = [t for _, t in chips]
-    if "red" in tones:
+    if "red" in tones or "b-bad" in tones:
         return "✗", "red", chips
     if "yellow" in tones:
         return "⏸", "yellow", chips
     if m.pr.ready:
-        return "✓", "green", chips + [("klar", "green")]
+        return "✓", "green", chips + [(" ✓ klar ", "b-ok")]
     return "○", "dim", chips
 
 
@@ -1903,17 +1949,17 @@ def tree_chip(w):
 
 
 def work_row(snap, w, multi, folded):
-    label, tone = KIND.get(w.kind, (w.type.lower()[:5], "dim"))
+    label, tone = KIND.get(w.kind) or TYPE.get(w.type.lower(), (w.type.lower()[:5], "b-item"))
     parts = [("● " if w.state == "Doing" else "○ ", "yellow" if w.state == "Doing" else "dim"),
-             (f"#{w.id:<5} ", "dim"), (f"{label:<5} ", tone)]
+             (f"#{w.id:<5} ", "dim")] + badge(f"{label:<5}", tone)
     if multi:
-        parts.append((f"{w.project[:12]:<12}  ", "dim"))
+        parts.append((f"{w.project[:12]:<12}  ", hue(w.project, False)))
     if w.folds:
         parts.append(("▸ " if folded else "▾ ", "cyan"))
-    parts += [(w.title[:70], "bold"), (f"  {w.state}", "dim")]
+    parts += [(w.title[:70], "bold"), (f"  {w.state}", "yellow" if w.state == "Doing" else "dim")]
     if w.folds:
         parts.append((f"  {len(w.children)} åpne, {w.done_children} done", "dim"))
-    parts.append((f"  → {w.skill}", "dim"))
+    parts.append((f"  → {w.skill}", "skill"))
     return parts + pr_chip(w) + tree_chip(w) + agent_chip(snap, w) + auto_chip(snap, w)
 
 
@@ -1921,22 +1967,24 @@ def child_row(snap, t, last, pad):
     kind = t.it.kind or t.type.lower()[:5]
     who = f" @{t.it.assignee.split('@')[0]}" if t.it.assignee else ""
     parts = [(" " * pad + ("└ " if last else "├ "), "dim"), (f"#{t.id:<5} ", "dim"), (f"{kind:<9} ", "cyan"),
-             (f"{t.status:<8} ", STATUS.get(t.status, "dim")), (t.title[:70], None), (who, "dim")]
+             (f"{t.status:<8} ", STATUS.get(t.status, "dim")), (t.title[:70], None),
+             (who, hue(who.strip(" @"), False) if who else "dim")]
     if t.it.hitl:
-        parts.append(("  HITL", "red"))
-    parts.append((f"  → {t.skill}", "dim"))
+        parts += [("  ", None), (" HITL ", "b-bad")]
+    parts.append((f"  → {t.skill}", "skill"))
     return parts + pr_chip(t) + tree_chip(t) + agent_chip(snap, t)
 
 
 def group_row(snap, g):
     return [("▾ ", "cyan"), (f"#{g.id:<5} ", "dim"), (g.title[:60], "bold"),
-            (f"  {len(g.prs)} PRer @{g.who}", "dim")] + agent_chip(snap, g) + auto_chip(snap, g)
+            (f"  {len(g.prs)} PRer ", "dim"), (f"@{g.who}", hue(g.who, False))] + agent_chip(snap, g) + auto_chip(snap, g)
 
 
 def pr_row(snap, r, wrepo, indent=""):
     icon, tone = VOTE.get(r.vote, ("○", "dim"))
-    parts = [(indent + icon + " ", tone), (f"!{r.id:<5} ", "dim"), (f"{r.repo:<{wrepo}}  ", "bold"),
-             (r.title[:60], None), (f"  @{r.who} {ago(r.created)}", "dim")]
+    parts = [(indent + icon + " ", tone), (f"!{r.id:<5} ", "dim"), (f"{r.repo:<{wrepo}}  ", hue(r.repo)),
+             (r.title[:60], None), ("  ", None), (f"@{r.who}", hue(r.who, False)),
+             (f" {ago(r.created)}", age_tone(r.created))]
     if not r.asked:
         parts.append(("  (ikke reviewer)", "dim"))
     return parts + agent_chip(snap, r) + draft_chip(r) + auto_chip(snap, r)
@@ -1948,10 +1996,10 @@ def bundle_row(b):
 
 def mine_row(snap, m, wrepo, indent=""):
     icon, tone, chips = mine_status(m)
-    parts = [(indent + icon + " ", tone), (f"!{m.id:<5} ", "dim"), (f"{m.repo:<{wrepo}}  ", "bold"),
-             (m.title[:60], None), (f"  {ago(m.created)}", "dim")]
+    parts = [(indent + icon + " ", tone), (f"!{m.id:<5} ", "dim"), (f"{m.repo:<{wrepo}}  ", hue(m.repo)),
+             (m.title[:60], None), (f"  {ago(m.created)}", age_tone(m.created))]
     for c, t in chips:
-        parts.append((f"  {c}", t))
+        parts += [("  ", None), (c, t)] if t.startswith("b-") else [(f"  {c}", t)]
     try:
         d = wr.load_draft(m.id)
         parts += [(f"  📝 {wr.draft_line(d)}", "yellow")] if d and not d.get("posted") else []
@@ -1962,7 +2010,7 @@ def mine_row(snap, m, wrepo, indent=""):
 
 def orphan_row(o):
     icon, tone = AGENT.get(o.state, ("●", "dim"))
-    return [(f"{icon} ", tone), (f"{o.name:<16} ", "bold"), (f"{o.state:<8} ", tone),
+    return [(f"{icon} ", tone), (f"{o.name:<16} ", hue(o.name)), (f"{o.state:<8} ", tone),
             (f"{ago(o.started):>4} siden  ", "dim"), (short(o.cwd), "dim")]
 
 
@@ -1971,7 +2019,7 @@ def lines(snap, everyone, open_=()):
     open_ (ids) show their open tickets under them."""
     out = []
     multi = len({w.project for w in snap.items}) > 1
-    out.append(([(f"Work items · To Do/Doing ({len(snap.items)})", "bold")], None))
+    out.append((section("work", "Work items", len(snap.items), "To Do/Doing"), None))
     for w in snap.items:
         folded = w.id not in open_
         out.append((work_row(snap, w, multi, folded), w))
@@ -1987,7 +2035,7 @@ def lines(snap, everyone, open_=()):
         out.append(([(f"… {snap.old.title} (eldre enn {OLD} dager)", "dim"), ("  → åpne query", "dim")], snap.old))
     out.append(([], None))
     who = "alle andres" if everyone else "der jeg er reviewer"
-    out.append(([(f"PRer uten min godkjenning · {who} ({len(snap.prs)})", "bold")], None))
+    out.append((section("review", "PRer uten min godkjenning", len(snap.prs), who), None))
     wrepo = max([len(r.repo) for r in snap.prs] + [4])
     shown = set()
     for r in snap.prs:
@@ -2001,7 +2049,7 @@ def lines(snap, everyone, open_=()):
         out.append(([("  ingen", "dim")], None))
     if snap.mine:
         out.append(([], None))
-        out.append(([(f"Mine PRer ({len(snap.mine)})", "bold")], None))
+        out.append((section("mine", "Mine PRer", len(snap.mine)), None))
         wmine = max([len(m.repo) for m in snap.mine] + [4])
         shown = set()
         for m in snap.mine:
@@ -2013,19 +2061,20 @@ def lines(snap, everyone, open_=()):
                 out += [(mine_row(snap, n, wmine, "  "), n) for n in m.group.prs]
     if snap.proposals:
         out.append(([], None))
-        out.append(([(f"Pipeline-varsler · forslag fra wp upkeep, ingenting opprettet ({len(snap.proposals)})", "bold")], None))
+        out.append((section("warn", "Pipeline-varsler", len(snap.proposals), "forslag fra wp upkeep, ingenting opprettet"), None))
         for x in snap.proposals:
             to = f"#{x.p['issue']}" if x.p["issue"] else "ny Issue"
             out.append(([("⚠ ", "yellow"), (x.title[:70], None), (f"  {to}", "dim"),
-                         (f"  {'portalen' if x.p['portal'] else ', '.join(x.repos)}", "cyan")], x))
+                         ("  ", None), (f"{'portalen' if x.p['portal'] else ', '.join(x.repos)}",
+                                        "cyan" if x.p["portal"] else hue(x.repos[0] if x.repos else ""))], x))
     if snap.orphans:
         out.append(([], None))
-        out.append(([(f"Foreldreløse agenter · elementet er borte fra lista ({len(snap.orphans)})", "bold")], None))
+        out.append((section("orphan", "Foreldreløse agenter", len(snap.orphans), "elementet er borte fra lista"), None))
         for o in snap.orphans:
             out.append((orphan_row(o), o))
     if snap.cleanup:
         out.append(([], None))
-        out.append(([(f"Opprydding · worktrees for Done work items og borte PRer ({len(snap.cleanup)})", "bold")], None))
+        out.append((section("clean", "Opprydding", len(snap.cleanup), "worktrees for Done work items og borte PRer"), None))
         for c in snap.cleanup:
             where_ = f"{os.path.basename(c.tree.main)}/…/{os.path.basename(c.tree.path)}"
             why = ", ".join(c.reasons) or "trygt å fjerne"
@@ -2038,7 +2087,29 @@ def plain(parts):
     return "".join(s for s, _ in parts)
 
 
-PAINT = {"green": green, "red": red, "yellow": yellow, "cyan": cyan, "dim": dim, "bold": bold}
+RICH = os.environ.get("COLORTERM") in ("truecolor", "24bit") or "256" in os.environ.get("TERM", "") \
+    or "ghostty" in os.environ.get("TERM", "")
+
+
+def sgr(tone):
+    fg, bg, attr = TONES.get(tone, (None, None, ""))
+    codes = [{"bold": "1", "dim": "2"}[attr]] if attr else []
+    if fg:
+        codes.append(f"38;5;{fg[0]}" if RICH else str(30 + fg[1]))
+    if bg:
+        codes.append(f"48;5;{bg[0]}" if RICH else str(40 + bg[1]))
+    return ";".join(codes)
+
+
+def paint(parts, width=None):
+    """A row as ANSI text (plain when not a terminal); a «rule» part runs to width."""
+    out, n = [], 0
+    for txt, t in parts:
+        if t == "rule":
+            txt = "─" * max(0, (width or 100) - n)
+        n += len(txt)
+        out.append(f"\033[{sgr(t)}m{txt}\033[0m" if TTY and t and sgr(t) else txt)
+    return "".join(out)
 
 
 # ── state file ──────────────────────────────────────────────────────────────
@@ -2169,12 +2240,25 @@ def keep_awake():
 def tui(scr, a):
     curses.curs_set(0)
     curses.use_default_colors()
-    pal = {}
-    for i, (name, col) in enumerate([("green", curses.COLOR_GREEN), ("red", curses.COLOR_RED),
-                                     ("yellow", curses.COLOR_YELLOW), ("cyan", curses.COLOR_CYAN)], 1):
-        curses.init_pair(i, col, -1)
-        pal[name] = curses.color_pair(i)
-    pal.update(dim=curses.A_DIM, bold=curses.A_BOLD)
+    rich = curses.COLORS >= 256
+    SEL = 236  # selected row's background on 256-colour terminals; reverse video elsewhere
+    pairs = {}
+
+    def look(tone, sel=False):
+        """curses attr for a tone, on the selected row's background when sel."""
+        fg, bg, at = TONES.get(tone, (None, None, ""))
+        f = fg[0 if rich else 1] if fg else -1
+        b = bg[0 if rich else 1] if bg else (SEL if sel and rich else -1)
+        if (f, b) not in pairs:
+            n = len(pairs) + 1
+            if n >= curses.COLOR_PAIRS:
+                return curses.A_REVERSE if sel else 0
+            curses.init_pair(n, f, b)
+            pairs[f, b] = curses.color_pair(n)
+        a_ = pairs[f, b] | {"bold": curses.A_BOLD, "dim": curses.A_DIM}.get(at, 0)
+        return a_ | (curses.A_REVERSE if sel and not rich and not bg else 0)
+
+    pal = {t: look(t) for t in ("green", "red", "yellow", "cyan", "dim")}
 
     def put(y, x, txt, n, attr=0):
         # newlines in msg/errors and writes at the screen edge make curses return ERR
@@ -2260,9 +2344,11 @@ def tui(scr, a):
 
         h, w = scr.getmaxyx()
         scr.erase()
-        title = f" fleet · {A().org.rsplit('/', 1)[-1]} " + (f"· {s.autohead} " if s.autohead else "") \
-            + ("· henter … " if loading else "")
-        put(0, 0, title, w - 1, curses.A_BOLD)
+        brand = " ⚓ fleet "
+        put(0, 0, brand, w - 1, look("b-title"))
+        title = brand + f" {A().org.rsplit('/', 1)[-1]} " + (f"· {s.autohead} " if s.autohead else "") \
+            + (f"· {SPIN[int(time.time() * 4) % len(SPIN)]} henter … " if loading else "")
+        put(0, len(brand), title[len(brand):], w - 1 - len(brand), curses.A_BOLD)
         if s.error:
             put(0, len(title), s.error, max(0, w - 1 - len(title)), pal["red"])
         at = next((y for y, (_, x) in enumerate(ls) if x is cur), 0)
@@ -2270,16 +2356,23 @@ def tui(scr, a):
         top = min(max(top, at - body + 1), at)
         if sel == 0:
             top = 0
+        frame = SPIN[int(time.time() * 2) % len(SPIN)]
         for y, (parts, it) in enumerate(ls[top:top + body]):
-            x, row = 0, y + 1
-            hl = curses.A_REVERSE if it is not None and it is cur else 0
+            x, row = 1, y + 1
+            hl = it is not None and it is cur
+            if hl:
+                put(row, 0, "▌", 1, look("cyan") | curses.A_BOLD)
             for txt, t in parts:
                 if x >= w - 1:
                     break
-                put(row, x, txt, w - 1 - x, pal.get(t, 0) | hl)
+                if t == "rule":
+                    txt = "─" * (w - 1 - x)
+                elif t == "run":
+                    txt = txt.replace("▶", frame, 1)
+                put(row, x, txt, w - 1 - x, look(t, hl) | (curses.A_BOLD if hl and t is None else 0))
                 x += len(txt)
             if hl and x < w - 1:
-                put(row, x, " " * (w - 1 - x), w - 1 - x, hl)
+                put(row, x, " " * (w - 1 - x), w - 1 - x, look(None, True))
         if pop:
             title_, opts = pop
             bw = min(w - 2, max([len(title_) + 4] + [len(l) + 8 for _, l, _, _ in opts]))
@@ -2453,7 +2546,7 @@ def cmd_ls(a):
     if s.error:
         die(s.error)
     for parts, _ in lines(s, a.all, {w.id for w in s.items} if a.unfold else ()):
-        print("".join(PAINT[t](x) if t else x for x, t in parts))
+        print(paint(parts, min(shutil.get_terminal_size((100, 20)).columns, 140)))
 
 
 def find_work(id):
