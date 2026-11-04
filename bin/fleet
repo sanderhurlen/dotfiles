@@ -1141,7 +1141,7 @@ def short(path):
 # answers to threads as a draft (`wr draft`) I post. One fleet at a time runs it (autopilot.lock). Tuned in CONFIG.
 
 CONFIG = os.path.expanduser(os.environ.get("FLEET_CONFIG", "~/.config/fleet/config.toml"))
-DEFAULTS = {"autopilot": {"enabled": True, "triggers": ["review", "rereview", "build", "conflict", "comments", "triage"], "max_parallel": 2,
+DEFAULTS = {"autopilot": {"enabled": True, "triggers": ["review", "rereview", "build", "expired", "conflict", "comments", "triage"], "max_parallel": 2,
                           "backlog_hours": 24, "max_fix_attempts": 2, "hours": "07-17", "weekdays": "mon-fri",
                           "blocked_minutes": 30, "stuck_minutes": 60},
             "notify": {"start": True, "done": True, "blocked": True}}
@@ -1298,7 +1298,7 @@ class Pilot:
     «also outside working hours» last for the session."""
     PATH = os.path.join(OUT, "autopilot.json")
     LISTS = ("muted", "gaveup")
-    MAPS = ("started", "seen", "failed")
+    MAPS = ("started", "seen", "failed", "requeued")  # requeued: key → when autopilot last re-ran its expired build
 
     def __init__(self, on=True):
         self.cfg, self.error = config()
@@ -1432,6 +1432,14 @@ class Pilot:
         for x in live.values():
             if x.key in st["failed"]:
                 chips[x.key] = (f"🤖 feilet: {st['failed'][x.key]}", "red")
+            if isinstance(x, Mine) and x.pr.expired and not x.pr.draft and "expired" in self.c["triggers"] \
+                    and self.on and x.key not in st["muted"] and now - st["requeued"].get(x.key, 0) > 600:
+                # an expired build needs no agent, just running again; once per 10 min, so a failing call doesn't spin
+                st["requeued"][x.key] = now
+                try:
+                    s.news.append("🤖 " + wr.requeue(x.pr))
+                except RuntimeError as e:
+                    s.news.append(f"🤖 !{x.id}: bygget kunne ikke køes på nytt: {e}")
             t = self.trigger(x)
             if not t:
                 continue
@@ -1721,6 +1729,12 @@ def complete_now(r):
     return wr.complete(fresh(r), "now")
 
 
+def rebuild(r):
+    p = fresh(r)
+    wr.policies(p)
+    return wr.requeue(p)
+
+
 def abandon(r):
     return wr.abandon(fresh(r))
 
@@ -1796,6 +1810,7 @@ def menu(x, pilot=None):
         return (f"!{x.id} {x.title[:50]}", [
             ("f", "start fix-agent", lambda: launch(x), False),
             ("u", "sett auto-complete", lambda: auto_complete(x), False),
+            *([("b", "kjør bygget på nytt (utløpt)", lambda: rebuild(x), False)] if x.pr.expired else []),
             ("c", "complete nå", lambda: complete_now(x), f"complete !{x.id} {x.title[:40]} → {x.target}?"),
             ("x", "abandon", lambda: abandon(x), f"abandon !{x.id} {x.title[:40]}?"),
             *post_option(x),
@@ -1940,6 +1955,8 @@ def mine_status(m, quiet=False):
         chips.insert(0, (f"🤖 {bool(m.pr.conflicts) + len(m.failing) + m.threads}", "cyan"))
     waiting = [n for n, st, b in m.pr.policies if b and st in ("queued", "running")]
     chips += [("bygg …", "dim")] if waiting else []
+    if any(b and st == "expired" for _, st, b in m.pr.policies):
+        chips.append(("↻ bygg utløpt", "yellow"))  # main moved on; m → b (autopilot does it with «expired»)
     tones = [t for _, t in chips + hidden]
     if "red" in tones or "b-bad" in tones:
         return "✗", "red", chips
@@ -2725,7 +2742,8 @@ def run_action(fn, *args):
 
 
 def cmd_pr(a):
-    fn = {"approve": approve, "auto": auto_complete, "complete": complete_now, "abandon": abandon}[a.action]
+    fn = {"approve": approve, "auto": auto_complete, "complete": complete_now, "abandon": abandon,
+          "rebuild": rebuild}[a.action]
     run_action(fn, find_review(a.id))
 
 
@@ -2765,7 +2783,7 @@ GUIDE = """\
                Default bare der jeg er reviewer; `a` / -a viser alle andres.
   Mine PRer    aktive PRer jeg har laget, draft også. Viser det som blokkerer:
                  konflikt · <bygg> ✗ · @navn ✗/⏸ (avvist / venter på endringer) · 💬 n aktive tråder
-                 <policy> … (kjører/i kø) · draft · klar
+                 <policy> … (kjører/i kø) · ↻ bygg utløpt (grønt, men main har flyttet seg; m → b) · draft · klar
                ✗ rødt = noe feiler, ⏸ gult = venter på meg, ✓ = klar til complete. ↯ etter ikonet = auto-complete er satt.
                Work items som PR-en lenker (eller har id-en i branchen) får «↳ !<pr> ✗/⏸/✓» på linja.
                To eller flere som deler et work item står under det («▾ #<wi>»); enter der:
@@ -2816,7 +2834,7 @@ GUIDE = """\
               work item  t triage (Issue/Bug: `wi triage` her i terminalen, y skriver til ADO) ·
                          s endre status (1–9) · i nåværende sprint · g agent · v VS Code ·
                          z demp/slå på auto-triage · n triager nå (utriagerte) · o åpne
-              min PR     f fix-agent · u auto-complete · c complete · x abandon ·
+              min PR     f fix-agent · u auto-complete · b bygg på nytt (↻ utløpt) · c complete · x abandon ·
                          p post svar-utkastet · z demp/slå på autopilot · n kjør auto nå · o åpne
               agent      x fjern (stop + rm) · s stopp
               pipeline-varsel  forslag fra `wp upkeep` (launchd kl 11) — ingenting er opprettet ennå:
@@ -2865,6 +2883,8 @@ GUIDE = """\
                     fikser og pusher, svarene skrives som utkast (`wr draft <id>`, m → p poster).
                     Én runde per ny kommentar — min egen push starter ingen ny; gir ikke opp, heller ikke
                     når fix-forsøkene på bygg/konflikt er brukt opp.
+  Kjører utløpte bygg på nytt (trigger «expired»): min PR med ↻ bygg utløpt → requeue av byggpolicyen
+                    i ADO, ingen agent. Maks hvert 10. min per PR; gjelder også utenfor arbeidstid.
   Triagerer selv (trigger «triage»):
     Issue/Bug tildelt meg i To Do uten triage-tag (og ikke wayfinder) → `wi triage <id> --save` i
                     bakgrunnen, maks 2 om gangen, én gang per item. Bare et forslag i ~/.cache/wi/triage —
@@ -2959,9 +2979,9 @@ def main():
     s.add_argument("--id", help="remove this one session (id or name), running or not")
     s.set_defaults(fn=cmd_prune)
 
-    s = sub.add_parser("pr", help="act on a PR: approve, auto(-complete), complete, abandon")
+    s = sub.add_parser("pr", help="act on a PR: approve, auto(-complete), complete, abandon, rebuild (expired build)")
     s.add_argument("id", type=int)
-    s.add_argument("action", choices=("approve", "auto", "complete", "abandon"))
+    s.add_argument("action", choices=("approve", "auto", "complete", "abandon", "rebuild"))
     s.set_defaults(fn=cmd_pr)
 
     s = sub.add_parser("wi", help="act on a work item: state <State> (none: list states), sprint")
