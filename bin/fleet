@@ -1695,23 +1695,14 @@ def post_option(r):
              f"post på !{r.id}: {wr.draft_line(d)}?")]
 
 
-def draft_short(d):
-    """What the draft posts: «approve · 3 komm · 2 svar»; the vote only when there is one."""
-    on = [c for c in d.get("comments") or [] if not c.get("skip")]
-    rs = len(d.get("replies") or [])
-    out = ([wr.VOTE_TEXT.get(d.get("vote"), d.get("vote"))] if d.get("vote", "none") != "none" else []) \
-        + ([f"{len(on)} komm"] if on else []) + ([f"{rs} svar"] if rs else [])
-    return " · ".join(out) or "tomt"
-
-
 def draft_chip(r):
-    """📝 the draft waiting to be posted; else 🔁 when the author pushed after I posted."""
+    """«📝 post» when a draft waits for me to post it (m → p); else 🔁 when the author pushed after I posted."""
     try:
         d = wr.load_draft(r.id)
     except RuntimeError:
         return [("  📝 utkast feil", "red")]
     if d and not d.get("posted"):
-        return [(f"  📝 {draft_short(d)}", "yellow")]
+        return [("  📝 post", "yellow")]
     if pushed_since(r):
         return [("  🔁 nye commits siden min review", "yellow")]
     return []
@@ -2026,7 +2017,7 @@ def mine_row(snap, m, wrepo, indent=""):
         parts += [("  ", None), (c, t)] if t.startswith("b-") else [(f"  {c}", t)]
     try:
         d = wr.load_draft(m.id)
-        parts += [(f"  📝 {draft_short(d)}", "yellow")] if d and not d.get("posted") else []
+        parts += [("  📝 post", "yellow")] if d and not d.get("posted") else []  # the fix agent's answers, mine to post
     except RuntimeError:
         parts.append(("  📝 utkast feil", "red"))
     return parts + agent_chip(snap, m) + auto_chip(snap, m)
