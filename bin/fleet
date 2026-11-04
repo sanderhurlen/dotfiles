@@ -1552,8 +1552,9 @@ class Pilot:
         q += f" · {hung} ▶ stille over {self.c['stuck_minutes']} min (teller ikke)" if hung else ""
         if not self.open_():
             return f"🤖 autopilot pause til {self.opens()}{q}"
-        return (f"🤖 autopilot på · {self.busy(s)}/{self.c['max_parallel']} kjører{q}"
-                + (" · også utenfor arbeidstid" if self.after else ""))
+        n = self.busy(s)  # on is the default: no «autopilot på», only what's going on
+        return " · ".join(filter(None, [f"🤖 {n}/{self.c['max_parallel']} kjører" if n else "", q.lstrip(" ·"),
+                                         "også utenfor arbeidstid" if self.after else ""]))
 
     def toggle(self):
         self.on = not self.on
@@ -2002,11 +2003,6 @@ def tickets_chip(w):
     return [(" ", None)] + out if out else [("  ingen tickets", "dim")]
 
 
-def skill_chip(w):
-    """What enter starts, only when it isn't /implement (m → g names it): «to-tickets», «wayfinder», «status»."""
-    return [] if w.skill == "/implement" else [(f"  {w.skill.lstrip('/')}", "skill")]
-
-
 def work_row(snap, w, multi, folded):
     """«● Spec  #123  ▸ Tittel som kuttes …  ○2 ▶1 ✓4  ↳ !7407 ○ …» — ● Doing, ○ To Do;
     the title gives way so the chips after it always show."""
@@ -2020,19 +2016,15 @@ def work_row(snap, w, multi, folded):
     parts.append((bare(w.title), "flex"))
     if w.folds:
         parts += tickets_chip(w)
-    parts += skill_chip(w)
     return parts + pr_chip(w) + tree_chip(w) + agent_chip(snap, w) + auto_chip(snap, w)
 
 
 def child_row(snap, t, last, pad):
     kind = (t.it.kind or t.type.lower()[:5]).capitalize()
-    who = f" @{t.it.assignee.split('@')[0]}" if t.it.assignee else ""
     parts = [(" " * pad + ("└ " if last else "├ "), "dim"), (f"{kind:<9} ", "cyan"), (f"#{t.id:<5} ", "dim"),
-             (f"{t.status:<8} ", STATUS.get(t.status, "dim")), (bare(t.title), "flex"),
-             (who, hue(who.strip(" @"), False) if who else "dim")]
+             (f"{t.status:<8} ", STATUS.get(t.status, "dim")), (bare(t.title), "flex")]
     if t.it.hitl:
         parts += [("  ", None), (" HITL ", "b-bad")]
-    parts += skill_chip(t)
     return parts + pr_chip(t) + tree_chip(t) + agent_chip(snap, t)
 
 
@@ -2415,10 +2407,10 @@ def tui(scr, a):
 
         h, w = scr.getmaxyx()
         scr.erase()
-        brand = " ⚓ fleet "
+        brand = " ⛵ fleet "
         put(0, 0, brand, w - 1, look("b-title"))
-        title = brand + f" {A().org.rsplit('/', 1)[-1]} " + (f"· {s.autohead} " if s.autohead else "") \
-            + (f"· {SPIN[int(time.time() * 4) % len(SPIN)]} henter … " if loading else "")
+        title = brand + "  " + " · ".join(filter(None, [
+            s.autohead, f"{SPIN[int(time.time() * 4) % len(SPIN)]} henter …" if loading else ""])) + " "
         put(0, len(brand), title[len(brand):], w - 1 - len(brand), curses.A_BOLD)
         if s.error:
             put(0, len(title), s.error, max(0, w - 1 - len(title)), pal["red"])
