@@ -1843,7 +1843,7 @@ AGENT = {"running": ("▶", "cyan"), "working": ("▶", "cyan"), "blocked": ("�
          "done": ("✓", "green"), "idle": ("✓", "green"), "failed": ("✗", "red"), "error": ("✗", "red")}
 VOTE = {-10: ("✗", "red"), -5: ("⏸", "yellow"), 0: ("○", "dim")}
 KIND = {"map": ("kart", "b-map"), "spec": ("spec", "b-spec")}
-TYPE = {"bug": ("bug", "b-bug"), "issue": ("issue", "b-issue"), "task": ("task", "b-task"),
+TYPE = {"bug": ("bug", "b-bug"), "issue": ("issue", "t-issue"), "task": ("task", "b-task"),
         "user story": ("story", "b-task"), "feature": ("feat", "b-issue"), "epic": ("epic", "b-issue")}
 STATUS = {"ledig": "green", "tatt": "yellow", "blokkert": "red"}
 
@@ -1854,6 +1854,7 @@ TONES = {"green": ((114, 2), None, ""), "red": ((203, 1), None, ""), "yellow": (
          "cyan": ((81, 6), None, ""), "magenta": ((177, 5), None, ""), "blue": ((75, 4), None, ""),
          "dim": (None, None, "dim"), "bold": (None, None, "bold"), "rule": ((239, 0), None, ""),
          "run": ((81, 6), None, "bold"), "skill": ((141, 5), None, ""),
+         "t-issue": ((177, 5), None, "bold"),  # issue: coloured text, no box
          "b-bug": _BADGE((203, 1)), "b-issue": _BADGE((177, 5)), "b-map": _BADGE((81, 6)),
          "b-spec": _BADGE((114, 2)), "b-task": _BADGE((75, 4)), "b-item": _BADGE((250, 7)),
          "b-warn": _BADGE((221, 3)), "b-ok": _BADGE((114, 2)), "b-bad": _BADGE((203, 1)),
