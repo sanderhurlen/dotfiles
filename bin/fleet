@@ -2006,11 +2006,11 @@ def tickets_chip(w):
 
 
 def work_row(snap, w, multi, folded):
-    """«▸ Spec  #123  Tittel som kuttes …  ○2 ▶1 ✓4  ↳ !7407 ○ …» — ● Doing, ○ To Do; a map/spec
-    has its fold there instead (▸/▾, yellow when Doing). The title gives way so the chips after it always show."""
+    """«● ▸ Spec  #123  Tittel som kuttes …  ○2 ▶1 ✓4  ↳ !7407 ○ …» — ● Doing, ○ To Do, then a map's/spec's
+    fold (▸/▾; blank on other rows so titles line up). The title gives way so the chips after it always show."""
     label, tone = KIND.get(w.kind) or TYPE.get(w.type.lower(), (w.type.lower()[:5], "b-item"))
-    mark = ("▸ " if folded else "▾ ") if w.folds else "● " if w.state == "Doing" else "○ "
-    parts = [(mark, "yellow" if w.state == "Doing" else "dim")] \
+    parts = [("● " if w.state == "Doing" else "○ ", "yellow" if w.state == "Doing" else "dim"),
+             (("▸ " if folded else "▾ ") if w.folds else "  ", "cyan")] \
         + badge(f"{label.capitalize():<5}", tone) + [(f"#{w.id:<5} ", "dim")]
     if multi:
         parts.append((f"{w.project[:12]:<12}  ", hue(w.project, False)))
@@ -2826,7 +2826,7 @@ GUIDE = """\
 {b}ORG{r}  {org} (alle prosjekter)
 
 {b}LISTA{r}
-  Work items   tildelt meg, state To Do eller Doing. Doing først (●, To Do ○; kart/spec har ▸/▾ der i stedet, gul = Doing). Tickets: ○ ledig ▶ tatt ⏸ blokkert ✓ done.
+  Work items   tildelt meg, state To Do eller Doing. Doing først (●, To Do ○), så ▸/▾ på kart/spec. Tickets: ○ ledig ▶ tatt ⏸ blokkert ✓ done.
   PRer         aktive, ikke draft, ikke mine, uten min godkjenning (stemme < 5).
                Default bare der jeg er reviewer; `a` / -a viser alle andres.
   Mine PRer    aktive PRer jeg har laget, draft også. Viser det som blokkerer:
