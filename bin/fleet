@@ -1695,6 +1695,15 @@ def post_option(r):
              f"post på !{r.id}: {wr.draft_line(d)}?")]
 
 
+def draft_short(d):
+    """What the draft posts: «approve · 3 komm · 2 svar»; the vote only when there is one."""
+    on = [c for c in d.get("comments") or [] if not c.get("skip")]
+    rs = len(d.get("replies") or [])
+    out = ([wr.VOTE_TEXT.get(d.get("vote"), d.get("vote"))] if d.get("vote", "none") != "none" else []) \
+        + ([f"{len(on)} komm"] if on else []) + ([f"{rs} svar"] if rs else [])
+    return " · ".join(out) or "tomt"
+
+
 def draft_chip(r):
     """📝 the draft waiting to be posted; else 🔁 when the author pushed after I posted."""
     try:
@@ -1702,7 +1711,7 @@ def draft_chip(r):
     except RuntimeError:
         return [("  📝 utkast feil", "red")]
     if d and not d.get("posted"):
-        return [(f"  📝 {wr.draft_line(d)}", "yellow")]
+        return [(f"  📝 {draft_short(d)}", "yellow")]
     if pushed_since(r):
         return [("  🔁 nye commits siden min review", "yellow")]
     return []
@@ -1858,10 +1867,18 @@ TONES = {"green": ((114, 2), None, ""), "red": ((203, 1), None, ""), "yellow": (
          "b-spec": _BADGE((114, 2)), "b-task": _BADGE((75, 4)), "b-item": _BADGE((250, 7)),
          "b-warn": _BADGE((221, 3)), "b-ok": _BADGE((114, 2)), "b-bad": _BADGE((203, 1)),
          "b-title": _BADGE((81, 6)),
+         "flex": (None, None, ""), "flex-dim": (None, None, "dim"),  # a title that gets the row's spare room
          **{f"h{i}": (c, None, "bold") for i, c in enumerate(_HUES)},
          **{f"H{i}": (c, None, "") for i, c in enumerate(_HUES)}}
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 SECTION = {"work": "yellow", "review": "magenta", "mine": "green", "warn": "yellow", "orphan": "red", "clean": "dim"}
+
+
+REPO_PREFIX = "visense-"  # every repo has it; the list shows the rest
+
+
+def rname(repo):
+    return repo[len(REPO_PREFIX):] if repo.startswith(REPO_PREFIX) and len(repo) > len(REPO_PREFIX) else repo
 
 
 def hue(s, strong=True):
@@ -1904,6 +1921,8 @@ def agent_chip(snap, x):
 
 def auto_chip(snap, x):
     c = snap.auto.get(x.key)
+    if c and c[0] == "🤖 auto" and owned(snap.agents, x):
+        return []
     return ([("  ", None), c] if c[1].startswith("b-") else [(f"  {c[0]}", c[1])]) if c else []
 
 
@@ -1924,7 +1943,7 @@ def mine_status(m, quiet=False):
     if hidden:
         chips.insert(0, (f"🤖 {bool(m.pr.conflicts) + len(m.failing) + m.threads}", "cyan"))
     waiting = [n for n, st, b in m.pr.policies if b and st in ("queued", "running")]
-    chips += [(f"{n} …", "dim") for n in waiting]
+    chips += [("bygg …", "dim")] if waiting else []
     if m.pr.auto:
         chips.append(("auto", "cyan"))
     tones = [t for _, t in chips + hidden]
@@ -1987,8 +2006,8 @@ def group_row(snap, g):
 
 def pr_row(snap, r, wrepo, indent=""):
     done = settled(r) and not pushed_since(r)  # ✓ I've done my part; ○ it's my turn
-    parts = [(indent + ("✓ " if done else "○ "), "green" if done else "dim"), (f"!{r.id:<5} ", "dim"), (f"{r.repo:<{wrepo}}  ", hue(r.repo)),
-             (r.title[:60], None), ("  ", None), (f"@{r.who}", hue(r.who, False)),
+    parts = [(indent + ("✓ " if done else "○ "), "green" if done else "dim"), (f"!{r.id:<5} ", "dim"), (f"{rname(r.repo):<{wrepo}}  ", hue(r.repo)),
+             (r.title, "flex"), ("  ", None), (f"@{r.who}", hue(r.who, False)),
              (f" {ago(r.created)}", age_tone(r.created))]
     if not r.asked:
         parts.append(("  (ikke reviewer)", "dim"))
@@ -2001,13 +2020,13 @@ def bundle_row(b):
 
 def mine_row(snap, m, wrepo, indent=""):
     icon, tone, chips = mine_status(m, handled(snap, m))
-    parts = [(indent + icon + " ", tone), (f"!{m.id:<5} ", "dim"), (f"{m.repo:<{wrepo}}  ", hue(m.repo)),
-             (m.title[:60], "dim" if m.pr.draft else None), (f"  {ago(m.created)}", age_tone(m.created))]
+    parts = [(indent + icon + " ", tone), (f"!{m.id:<5} ", "dim"), (f"{rname(m.repo):<{wrepo}}  ", hue(m.repo)),
+             (m.title, "flex-dim" if m.pr.draft else "flex"), (f"  {ago(m.created)}", age_tone(m.created))]
     for c, t in chips:
         parts += [("  ", None), (c, t)] if t.startswith("b-") else [(f"  {c}", t)]
     try:
         d = wr.load_draft(m.id)
-        parts += [(f"  📝 {wr.draft_line(d)}", "yellow")] if d and not d.get("posted") else []
+        parts += [(f"  📝 {draft_short(d)}", "yellow")] if d and not d.get("posted") else []
     except RuntimeError:
         parts.append(("  📝 utkast feil", "red"))
     return parts + agent_chip(snap, m) + auto_chip(snap, m)
@@ -2041,7 +2060,7 @@ def lines(snap, everyone, open_=()):
     out.append(([], None))
     who = "alle andres" if everyone else "der jeg er reviewer"
     out.append((section("review", "PRer uten min godkjenning", len(snap.prs), who), None))
-    wrepo = max([len(r.repo) for r in snap.prs] + [4])
+    wrepo = max([len(rname(r.repo)) for r in snap.prs] + [4])
     shown = set()
     for r in snap.prs:
         if not r.group:
@@ -2055,7 +2074,7 @@ def lines(snap, everyone, open_=()):
     if snap.mine:
         out.append(([], None))
         out.append((section("mine", "Mine PRer", len(snap.mine)), None))
-        wmine = max([len(m.repo) for m in snap.mine] + [4])
+        wmine = max([len(rname(m.repo)) for m in snap.mine] + [4])
         shown = set()
         for m in snap.mine:
             if not m.group:
@@ -2088,8 +2107,22 @@ def lines(snap, everyone, open_=()):
     return out
 
 
+FLEX = 60  # a flex title's length where the width isn't known (screen.txt)
+
+
+def fit(t, n):
+    return t if len(t) <= n else t[:max(1, n - 1)] + "…"
+
+
+def flexed(parts, room):
+    """parts with each flex title cut to what room (columns) leaves after the rest, at least 20."""
+    rest = sum(len(s) for s, t in parts if not (t or "").startswith("flex"))
+    n = max(20, room - rest)
+    return [(fit(s, n), t) if (t or "").startswith("flex") else (s, t) for s, t in parts]
+
+
 def plain(parts):
-    return "".join(s for s, _ in parts)
+    return "".join(s for s, _ in flexed(parts, FLEX + sum(len(s) for s, t in parts if not (t or "").startswith("flex"))))
 
 
 RICH = os.environ.get("COLORTERM") in ("truecolor", "24bit") or "256" in os.environ.get("TERM", "") \
@@ -2367,14 +2400,14 @@ def tui(scr, a):
             hl = it is not None and it is cur
             if hl:
                 put(row, 0, "▌", 1, look("cyan") | curses.A_BOLD)
-            for txt, t in parts:
+            for txt, t in flexed(parts, w - 2):
                 if x >= w - 1:
                     break
                 if t == "rule":
                     txt = "─" * (w - 1 - x)
                 elif t == "run":
                     txt = txt.replace("▶", frame, 1)
-                put(row, x, txt, w - 1 - x, look(t, hl) | (curses.A_BOLD if hl and t is None else 0))
+                put(row, x, txt, w - 1 - x, look(t, hl) | (curses.A_BOLD if hl and t in (None, "flex") else 0))
                 x += len(txt)
             if hl and x < w - 1:
                 put(row, x, " " * (w - 1 - x), w - 1 - x, look(None, True))
