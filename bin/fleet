@@ -1143,7 +1143,7 @@ def short(path):
 CONFIG = os.path.expanduser(os.environ.get("FLEET_CONFIG", "~/.config/fleet/config.toml"))
 DEFAULTS = {"autopilot": {"enabled": True, "triggers": ["review", "rereview", "build", "conflict", "comments", "triage"], "max_parallel": 2,
                           "backlog_hours": 24, "max_fix_attempts": 2, "hours": "07-17", "weekdays": "mon-fri",
-                          "blocked_minutes": 30},
+                          "blocked_minutes": 30, "stuck_minutes": 60},
             "notify": {"start": True, "done": True, "blocked": True}}
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 BUSY = ("running", "working", "blocked")  # agent states that hold one of autopilot's slots
@@ -1379,12 +1379,17 @@ class Pilot:
         return "; ".join(why), f"{x.key}@{'+'.join(fp)}", max(at, default=None)
 
     def holds(self, st, idle):
-        """Whether an agent holds a slot. One blocked longer than blocked_minutes (idle: seconds since
-        its transcript changed) is a finished turn waiting on me, not work — it frees its slot."""
-        return st in BUSY and not (st == "blocked" and idle is not None and idle > self.c["blocked_minutes"] * 60)
+        """Whether an agent holds a slot (idle: seconds since its transcript changed). One blocked longer
+        than blocked_minutes is a finished turn waiting on me; one working longer than stuck_minutes
+        without a word has hung. Neither is work — both free their slot."""
+        if st not in BUSY or idle is None:
+            return st in BUSY
+        return idle <= self.c["blocked_minutes" if st == "blocked" else "stuck_minutes"] * 60
 
     def parked(self, s):
-        return sum(1 for n, st in s.agents.items() if st in BUSY and not self.holds(st, s.quiet.get(n)))
+        """(blocked waiting on me, working but hung) among the agents that no longer hold a slot."""
+        out = [st for n, st in s.agents.items() if st in BUSY and not self.holds(st, s.quiet.get(n))]
+        return out.count("blocked"), len(out) - out.count("blocked")
 
     def busy(self, s):
         now = time.time()
@@ -1440,14 +1445,20 @@ class Pilot:
             done = set().union(*map(fp_parts, tries))
             if x.key in st["muted"] or fp_parts(fp) <= done or agent in BUSY or name in self.pending:
                 continue
-            if agent and not tries:  # I started that one myself
+            when = (at or datetime.datetime.fromtimestamp(seen, datetime.timezone.utc)).astimezone()
+            # an agent I started myself and touched after this happened has it in hand; one I left before it doesn't
+            if agent and not tries and now - s.quiet.get(name, 0) >= when.timestamp():
                 continue
             # a re-review runs once per push (fp carries the commit), an answer round once per new comment —
             # neither gives up; fixing conflicts and builds does after max_fix_attempts
             fixes = [t for t in tries if any(not q.startswith("c-") for q in fp_parts(t))]
-            if "@re-" not in fp and (len(tries) >= 1 if isinstance(x, (Review, Group)) else
-                                     any(not q.startswith("c-") for q in fp_parts(fp))
-                                     and len(fixes) >= self.c["max_fix_attempts"]):
+            spent = isinstance(x, Mine) and len(fixes) >= self.c["max_fix_attempts"]
+            fresh_c = sorted(q for q in fp_parts(fp) - done if q.startswith("c-"))
+            if spent and fresh_c:  # out of fix attempts, but new comments still get their answer round
+                why = "; ".join(w for w in why.split("; ") if COMMENTS in w)
+                fp = f"{x.key}@{'+'.join(fresh_c)}"
+            elif "@re-" not in fp and (len(tries) >= 1 if isinstance(x, (Review, Group)) else
+                                       any(not q.startswith("c-") for q in fp_parts(fp)) and spent):
                 chips[x.key] = ("🤖 ga opp", "red")
                 if x.key not in st["gaveup"]:
                     st["gaveup"].append(x.key)
@@ -1455,7 +1466,6 @@ class Pilot:
                     if self.cfg["notify"]["start"] or self.cfg["notify"]["done"]:
                         notify_one(f"🤖 ga opp {x.key}", f"!{x.id} {x.title} — {why}")
                 continue
-            when = (at or datetime.datetime.fromtimestamp(seen, datetime.timezone.utc)).astimezone()
             if work_age(when, local, days) > self.c["backlog_hours"]:
                 chips[x.key] = ("💤 for gammel · m → n", "dim")
                 continue
@@ -1530,7 +1540,9 @@ class Pilot:
         if not self.on:
             return "🤖 autopilot av"
         q = f" · {len(self.queue)} i kø" if self.queue else ""
-        q += f" · {p} ⏸ venter på meg (teller ikke)" if (p := self.parked(s)) else ""
+        waiting, hung = self.parked(s)
+        q += f" · {waiting} ⏸ venter på meg (teller ikke)" if waiting else ""
+        q += f" · {hung} ▶ stille over {self.c['stuck_minutes']} min (teller ikke)" if hung else ""
         if not self.open_():
             return f"🤖 autopilot pause til {self.opens()}{q}"
         return (f"🤖 autopilot på · {self.busy(s)}/{self.c['max_parallel']} kjører{q}"
@@ -2827,17 +2839,19 @@ GUIDE = """\
                     force-push, svarer ikke i tråder. Én gang per commit, maks {tries} forsøk, så «🤖 ga opp».
     min PR får kommentar (aktiv tråd der siste ord ikke er mitt; trigger «comments») → samme fix-agent:
                     fikser og pusher, svarene skrives som utkast (`wr draft <id>`, 📝 på linja, m → p poster).
-                    Én runde per ny kommentar — min egen push starter ingen ny; gir ikke opp.
+                    Én runde per ny kommentar — min egen push starter ingen ny; gir ikke opp, heller ikke
+                    når fix-forsøkene på bygg/konflikt er brukt opp.
   Triagerer selv (trigger «triage»):
     Issue/Bug tildelt meg i To Do uten triage-tag (og ikke wayfinder) → `wi triage <id> --save` i
                     bakgrunnen, maks 2 om gangen, én gang per item. Bare et forslag i ~/.cache/wi/triage —
                     skriver ingenting i ADO. Linja: 🧭 agent-klar / for meg / trenger info / bør bli kart · m → t;
                     m → t viser forslaget og y skriver det. Holder ikke agentplass, ingen {backlog} t-grense.
-  Ikke: rødt bygg på draft (konflikt fikses) · PRer der jeg allerede har en agent jeg startet selv · hendelser eldre enn
+  Ikke: rødt bygg på draft (konflikt fikses) · PRer der jeg har en egen agent jeg har brukt etter hendelsen · hendelser eldre enn
   {backlog} t (helg teller ikke; review regnes fra da fleet først så meg som reviewer) · utenfor {hours} {days} — da i kø til arbeidstid starter.
   Maks {par} fleet-agenter kjører samtidig (mine teller med); resten «⏳ i kø», fix før review.
   En agent som har stått ⏸ over {blocked} min (transkriptet urørt) er ferdig med turen og venter
-                    på meg — den teller ikke, så køen går videre. Linja viser hvor lenge: «⏸ fix blocked 5d».
+                    på meg — den teller ikke, så køen går videre. Det samme gjelder en ▶ som har vært stille
+                    over {stuck} min: den henger. Linja viser hvor lenge: «⏸ fix blocked 5d».
   Linja: 🤖 auto · ⏳ i kø / venter til 07:00 · 🤖 feilet: … · 🤖 ga opp · 🔕 auto av · 💤 for gammel (m → n).
   Demping (m → z) huskes til raden er borte fra lista; av/på og utenfor arbeidstid (A) gjelder økta.
   Konfig: {config}   tilstand: {state}
@@ -2879,7 +2893,8 @@ def cmd_help(a):
 def pilot_help():
     c = config()[0]["autopilot"]
     return dict(tries=c["max_fix_attempts"], backlog=c["backlog_hours"], hours=c["hours"],
-                days=c["weekdays"], par=c["max_parallel"], blocked=c["blocked_minutes"])
+                days=c["weekdays"], par=c["max_parallel"], blocked=c["blocked_minutes"],
+                stuck=c["stuck_minutes"])
 
 
 # ── cli ─────────────────────────────────────────────────────────────────────
