@@ -4,7 +4,7 @@
 // offers `fleet ls`.
 
 import { Color, Icon, LaunchType, MenuBarExtra, launchCommand, open, showHUD } from "@raycast/api";
-import { activate, attention as blockers, bare, needs, readState, run, stale, when } from "./state";
+import { activate, chipLine, needs, readState, run, stale, viewIcon, when } from "./state";
 
 const agentRow = (name: string) => name.match(/^fleet-(pr|wi)-(\d+)-(\w+)$/);
 
@@ -36,9 +36,9 @@ export default function Command() {
         </MenuBarExtra.Section>
       )}
 
-      {n.blocked.length > 0 && (
+      {n.blockedAgents.length > 0 && (
         <MenuBarExtra.Section title="Agenter som venter på meg">
-          {n.blocked.map((name) => {
+          {n.blockedAgents.map((name) => {
             const m = agentRow(name);
             return (
               <MenuBarExtra.Item
@@ -58,9 +58,9 @@ export default function Command() {
           {s.myPullRequests.map((m) => (
             <MenuBarExtra.Item
               key={m.id}
-              icon={blockers(m).length ? { source: Icon.XMarkCircle, tintColor: Color.Red } : Icon.Circle}
+              icon={viewIcon(m.view)}
               title={`!${m.id} ${m.title}${m.autoComplete ? " ↯" : ""}`}
-              subtitle={blockers(m).join(", ") || (m.draft ? "draft" : m.ready ? "klar" : "")}
+              subtitle={chipLine(m.view) || (m.draft ? "draft" : "")}
               onAction={() => open(m.url)}
             />
           ))}
@@ -86,8 +86,9 @@ export default function Command() {
           {s.workItems.map((w) => (
             <MenuBarExtra.Item
               key={w.id}
-              icon={w.state === "Doing" ? Icon.Play : w.kind === "map" ? Icon.Map : Icon.Circle}
-              title={`#${w.id} ${bare(w.title)}`}
+              icon={viewIcon(w.view)}
+              title={`#${w.id} ${w.view.title ?? w.title}`}
+              subtitle={chipLine(w.view)}
               onAction={() => open(w.url)}
             />
           ))}
@@ -95,7 +96,7 @@ export default function Command() {
       )}
 
       <MenuBarExtra.Section>
-        {n.running > 0 && <MenuBarExtra.Item icon={Icon.Play} title={`${n.running} agenter kjører`} />}
+        {n.runningAgents > 0 && <MenuBarExtra.Item icon={Icon.Play} title={`${n.runningAgents} agenter kjører`} />}
         <MenuBarExtra.Item
           icon={Icon.List}
           title="Åpne fleet-lista"

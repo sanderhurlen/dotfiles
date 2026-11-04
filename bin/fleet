@@ -25,7 +25,9 @@
 #   fleet help               explained (Norwegian)
 #
 # What the list shows is written to ~/.cache/fleet/screen.txt and state.json every
-# 15 s, so a Claude session can read it.
+# 15 s, so a Claude session can read it. Each row in state.json carries `view` (icon,
+# chips, needsMe — what the row shows, worked out here) and `needsMe` sums them up, so
+# Raycast only draws; how a row looks is decided in this file and nowhere else.
 #
 # Agents run in the local clone of the item's/PR's repo (found under FLEET_ROOTS,
 # default ~/visense), else in the first root. Named for what they work on and their role:
@@ -2186,11 +2188,64 @@ def paint(parts, width=None):
 # ── state file ──────────────────────────────────────────────────────────────
 
 
+def view(icon, tone, chips, needs_me=False, **extra):
+    """A row as the list shows it, for Raycast and anything else reading state.json: the icon and
+    its tone, the chips after the title ([(text, tone)] as the row has them, separators dropped),
+    and whether it needs me. Tones are the TUI's (red, yellow, green, cyan, dim, b-bad, b-ok, …)."""
+    return {"icon": icon, "tone": tone, "chips": [{"text": t.strip(), "tone": tn} for t, tn in chips if tn and t.strip()],
+            "needsMe": needs_me, **extra}
+
+
+def work_view(snap, w):
+    if w.parent:
+        who = f"@{w.it.assignee.split('@')[0]}" if w.it.assignee else ""
+        chips = ([(who, "dim")] if who else []) + ([(" HITL ", "b-bad")] if w.it.hitl else [])
+        return view({"ledig": "○", "tatt": "▶", "blokkert": "⏸"}.get(w.status, "·"), STATUS.get(w.status, "dim"),
+                    chips + skill_chip(w) + pr_chip(w) + tree_chip(w) + agent_chip(snap, w),
+                    title=bare(w.title), label=(w.it.kind or w.type.lower()[:5]).capitalize(), status=w.status)
+    label, tone = KIND.get(w.kind) or TYPE.get(w.type.lower(), (w.type.lower()[:5], "b-item"))
+    doing = w.state == "Doing"
+    return view("●" if doing else "○", "yellow" if doing else "dim",
+                (tickets_chip(w) if w.folds else []) + skill_chip(w) + pr_chip(w) + tree_chip(w)
+                + agent_chip(snap, w) + auto_chip(snap, w),
+                title=bare(w.title), label=label.capitalize(), labelTone=tone)
+
+
+def review_view(snap, r):
+    """✓ I've done my part, ○ my turn; it needs me when a draft waits to be posted."""
+    done = settled(r) and not pushed_since(r)
+    try:
+        d = wr.load_draft(r.id)
+        post = wr.draft_line(d) if d and not d.get("posted") else None
+    except RuntimeError:
+        post = None
+    return view("✓" if done else "○", "green" if done else "dim",
+                agent_chip(snap, r) + pushed_chip(r) + auto_chip(snap, r),
+                needs_me=bool(post), myTurn=bool(r.asked and not done), postDraft=post)
+
+
+def mine_view(snap, m):
+    """mine_status as on the row; it needs me when it's ✗ or ⏸ (a build, or what an agent handles, isn't)."""
+    icon, tone, chips = mine_status(m, handled(snap, m))
+    return view(icon, tone, chips + agent_chip(snap, m) + auto_chip(snap, m), needs_me=icon in ("✗", "⏸"),
+                titleDim=m.pr.draft)
+
+
+def needs_me(snap, mine, reviews):
+    """What needs me, as the menu bar counts it: agents waiting on me, my PRs that are ✗/⏸, drafts to post."""
+    blocked = sorted(n for n, st in snap.agents.items() if st == "blocked")
+    fix = [m["id"] for m in mine if m["view"]["needsMe"]]
+    drafts = [r["id"] for r in reviews if r["view"]["needsMe"]]
+    return {"count": len(blocked) + len(fix) + len(drafts), "blockedAgents": blocked, "myPrs": fix,
+            "drafts": drafts, "review": [r["id"] for r in reviews if r["view"]["myTurn"]],
+            "runningAgents": sum(st in ("running", "working") for st in snap.agents.values())}
+
+
 def work_json(snap, w):
     out = {"id": w.id, "title": w.title, "state": w.state, "type": w.type, "kind": w.kind,
            "project": w.project, "url": w.url, "prompt": w.prompt, "agent": agent_name(w),
            "agents": dict(owned(snap.agents, w)), "start": f"fleet go {w.id}",
-           "worktrees": [t for _, t in w.trees], "myPrs": [m.id for m in w.prs]}
+           "worktrees": [t for _, t in w.trees], "myPrs": [m.id for m in w.prs], "view": work_view(snap, w)}
     if w.trees:
         out["openInCode"] = f"fleet code {w.id}"
     if w.parent:
@@ -2223,7 +2278,8 @@ def write_state(snap, everyone, open_=(), cur=None, msg=""):
         "pullRequests": [{"id": r.id, "title": r.title, "project": r.project, "repo": r.repo,
                           "author": r.who, "source": r.source, "target": r.target, "url": r.url,
                           "imReviewer": r.asked, "myVote": r.vote, "agent": agent_name(r),
-                          "agents": dict(owned(snap.agents, r)), "start": f"fleet review {r.id}"}
+                          "agents": dict(owned(snap.agents, r)), "start": f"fleet review {r.id}",
+                          "view": review_view(snap, r)}
                          for r in snap.prs],
         "myPullRequests": [{"id": m.id, "title": m.title, "project": m.project, "repo": m.repo,
                             "source": m.source, "target": m.target, "url": m.url, "draft": m.pr.draft,
@@ -2233,7 +2289,8 @@ def write_state(snap, everyone, open_=(), cur=None, msg=""):
                             "workItems": sorted(m.items), "todo": m.todo,
                             "group": {"id": m.group.id, "title": m.group.title, "url": m.group.url}
                             if m.group else None, "agent": agent_name(m),
-                            "agents": dict(owned(snap.agents, m)), "start": f"fleet fix {m.id}"}
+                            "agents": dict(owned(snap.agents, m)), "start": f"fleet fix {m.id}",
+                            "view": mine_view(snap, m)}
                            for m in snap.mine],
         "orphanAgents": [{"name": o.name, "id": o.sid, "state": o.state, "cwd": o.cwd,
                           "remove": f"fleet prune --id {o.sid}"} for o in snap.orphans],
@@ -2250,6 +2307,7 @@ def write_state(snap, everyone, open_=(), cur=None, msg=""):
         "autopilot": {"status": snap.autohead or None, "rows": {k: c for k, (c, _) in snap.auto.items()},
                       "config": CONFIG, "state": Pilot.PATH},
     }
+    state["needsMe"] = needs_me(snap, state["myPullRequests"], state["pullRequests"])
     for name, body in (("screen.txt", "\n".join(screen) + "\n"),
                        ("state.json", json.dumps(state, indent=2, ensure_ascii=False) + "\n")):
         tmp = os.path.join(OUT, f".{name}.{os.getpid()}")

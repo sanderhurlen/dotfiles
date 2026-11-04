@@ -1,36 +1,11 @@
 // fleet's list in Raycast: work items (maps with their open tickets), PRs waiting for my
-// review and my own PRs, with the actions the TUI has under m. Every action is a call to
-// a bin (fleet, wr); the list reads state.json again afterwards.
+// review and my own PRs, with the actions the TUI has under m. Icons and chips are fleet's
+// own (each row's `view` in state.json); every action is a call to a bin (fleet, wr), and
+// the list reads state.json again afterwards.
 
-import {
-  Action,
-  ActionPanel,
-  Alert,
-  Color,
-  Icon,
-  List,
-  Toast,
-  confirmAlert,
-  showToast,
-} from "@raycast/api";
+import { Action, ActionPanel, Alert, Icon, List, Toast, confirmAlert, showToast } from "@raycast/api";
 import { ReactNode, useState } from "react";
-import {
-  AgentState,
-  MyPr,
-  ReviewPr,
-  State,
-  WorkItem,
-  activate,
-  attention,
-  bare,
-  draft,
-  draftLine,
-  readState,
-  run,
-  stale,
-  ticketCounts,
-  when,
-} from "./state";
+import { MyPr, ReviewPr, State, WorkItem, activate, chips, readState, run, stale, viewIcon, when } from "./state";
 
 export default function Command() {
   const [s, setS] = useState<State | undefined>(readState);
@@ -73,7 +48,7 @@ export default function Command() {
     );
   }
 
-  const review = s.pullRequests.filter((p) => p.imReviewer && !p.myVote);
+  const review = s.pullRequests; // like fleet: ○ my turn, ✓ I've done my part
   const subtitle = stale(s) ? `fleet kjører ikke (sist ${when(s.updated)})` : `oppdatert ${when(s.updated)}`;
 
   return (
@@ -127,11 +102,11 @@ function bundles(mine: MyPr[]): [NonNullable<MyPr["group"]>, MyPr[]][] {
 function MyPrItem({ m, act, refresh }: { m: MyPr; act: Act; refresh: ReactNode }) {
   return (
     <List.Item
-      icon={attention(m).length ? { source: Icon.XMarkCircle, tintColor: Color.Red } : Icon.Circle}
+      icon={viewIcon(m.view)}
       title={m.title}
-      subtitle={`!${m.id} ${m.repo}${m.autoComplete ? " ↯" : ""}`}
+      subtitle={`!${m.id} ${m.repo}${m.autoComplete ? " ↯" : ""}${m.view.titleDim ? " · draft" : ""}`}
       keywords={[String(m.id), m.repo, ...(m.group ? [String(m.group.id)] : [])]}
-      accessories={[...agentTags(m.agents), ...myPrTags(m)]}
+      accessories={chips(m.view)}
       actions={
         <ActionPanel>
           <Action.OpenInBrowser url={m.url} />
@@ -154,24 +129,21 @@ function MyPrItem({ m, act, refresh }: { m: MyPr; act: Act; refresh: ReactNode }
 }
 
 function ReviewItem({ p, act, refresh }: { p: ReviewPr; act: Act; refresh: ReactNode }) {
-  const d = draft(p.id);
+  const d = p.view.postDraft;
   return (
     <List.Item
-      icon={Icon.Eye}
+      icon={viewIcon(p.view)}
       title={p.title}
-      subtitle={`!${p.id} ${p.repo}`}
+      subtitle={`!${p.id} ${p.repo}${p.imReviewer ? "" : " · ikke reviewer"}`}
       keywords={[String(p.id), p.repo, p.author]}
-      accessories={[
-        ...agentTags(p.agents),
-        { text: `@${p.author.split("@")[0]}` },
-      ]}
+      accessories={[...chips(p.view), { text: `@${p.author.split("@")[0]}` }]}
       actions={
         <ActionPanel>
           {d ? (
             <Action
               title="Post review-utkastet"
               icon={Icon.Upload}
-              onAction={() => act(`Poster på !${p.id}`, "wr", ["post", String(p.id)], `Post på !${p.id}: ${draftLine(d)}?`)}
+              onAction={() => act(`Poster på !${p.id}`, "wr", ["post", String(p.id)], `Post på !${p.id}: ${d}?`)}
             />
           ) : (
             <Action.OpenInBrowser url={p.url} />
@@ -197,18 +169,14 @@ function ReviewItem({ p, act, refresh }: { p: ReviewPr; act: Act; refresh: React
 const STATES = ["To Do", "Doing", "Done"];
 
 function WorkRow({ w, act, refresh }: { w: WorkItem; act: Act; refresh: ReactNode }) {
-  const ticket = !!w.status;
+  const v = w.view;
   return (
     <List.Item
-      icon={ticket ? Icon.Dot : w.state === "Doing" ? Icon.Play : w.kind === "map" ? Icon.Map : Icon.Circle}
-      title={bare(w.title)}
-      subtitle={`${ticket ? w.status : w.kind === "spec" ? "Spec" : w.kind === "map" ? "Kart" : w.type} #${w.id}`}
+      icon={viewIcon(v)}
+      title={`${v.status ? "  " : ""}${v.title ?? w.title}`}
+      subtitle={`${v.label ?? w.type} #${w.id}${v.status ? ` · ${v.status}` : ""}`}
       keywords={[String(w.id), w.type]}
-      accessories={[
-        ...agentTags(w.agents),
-        ...(w.hitl ? [{ tag: { value: "HITL", color: Color.Purple } }] : []),
-        ...(w.tickets ? [{ text: ticketCounts(w) }] : []),
-      ]}
+      accessories={chips(v)}
       actions={
         <ActionPanel>
           <Action.OpenInBrowser url={w.url} />
@@ -248,25 +216,4 @@ function Common({ url, refresh }: { url: string; refresh: ReactNode }) {
       {refresh}
     </ActionPanel.Section>
   );
-}
-
-const AGENT: Record<string, [string, Color]> = {
-  blocked: ["⏸ venter", Color.Orange],
-  running: ["▶ kjører", Color.Green],
-  working: ["▶ kjører", Color.Green],
-  done: ["✓", Color.SecondaryText],
-};
-
-function agentTags(agents: Record<string, AgentState>) {
-  return Object.entries(agents ?? {}).map(([role, st]) => {
-    const [label, color] = AGENT[st] ?? [st, Color.SecondaryText];
-    return { tag: { value: `${role} ${label}`, color } };
-  });
-}
-
-function myPrTags(m: MyPr) {
-  const a = attention(m);
-  if (a.length) return [{ tag: { value: a.join(", "), color: Color.Red } }];
-  if (m.draft) return [{ tag: { value: "draft", color: Color.SecondaryText } }];
-  return m.ready ? [{ tag: { value: "klar", color: Color.Green } }] : [];
 }

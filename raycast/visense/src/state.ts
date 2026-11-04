@@ -1,7 +1,9 @@
 // What the commands share: fleet's state.json (written by `fleet` every 15 s, or once by
-// `fleet ls`), wr's review drafts, and running the dotfiles bins. All logic about ADO stays
-// in the bins; this only reads what they write and calls them.
+// `fleet ls`) and running the dotfiles bins. All logic stays in the bins: every row carries
+// `view` — icon, chips and whether it needs me, worked out by fleet as its own list shows
+// them — so this only maps fleet's tones to Raycast's colours and calls the bins.
 
+import { Color, Icon, Image, List } from "@raycast/api";
 import { execFile, spawn } from "node:child_process";
 import { mkdirSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -9,13 +11,27 @@ import { join } from "node:path";
 
 const HOME = homedir();
 const STATE = join(HOME, ".cache/fleet/state.json");
-const DRAFTS = join(HOME, ".local/state/wr/review");
 const STALE_MS = 10 * 60 * 1000; // fleet rewrites state.json every 15 s while it runs
 
 // Raycast runs with a bare PATH; claude lives in ~/.local/bin, az/uv in Homebrew.
 const PATH = [join(HOME, ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin", process.env.PATH].join(":");
 
 export type AgentState = "running" | "working" | "blocked" | "done" | string;
+
+/** A row as fleet's list shows it. Tones are fleet's: red, yellow, green, cyan, dim, b-bad, b-ok, … */
+export interface View {
+  icon: string; // ✗ ⏸ ✓ ○ ● ▶ …
+  tone: string;
+  chips: { text: string; tone: string }[];
+  needsMe: boolean;
+  title?: string; // work items: without «Spec:»/«Kart:»
+  label?: string; // work items: Spec, Kart, Bug, Task …
+  labelTone?: string;
+  status?: string; // tickets: ledig | tatt | blokkert
+  titleDim?: boolean; // my PRs: draft
+  myTurn?: boolean; // reviews: ○
+  postDraft?: string | null; // reviews: the draft waiting to be posted, as wr draft_line says it
+}
 
 export interface WorkItem {
   id: number;
@@ -31,6 +47,7 @@ export interface WorkItem {
   hitl?: boolean;
   doneTickets?: number;
   tickets?: WorkItem[];
+  view: View;
 }
 
 export interface ReviewPr {
@@ -42,6 +59,7 @@ export interface ReviewPr {
   imReviewer: boolean;
   myVote: number;
   agents: Record<string, AgentState>;
+  view: View;
 }
 
 export interface MyPr {
@@ -57,6 +75,17 @@ export interface MyPr {
   todo: string[];
   group: { id: number; title: string; url: string } | null; // the work item it shares with my other PRs
   agents: Record<string, AgentState>;
+  view: View;
+}
+
+/** What needs me, counted by fleet: agents waiting on me, my PRs that are ✗/⏸, drafts to post. */
+export interface NeedsMe {
+  count: number;
+  blockedAgents: string[];
+  myPrs: number[];
+  drafts: number[];
+  review: number[]; // reviews where it's my turn (○)
+  runningAgents: number;
 }
 
 export interface State {
@@ -66,12 +95,7 @@ export interface State {
   pullRequests: ReviewPr[];
   myPullRequests: MyPr[];
   agents: Record<string, AgentState>;
-}
-
-export interface Draft {
-  vote?: string;
-  comments?: { skip?: boolean }[];
-  posted?: string;
+  needsMe?: NeedsMe; // missing until the fleet that writes it has run
 }
 
 export function readState(): State | undefined {
@@ -95,63 +119,69 @@ export function when(iso: string): string {
     : `${d.toLocaleDateString("nb-NO", { day: "2-digit", month: "2-digit" }).replace(/\.$/, "")} ${hm}`;
 }
 
-/** The review agent's draft for a PR, when it is written and not posted yet. */
-/** What blocks my PR, without a red build: autopilot's fix agent has that, and fleet shows it as ○ too. */
-export function attention(m: MyPr): string[] {
-  const builds = new Set(
-    (m.policies ?? []).filter((p) => p.blocking && ["rejected", "broken"].includes(p.status)).map((p) => `${p.name} feiler`),
-  );
-  return m.todo.filter((t) => !builds.has(t));
+const NO_NEEDS: NeedsMe = { count: 0, blockedAgents: [], myPrs: [], drafts: [], review: [], runningAgents: 0 };
+
+/** What needs me, as fleet counted it, with the rows it points at. */
+export function needs(s: State) {
+  const n = s.needsMe ?? NO_NEEDS;
+  return {
+    ...n,
+    fix: s.myPullRequests.filter((m) => n.myPrs.includes(m.id)),
+    review: s.pullRequests.filter((p) => n.review.includes(p.id)),
+  };
 }
 
-/** «Spec: Foo» → «Foo», like fleet: the kind already says it. */
-export function bare(title: string): string {
-  return title.replace(/^\s*(spec|wayfinder-kart|kart)\s*:\s*/i, "") || title;
+/** fleet's tone as a Raycast colour; undefined for plain text. */
+export function color(tone: string): Color | undefined {
+  const t = tone.replace(/^[bt]-/, "");
+  return (
+    {
+      red: Color.Red,
+      bad: Color.Red,
+      bug: Color.Red,
+      yellow: Color.Yellow,
+      warn: Color.Orange,
+      green: Color.Green,
+      ok: Color.Green,
+      spec: Color.Green,
+      cyan: Color.Blue,
+      run: Color.Blue,
+      map: Color.Blue,
+      task: Color.Blue,
+      blue: Color.Blue,
+      magenta: Color.Magenta,
+      issue: Color.Magenta,
+      skill: Color.Purple,
+      dim: Color.SecondaryText,
+      item: Color.SecondaryText,
+    } as Record<string, Color>
+  )[t];
 }
 
-const TICKETS: [string, string][] = [["ledig", "○"], ["tatt", "▶"], ["blokkert", "⏸"]];
-
-/** A map's/spec's tickets, compact like fleet: «○2 ▶1 ⏸1 ✓4»; a 0 is left out. */
-export function ticketCounts(w: WorkItem): string {
-  const parts = TICKETS.map(([st, icon]) => [icon, (w.tickets ?? []).filter((t) => t.status === st).length] as const)
-    .filter(([, n]) => n)
-    .map(([icon, n]) => `${icon}${n}`);
-  if (w.doneTickets) parts.push(`✓${w.doneTickets}`);
-  return parts.join(" ") || "ingen tickets";
-}
-
-export function draft(id: number): Draft | undefined {
-  try {
-    const d: Draft = JSON.parse(readFileSync(join(DRAFTS, `${id}.json`), "utf8"));
-    return d.posted ? undefined : d;
-  } catch {
-    return undefined;
-  }
-}
-
-const VOTE: Record<string, string> = {
-  approve: "approve",
-  suggestions: "approve med forslag",
-  wait: "vent på forfatter",
-  reject: "reject",
-  none: "ingen stemme",
+const ICON: Record<string, Icon> = {
+  "✗": Icon.XMarkCircle,
+  "⏸": Icon.Pause,
+  "✓": Icon.CheckCircle,
+  "○": Icon.Circle,
+  "●": Icon.CircleFilled,
+  "▶": Icon.Play,
 };
 
-export function draftLine(d: Draft): string {
-  const n = (d.comments ?? []).filter((c) => !c.skip).length;
-  return `${VOTE[d.vote ?? "none"] ?? d.vote} · ${n} kommentar${n === 1 ? "" : "er"}`;
+/** The row's icon in its tone. */
+export function viewIcon(v: View): Image.ImageLike {
+  return { source: ICON[v.icon] ?? Icon.Dot, tintColor: color(v.tone) };
 }
 
-/** What needs me, in the order the menu bar shows it. */
-export function needs(s: State) {
-  const blocked = Object.entries(s.agents ?? {})
-    .filter(([, st]) => st === "blocked")
-    .map(([name]) => name);
-  const fix = s.myPullRequests.filter((m) => attention(m).length);
-  const review = s.pullRequests.filter((p) => p.imReviewer && !p.myVote);
-  const drafts = review.filter((p) => draft(p.id));
-  const running = Object.values(s.agents ?? {}).filter((st) => st === "running" || st === "working").length;
-  return { blocked, fix, review, drafts, running, count: blocked.length + fix.length + drafts.length };
+/** The row's chips as accessories: fleet's boxes (b-…) as tags, the rest as coloured text. */
+export function chips(v: View): List.Item.Accessory[] {
+  return v.chips.map((c) =>
+    c.tone.startsWith("b-") ? { tag: { value: c.text, color: color(c.tone) } } : { text: { value: c.text, color: color(c.tone) } },
+  );
+}
+
+/** The chips as one line, for a menu bar subtitle. */
+export function chipLine(v: View): string {
+  return v.chips.map((c) => c.text).join("  ");
 }
 
 /** Runs a dotfiles bin; resolves with its stdout, rejects with the last line it wrote to stderr. */
