@@ -4,7 +4,7 @@
 // offers `fleet ls`.
 
 import { Color, Icon, LaunchType, MenuBarExtra, launchCommand, open, showHUD } from "@raycast/api";
-import { activate, needs, readState, run, stale, when } from "./state";
+import { activate, attention as blockers, bare, needs, readState, run, stale, when } from "./state";
 
 const agentRow = (name: string) => name.match(/^fleet-(pr|wi)-(\d+)-(\w+)$/);
 
@@ -58,9 +58,9 @@ export default function Command() {
           {s.myPullRequests.map((m) => (
             <MenuBarExtra.Item
               key={m.id}
-              icon={m.todo.length ? { source: Icon.XMarkCircle, tintColor: Color.Red } : Icon.Circle}
-              title={`!${m.id} ${m.title}`}
-              subtitle={m.todo.length ? m.todo.join(", ") : m.draft ? "draft" : m.ready ? "klar" : ""}
+              icon={blockers(m).length ? { source: Icon.XMarkCircle, tintColor: Color.Red } : Icon.Circle}
+              title={`!${m.id} ${m.title}${m.autoComplete ? " ↯" : ""}`}
+              subtitle={blockers(m).join(", ") || (m.draft ? "draft" : m.ready ? "klar" : "")}
               onAction={() => open(m.url)}
             />
           ))}
@@ -87,8 +87,7 @@ export default function Command() {
             <MenuBarExtra.Item
               key={w.id}
               icon={w.state === "Doing" ? Icon.Play : w.kind === "map" ? Icon.Map : Icon.Circle}
-              title={`#${w.id} ${w.title}`}
-              subtitle={w.state}
+              title={`#${w.id} ${bare(w.title)}`}
               onAction={() => open(w.url)}
             />
           ))}

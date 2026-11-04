@@ -53,6 +53,7 @@ export interface MyPr {
   ready: boolean;
   conflicts: boolean;
   autoComplete: boolean;
+  policies: { name: string; status: string; blocking: boolean }[];
   todo: string[];
   group: { id: number; title: string; url: string } | null; // the work item it shares with my other PRs
   agents: Record<string, AgentState>;
@@ -95,6 +96,30 @@ export function when(iso: string): string {
 }
 
 /** The review agent's draft for a PR, when it is written and not posted yet. */
+/** What blocks my PR, without a red build: autopilot's fix agent has that, and fleet shows it as ○ too. */
+export function attention(m: MyPr): string[] {
+  const builds = new Set(
+    (m.policies ?? []).filter((p) => p.blocking && ["rejected", "broken"].includes(p.status)).map((p) => `${p.name} feiler`),
+  );
+  return m.todo.filter((t) => !builds.has(t));
+}
+
+/** «Spec: Foo» → «Foo», like fleet: the kind already says it. */
+export function bare(title: string): string {
+  return title.replace(/^\s*(spec|wayfinder-kart|kart)\s*:\s*/i, "") || title;
+}
+
+const TICKETS: [string, string][] = [["ledig", "○"], ["tatt", "▶"], ["blokkert", "⏸"]];
+
+/** A map's/spec's tickets, compact like fleet: «○2 ▶1 ⏸1 ✓4»; a 0 is left out. */
+export function ticketCounts(w: WorkItem): string {
+  const parts = TICKETS.map(([st, icon]) => [icon, (w.tickets ?? []).filter((t) => t.status === st).length] as const)
+    .filter(([, n]) => n)
+    .map(([icon, n]) => `${icon}${n}`);
+  if (w.doneTickets) parts.push(`✓${w.doneTickets}`);
+  return parts.join(" ") || "ingen tickets";
+}
+
 export function draft(id: number): Draft | undefined {
   try {
     const d: Draft = JSON.parse(readFileSync(join(DRAFTS, `${id}.json`), "utf8"));
@@ -122,7 +147,7 @@ export function needs(s: State) {
   const blocked = Object.entries(s.agents ?? {})
     .filter(([, st]) => st === "blocked")
     .map(([name]) => name);
-  const fix = s.myPullRequests.filter((m) => m.todo.length);
+  const fix = s.myPullRequests.filter((m) => attention(m).length);
   const review = s.pullRequests.filter((p) => p.imReviewer && !p.myVote);
   const drafts = review.filter((p) => draft(p.id));
   const running = Object.values(s.agents ?? {}).filter((st) => st === "running" || st === "working").length;

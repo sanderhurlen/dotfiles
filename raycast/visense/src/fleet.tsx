@@ -21,11 +21,14 @@ import {
   State,
   WorkItem,
   activate,
+  attention,
+  bare,
   draft,
   draftLine,
   readState,
   run,
   stale,
+  ticketCounts,
   when,
 } from "./state";
 
@@ -124,9 +127,9 @@ function bundles(mine: MyPr[]): [NonNullable<MyPr["group"]>, MyPr[]][] {
 function MyPrItem({ m, act, refresh }: { m: MyPr; act: Act; refresh: ReactNode }) {
   return (
     <List.Item
-      icon={m.todo.length ? { source: Icon.XMarkCircle, tintColor: Color.Red } : Icon.Circle}
+      icon={attention(m).length ? { source: Icon.XMarkCircle, tintColor: Color.Red } : Icon.Circle}
       title={m.title}
-      subtitle={`!${m.id} ${m.repo}`}
+      subtitle={`!${m.id} ${m.repo}${m.autoComplete ? " ↯" : ""}`}
       keywords={[String(m.id), m.repo, ...(m.group ? [String(m.group.id)] : [])]}
       accessories={[...agentTags(m.agents), ...myPrTags(m)]}
       actions={
@@ -198,14 +201,13 @@ function WorkRow({ w, act, refresh }: { w: WorkItem; act: Act; refresh: ReactNod
   return (
     <List.Item
       icon={ticket ? Icon.Dot : w.state === "Doing" ? Icon.Play : w.kind === "map" ? Icon.Map : Icon.Circle}
-      title={w.title}
-      subtitle={`#${w.id} ${ticket ? w.status : w.type}`}
+      title={bare(w.title)}
+      subtitle={`${ticket ? w.status : w.kind === "spec" ? "Spec" : w.kind === "map" ? "Kart" : w.type} #${w.id}`}
       keywords={[String(w.id), w.type]}
       accessories={[
         ...agentTags(w.agents),
         ...(w.hitl ? [{ tag: { value: "HITL", color: Color.Purple } }] : []),
-        ...(w.tickets ? [{ text: `${w.tickets.length} åpne, ${w.doneTickets ?? 0} done` }] : []),
-        { tag: { value: w.state, color: w.state === "Doing" ? Color.Blue : Color.SecondaryText } },
+        ...(w.tickets ? [{ text: ticketCounts(w) }] : []),
       ]}
       actions={
         <ActionPanel>
@@ -263,8 +265,8 @@ function agentTags(agents: Record<string, AgentState>) {
 }
 
 function myPrTags(m: MyPr) {
-  if (m.todo.length) return [{ tag: { value: m.todo.join(", "), color: Color.Red } }];
+  const a = attention(m);
+  if (a.length) return [{ tag: { value: a.join(", "), color: Color.Red } }];
   if (m.draft) return [{ tag: { value: "draft", color: Color.SecondaryText } }];
-  if (m.ready) return [{ tag: { value: "klar", color: Color.Green } }];
-  return m.autoComplete ? [{ tag: { value: "auto", color: Color.Blue } }] : [];
+  return m.ready ? [{ tag: { value: "klar", color: Color.Green } }] : [];
 }
