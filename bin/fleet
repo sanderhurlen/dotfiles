@@ -2004,7 +2004,7 @@ def bundle_row(b):
 def mine_row(snap, m, wrepo, indent=""):
     icon, tone, chips = mine_status(m, handled(snap, m))
     parts = [(indent + icon + " ", tone), (f"!{m.id:<5} ", "dim"), (f"{m.repo:<{wrepo}}  ", hue(m.repo)),
-             (m.title[:60], None), (f"  {ago(m.created)}", age_tone(m.created))]
+             (m.title[:60], "dim" if m.pr.draft else None), (f"  {ago(m.created)}", age_tone(m.created))]
     for c, t in chips:
         parts += [("  ", None), (c, t)] if t.startswith("b-") else [(f"  {c}", t)]
     try:
