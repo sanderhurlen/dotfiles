@@ -1989,26 +1989,41 @@ def bare(title):
     return KIND_PREFIX.sub("", title) or title
 
 
+TICKETS = (("ledig", "○", "green"), ("tatt", "▶", "yellow"), ("blokkert", "⏸", "red"))
+
+
+def tickets_chip(w):
+    """A map's/spec's tickets, compact: «○2 ▶1 ⏸1 ✓4» — ledig, tatt, blokkert, done; none left out when 0."""
+    out = []
+    for status, icon, tone in TICKETS:
+        n = sum(t.status == status for t in w.children)
+        out += [(f" {icon}{n}", tone)] if n else []
+    out += [(f" ✓{w.done_children}", "dim")] if w.done_children else []
+    return [(" ", None)] + out if out else [("  ingen tickets", "dim")]
+
+
 def work_row(snap, w, multi, folded):
+    """«● Spec  #123  ▸ Tittel som kuttes …  ○2 ▶1 ✓4  → /implement  ↳ !7407 ○ …» — ● Doing, ○ To Do;
+    the title gives way so the chips after it always show."""
     label, tone = KIND.get(w.kind) or TYPE.get(w.type.lower(), (w.type.lower()[:5], "b-item"))
-    parts = [("● " if w.state == "Doing" else "○ ", "yellow" if w.state == "Doing" else "dim"),
-             (f"#{w.id:<5} ", "dim")] + badge(f"{label:<5}", tone)
+    parts = [("● " if w.state == "Doing" else "○ ", "yellow" if w.state == "Doing" else "dim")] \
+        + badge(f"{label.capitalize():<5}", tone) + [(f"#{w.id:<5} ", "dim")]
     if multi:
         parts.append((f"{w.project[:12]:<12}  ", hue(w.project, False)))
     if w.folds:
         parts.append(("▸ " if folded else "▾ ", "cyan"))
-    parts += [(bare(w.title)[:70], "bold"), (f"  {w.state}", "yellow" if w.state == "Doing" else "dim")]
+    parts.append((bare(w.title), "flex"))
     if w.folds:
-        parts.append((f"  {len(w.children)} åpne, {w.done_children} done", "dim"))
+        parts += tickets_chip(w)
     parts.append((f"  → {w.skill}", "skill"))
     return parts + pr_chip(w) + tree_chip(w) + agent_chip(snap, w) + auto_chip(snap, w)
 
 
 def child_row(snap, t, last, pad):
-    kind = t.it.kind or t.type.lower()[:5]
+    kind = (t.it.kind or t.type.lower()[:5]).capitalize()
     who = f" @{t.it.assignee.split('@')[0]}" if t.it.assignee else ""
-    parts = [(" " * pad + ("└ " if last else "├ "), "dim"), (f"#{t.id:<5} ", "dim"), (f"{kind:<9} ", "cyan"),
-             (f"{t.status:<8} ", STATUS.get(t.status, "dim")), (bare(t.title)[:70], None),
+    parts = [(" " * pad + ("└ " if last else "├ "), "dim"), (f"{kind:<9} ", "cyan"), (f"#{t.id:<5} ", "dim"),
+             (f"{t.status:<8} ", STATUS.get(t.status, "dim")), (bare(t.title), "flex"),
              (who, hue(who.strip(" @"), False) if who else "dim")]
     if t.it.hitl:
         parts += [("  ", None), (" HITL ", "b-bad")]
@@ -2776,7 +2791,7 @@ GUIDE = """\
 {b}ORG{r}  {org} (alle prosjekter)
 
 {b}LISTA{r}
-  Work items   tildelt meg, state To Do eller Doing. Doing først.
+  Work items   tildelt meg, state To Do eller Doing. Doing først (●, To Do ○). Kart/spec: ○ ledig ▶ tatt ⏸ blokkert ✓ done.
   PRer         aktive, ikke draft, ikke mine, uten min godkjenning (stemme < 5).
                Default bare der jeg er reviewer; `a` / -a viser alle andres.
   Mine PRer    aktive PRer jeg har laget, draft også. Viser det som blokkerer:
