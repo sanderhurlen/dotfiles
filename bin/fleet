@@ -41,6 +41,7 @@ import fcntl
 import glob
 import json
 import locale
+import math
 import os
 import re
 import shlex
@@ -1883,6 +1884,7 @@ TONES = {"green": ((114, 2), None, ""), "red": ((203, 1), None, ""), "yellow": (
          **{f"h{i}": (c, None, "bold") for i, c in enumerate(_HUES)},
          **{f"H{i}": (c, None, "") for i, c in enumerate(_HUES)}}
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+SEA_W, WAVES, GLINT = 13, (24, 25, 31, 32, 38, 39, 45, 81), (231, 195, 159, 123, 117, 81)  # the title's sea and glint
 SECTION = {"work": "yellow", "review": "magenta", "mine": "green", "warn": "yellow", "orphan": "red", "clean": "dim"}
 
 
@@ -2332,6 +2334,38 @@ def tui(scr, a):
         except curses.error:
             pass
 
+    def ink(c, bold=False):
+        """attr for a raw 256-colour fg (the title's own colours, not a tone)."""
+        if (c, -1) not in pairs and len(pairs) + 1 < curses.COLOR_PAIRS:
+            curses.init_pair(len(pairs) + 1, c, -1)
+            pairs[c, -1] = curses.color_pair(len(pairs) + 1)
+        return pairs.get((c, -1), 0) | (curses.A_BOLD if bold else 0)
+
+    def brand(t, w, sailing=False):
+        """«～≈∼⛵≈～ fleet»: waves roll, the boat drifts — sails across while fetching — and a glint
+        sweeps over the name. Returns the x after it."""
+        if not rich:
+            put(0, 0, " ⛵ fleet ", w - 1, look("b-title"))
+            return 10
+        sea = SEA_W
+        boat = 1 + (int(t * 8) % (sea - 3) if sailing else round((math.sin(t * 0.5) + 1) / 2 * (sea - 4)))
+        x = 1
+        while x < sea:
+            if x == boat:
+                put(0, x, "⛵", w - 1 - x, ink(231))
+                x += 2
+                continue
+            ph = math.sin(x * 0.8 - t * 3)
+            put(0, x, "≈" if ph > 0.35 else "∼" if ph > -0.35 else "·", w - 1 - x,
+                ink(WAVES[min(len(WAVES) - 1, int((ph + 1) / 2 * len(WAVES)))]))
+            x += 1
+        x += 1
+        glint = (t * 6) % 14  # sweeps the five letters, then rests
+        for i, ch in enumerate("fleet"):
+            d = abs(i - glint)
+            put(0, x + i, ch, w - 1 - x - i, ink(GLINT[min(len(GLINT) - 1, int(d))], True))
+        return x + 5
+
     snap = Snapshot()
     lock, wake = threading.Lock(), threading.Event()
     sel, top, msg, err, written, shown = 0, 0, "", False, 0.0, None
@@ -2364,7 +2398,7 @@ def tui(scr, a):
             wake.clear()
 
     threading.Thread(target=loader, daemon=True).start()
-    scr.timeout(500)
+    scr.timeout(150)  # the title is animated
 
     def act(fn):
         nonlocal msg, err
@@ -2407,13 +2441,11 @@ def tui(scr, a):
 
         h, w = scr.getmaxyx()
         scr.erase()
-        brand = " ⛵ fleet "
-        put(0, 0, brand, w - 1, look("b-title"))
-        title = brand + "  " + " · ".join(filter(None, [
-            s.autohead, f"{SPIN[int(time.time() * 4) % len(SPIN)]} henter …" if loading else ""])) + " "
-        put(0, len(brand), title[len(brand):], w - 1 - len(brand), curses.A_BOLD)
+        bx = brand(time.time(), w, loading)
+        head = f"  {s.autohead} " if s.autohead else ""  # fetching: the boat sails
+        put(0, bx, head, w - 1 - bx, curses.A_BOLD)
         if s.error:
-            put(0, len(title), s.error, max(0, w - 1 - len(title)), pal["red"])
+            put(0, bx + len(head), s.error, max(0, w - 1 - bx - len(head)), pal["red"])
         at = next((y for y, (_, x) in enumerate(ls) if x is cur), 0)
         body = h - 3
         top = min(max(top, at - body + 1), at)
