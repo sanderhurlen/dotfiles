@@ -1907,22 +1907,27 @@ def auto_chip(snap, x):
     return [(f"  {c[0]}", c[1])] if c else []
 
 
-def mine_status(m):
-    """(icon, tone, [(chip, tone)]) — worst first."""
-    chips = []
-    if m.pr.conflicts:
-        chips.append((" konflikt ", "b-bad"))
-    chips += [(f"{n} ✗", "red") for n in m.failing]
+def handled(snap, x):
+    """An agent is on it (working, or waiting on me) or autopilot has it queued."""
+    return any(st in BUSY for _, st in owned(snap.agents, x)) or snap.auto.get(x.key, ("",))[0].startswith("⏳")
+
+
+def mine_status(m, quiet=False):
+    """(icon, tone, [(chip, tone)]) — worst first. quiet: an agent handles it, so the chips for what
+    autopilot fixes (conflict, red build, threads) stay out; the icon still says how it stands."""
+    chips, hidden = [], []
+    (hidden if quiet else chips).extend(
+        ([(" konflikt ", "b-bad")] if m.pr.conflicts else []) + [(f"{n} ✗", "red") for n in m.failing])
     chips += [(f"@{n} {'✗' if v == -10 else '⏸'}", "red" if v == -10 else "yellow") for n, v in m.votes]
     if m.threads:
-        chips.append((f"💬 {m.threads}", "yellow"))
+        (hidden if quiet else chips).append((f"💬 {m.threads}", "yellow"))
     waiting = [n for n, st, b in m.pr.policies if b and st in ("queued", "running")]
     chips += [(f"{n} …", "dim") for n in waiting]
     if m.pr.draft:
         chips.append(("draft", "dim"))
     if m.pr.auto:
         chips.append(("auto", "cyan"))
-    tones = [t for _, t in chips]
+    tones = [t for _, t in chips + hidden]
     if "red" in tones or "b-bad" in tones:
         return "✗", "red", chips
     if "yellow" in tones:
@@ -1995,7 +2000,7 @@ def bundle_row(b):
 
 
 def mine_row(snap, m, wrepo, indent=""):
-    icon, tone, chips = mine_status(m)
+    icon, tone, chips = mine_status(m, handled(snap, m))
     parts = [(indent + icon + " ", tone), (f"!{m.id:<5} ", "dim"), (f"{m.repo:<{wrepo}}  ", hue(m.repo)),
              (m.title[:60], None), (f"  {ago(m.created)}", age_tone(m.created))]
     for c, t in chips:
