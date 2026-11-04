@@ -235,6 +235,77 @@ def test_fleet_rereview_after_a_push(tmp_path, monkeypatch):
     assert "git diff old123..origin/feat/eksport" in auto.prompt
 
 
+def stalled_pilot(fleet, tmp_path, monkeypatch, state):
+    """A Pilot on a temp autopilot.json, inside working hours, whose launches are recorded instead of run."""
+    import json
+    (tmp_path / "autopilot.json").write_text(json.dumps(state))
+    pilot = fleet.Pilot.__new__(fleet.Pilot)
+    pilot.cfg = fleet.config()[0] | {"notify": {"start": False, "done": False, "blocked": False}}
+    pilot.c = dict(fleet.DEFAULTS["autopilot"])
+    pilot.on, pilot.after, pilot.queue, pilot.pending, pilot.procs, pilot.lock = True, True, [], {}, {}, object()
+    pilot.PATH = str(tmp_path / "autopilot.json")
+    started = []
+    monkeypatch.setattr(fleet, "launch", lambda a: started.append((a.why, a.key)) or "▶ startet")
+    return pilot, started
+
+
+def red_pr(fleet, now, waiting=()):
+    """My PR !7: build red at commit abc, with threads waiting on me."""
+    import datetime
+    m = fleet.Mine.__new__(fleet.Mine)
+    m.id, m.title, m.key, m.role, m.waiting = 7, "t", "fleet-pr-7", "fix", list(waiting)
+    m.pr = type("PR", (), {"draft": False, "conflicts": False, "raw": {"lastMergeSourceCommit": {"commitId": "abc"}},
+                           "done_at": {"Build": datetime.datetime.fromtimestamp(now, datetime.timezone.utc)},
+                           "policies": [("Build", "rejected", True)]})()
+    return m
+
+
+def test_fleet_autopilot_answers_new_comments_after_giving_up_on_the_build(tmp_path, monkeypatch):
+    import datetime
+    import time
+    from ado import load
+    fleet = load("fleet")
+    now = time.time()
+    when = datetime.datetime.fromtimestamp(now, datetime.timezone.utc)
+    pilot, started = stalled_pilot(fleet, tmp_path, monkeypatch,
+                                   {"started": {"fleet-pr-7": ["fleet-pr-7@x1", "fleet-pr-7@abc"]}})
+    s = fleet.Snapshot(at=now, mine_=[red_pr(fleet, now, [(1, 2, when)])])
+    pilot.tick(s)
+    assert started == [("1 tråd å svare på", "fleet-pr-7")]  # the build is given up on, the comment isn't
+    assert pilot.load()["started"]["fleet-pr-7"][-1].startswith("fleet-pr-7@c-")
+    assert s.auto["fleet-pr-7"][0] == "🤖 auto"
+    started.clear()
+    pilot.tick(fleet.Snapshot(at=now, mine_=[red_pr(fleet, now, [(1, 2, when)])]))
+    assert started == []  # once per comment
+
+
+def test_fleet_autopilot_takes_over_from_a_manual_agent_left_before_the_event(tmp_path, monkeypatch):
+    import time
+    from ado import load
+    fleet = load("fleet")
+    now = time.time()
+    pilot, started = stalled_pilot(fleet, tmp_path, monkeypatch, {})
+    s = fleet.Snapshot(at=now, mine_=[red_pr(fleet, now - 60)], agents_={"fleet-pr-7-fix": "done"})
+    s.quiet = {"fleet-pr-7-fix": 10}  # touched after the build went red: I have it in hand
+    pilot.tick(s)
+    assert started == []
+    s = fleet.Snapshot(at=now, mine_=[red_pr(fleet, now - 60)], agents_={"fleet-pr-7-fix": "done"})
+    s.quiet = {"fleet-pr-7-fix": 3 * 3600}  # left hours before
+    pilot.tick(s)
+    assert started == [("Build feiler", "fleet-pr-7")]
+
+
+def test_fleet_autopilot_frees_the_slot_of_a_hung_agent():
+    from ado import load
+    fleet = load("fleet")
+    pilot = fleet.Pilot.__new__(fleet.Pilot)
+    pilot.c, pilot.pending = dict(fleet.DEFAULTS["autopilot"]), {}
+    s = fleet.Snapshot(agents_={"a": "working", "b": "working", "c": "blocked"})
+    s.quiet = {"a": 30, "b": 61 * 60, "c": 31 * 60}
+    assert pilot.busy(s) == 1
+    assert pilot.parked(s) == (1, 1)
+
+
 def test_fleet_groups_reviews_by_shared_item_and_author(monkeypatch, tmp_path):
     from ado import load
     fleet = load("fleet")
