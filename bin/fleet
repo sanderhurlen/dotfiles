@@ -2002,8 +2002,13 @@ def tickets_chip(w):
     return [(" ", None)] + out if out else [("  ingen tickets", "dim")]
 
 
+def skill_chip(w):
+    """What enter starts, only when it isn't /implement (m → g names it): «to-tickets», «wayfinder», «status»."""
+    return [] if w.skill == "/implement" else [(f"  {w.skill.lstrip('/')}", "skill")]
+
+
 def work_row(snap, w, multi, folded):
-    """«● Spec  #123  ▸ Tittel som kuttes …  ○2 ▶1 ✓4  → /implement  ↳ !7407 ○ …» — ● Doing, ○ To Do;
+    """«● Spec  #123  ▸ Tittel som kuttes …  ○2 ▶1 ✓4  ↳ !7407 ○ …» — ● Doing, ○ To Do;
     the title gives way so the chips after it always show."""
     label, tone = KIND.get(w.kind) or TYPE.get(w.type.lower(), (w.type.lower()[:5], "b-item"))
     parts = [("● " if w.state == "Doing" else "○ ", "yellow" if w.state == "Doing" else "dim")] \
@@ -2015,7 +2020,7 @@ def work_row(snap, w, multi, folded):
     parts.append((bare(w.title), "flex"))
     if w.folds:
         parts += tickets_chip(w)
-    parts.append((f"  → {w.skill}", "skill"))
+    parts += skill_chip(w)
     return parts + pr_chip(w) + tree_chip(w) + agent_chip(snap, w) + auto_chip(snap, w)
 
 
@@ -2027,7 +2032,7 @@ def child_row(snap, t, last, pad):
              (who, hue(who.strip(" @"), False) if who else "dim")]
     if t.it.hitl:
         parts += [("  ", None), (" HITL ", "b-bad")]
-    parts.append((f"  → {t.skill}", "skill"))
+    parts += skill_chip(t)
     return parts + pr_chip(t) + tree_chip(t) + agent_chip(snap, t)
 
 
