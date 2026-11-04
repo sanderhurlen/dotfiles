@@ -1707,14 +1707,17 @@ def post_option(r):
              f"post på !{r.id}: {wr.draft_line(d)}?")]
 
 
+POST_CHIP = [("  ", None), (" post ", "b-warn")]  # yellow badge = my turn, like ⏸
+
+
 def draft_chip(r):
-    """«📝 post» when a draft waits for me to post it (m → p); else 🔁 when the author pushed after I posted."""
+    """« post » badge when a draft waits for me to post it (m → p); else 🔁 when the author pushed after I posted."""
     try:
         d = wr.load_draft(r.id)
     except RuntimeError:
-        return [("  📝 utkast feil", "red")]
+        return [("  utkast feil", "red")]
     if d and not d.get("posted"):
-        return [("  📝 post", "yellow")]
+        return POST_CHIP
     if pushed_since(r):
         return [("  🔁 nye commits siden min review", "yellow")]
     return []
@@ -1909,12 +1912,13 @@ def section(key, title, n, note=""):
 
 
 def agent_chip(snap, x):
-    """One chip per agent on the row, named by its role: «▶ review running  ⏸ fix blocked 4d»."""
+    """One chip per agent on the row, named by its role: «▶ review  ⏸ fix 4d» — the icon says the state
+    (▶ spins while it works), so the chip is about as wide as « ✓ klar »."""
     out = []
     for role, st in owned(snap.agents, x):
         icon, tone = AGENT.get(st, ("●", "dim"))
         sec = snap.quiet.get(f"{x.key}-{role}")
-        txt = f"{icon} {role} {st}" + (f" {span(sec)}" if st == "blocked" and sec is not None else "")
+        txt = f"{icon} {role}" + (f" {span(sec)}" if st == "blocked" and sec is not None else "")
         if st == "blocked":
             out += [("  ", None), (f" {txt} ", "b-warn")]
         else:
@@ -2029,9 +2033,9 @@ def mine_row(snap, m, wrepo, indent=""):
         parts += [("  ", None), (c, t)] if t.startswith("b-") else [(f"  {c}", t)]
     try:
         d = wr.load_draft(m.id)
-        parts += [("  📝 post", "yellow")] if d and not d.get("posted") else []  # the fix agent's answers, mine to post
+        parts += POST_CHIP if d and not d.get("posted") else []  # the fix agent's answers, mine to post
     except RuntimeError:
-        parts.append(("  📝 utkast feil", "red"))
+        parts.append(("  utkast feil", "red"))
     return parts + agent_chip(snap, m) + auto_chip(snap, m)
 
 
@@ -2815,14 +2819,14 @@ GUIDE = """\
               gruppe     (▾ #id: review-PRer av samme forfatter på samme work item) g én review-agent for
                          alle · r re-review · z/n autopilot · o åpne work item
               PR         a approve · u auto-complete · c complete · x abandon · g review-agent ·
-                         p post review-utkastet (📝 på raden; `wr draft <id>` viser det) ·
+                         p post review-utkastet («post» på raden; `wr draft <id>` viser det) ·
                          r re-review når forfatteren har pushet etter at jeg postet (🔁) ·
                          z demp/slå på autopilot · n kjør auto nå · o åpne
               work item  t triage (Issue/Bug: `wi triage` her i terminalen, y skriver til ADO) ·
                          s endre status (1–9) · i nåværende sprint · g agent · v VS Code ·
                          z demp/slå på auto-triage · n triager nå (utriagerte) · o åpne
               min PR     f fix-agent · u auto-complete · c complete · x abandon ·
-                         p post svar-utkastet (📝) · z demp/slå på autopilot · n kjør auto nå · o åpne
+                         p post svar-utkastet («post») · z demp/slå på autopilot · n kjør auto nå · o åpne
               agent      x fjern (stop + rm) · s stopp
               pipeline-varsel  forslag fra `wp upkeep` (launchd kl 11) — ingenting er opprettet ennå:
                          c opprett Issue + Task per repo og start agentene · t bare Issue + Tasks ·
@@ -2843,7 +2847,7 @@ GUIDE = """\
             Hvert valg er sin egen rolle (fleet-pr-<id>-explain, -test, -code-review, -desc, -ask; work
             item -summary, -tickets, -tdd, -diagnosing-bugs …), i radens mappe. Finnes den rollen, spør y/n først.
 
-{b}AGENTENE{r}  {d}navngitt fleet-<wi|pr>-<id>-<rolle>: alle agentene på en PR/et item vises på linja («▶ review running  ⏸ fix blocked 4d»){r}
+{b}AGENTENE{r}  {d}navngitt fleet-<wi|pr>-<id>-<rolle>: alle agentene på en PR/et item vises på linja («▶ review  ⏸ fix 4d» — ikonet er tilstanden, ▶ spinner mens den jobber){r}
   kart  → claude --bg -n fleet-wi-<id>-go "/wayfinder <id>"   i {home}; tomt kart (fra triage) → tegn kartet
   annet → claude --bg -n fleet-wi-<id>-go "/implement <id>"   i repoet commits/PRer på itemet
           (eller barna) peker til, i worktree fleet-<id> — ellers i {home}
@@ -2867,7 +2871,7 @@ GUIDE = """\
     min PR får rødt bygg / konflikt → fleet-pr-<id>-fix: merger target inn, fikser, pusher. Ingen
                     force-push, svarer ikke i tråder. Én gang per commit, maks {tries} forsøk, så «⛔ ga opp».
     min PR får kommentar (aktiv tråd der siste ord ikke er mitt; trigger «comments») → samme fix-agent:
-                    fikser og pusher, svarene skrives som utkast (`wr draft <id>`, 📝 på linja, m → p poster).
+                    fikser og pusher, svarene skrives som utkast (`wr draft <id>`, «post» på linja, m → p poster).
                     Én runde per ny kommentar — min egen push starter ingen ny; gir ikke opp, heller ikke
                     når fix-forsøkene på bygg/konflikt er brukt opp.
   Triagerer selv (trigger «triage»):
