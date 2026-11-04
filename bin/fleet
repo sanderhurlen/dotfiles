@@ -1884,7 +1884,7 @@ TONES = {"green": ((114, 2), None, ""), "red": ((203, 1), None, ""), "yellow": (
          **{f"h{i}": (c, None, "bold") for i, c in enumerate(_HUES)},
          **{f"H{i}": (c, None, "") for i, c in enumerate(_HUES)}}
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-SEA_W, WAVES, GLINT = 13, (24, 25, 31, 32, 38, 39, 45, 81), (231, 195, 159, 123, 117, 81)  # the title's sea and glint
+ANIM, SEA_W, WAVES, GLINT = 3, 13, (24, 25, 31, 32, 38, 39, 45, 81), (231, 195, 159, 123, 117, 81)  # the title's sea and glint
 SECTION = {"work": "yellow", "review": "magenta", "mine": "green", "warn": "yellow", "orphan": "red", "clean": "dim"}
 
 
@@ -2341,9 +2341,9 @@ def tui(scr, a):
             pairs[c, -1] = curses.color_pair(len(pairs) + 1)
         return pairs.get((c, -1), 0) | (curses.A_BOLD if bold else 0)
 
-    def brand(t, w, sailing=False):
-        """«～≈∼⛵≈～ fleet»: waves roll, the boat drifts — sails across while fetching — and a glint
-        sweeps over the name. Returns the x after it."""
+    def brand(t, w, sailing, fresh):
+        """«～≈∼⛵≈～ fleet»: the boat sails across while fetching; when new data is in (fresh: when),
+        the waves roll and a glint sweeps over the name once. t stands still in between. Returns the x after it."""
         if not rich:
             put(0, 0, " ⛵ fleet ", w - 1, look("b-title"))
             return 10
@@ -2360,7 +2360,7 @@ def tui(scr, a):
                 ink(WAVES[min(len(WAVES) - 1, int((ph + 1) / 2 * len(WAVES)))]))
             x += 1
         x += 1
-        glint = (t * 3) % 14  # sweeps the five letters, then rests
+        glint = (t - fresh) * 4 - 1  # passes the five letters in ~1.5 s, then rests
         for i, ch in enumerate("fleet"):
             d = abs(i - glint)
             put(0, x + i, ch, w - 1 - x - i, ink(GLINT[min(len(GLINT) - 1, int(d))], True))
@@ -2409,6 +2409,7 @@ def tui(scr, a):
         wake.set()
 
     seen = None  # agent states at the last snapshot, for notifications
+    fresh_at, fresh, still = None, 0.0, time.time()  # the title animates while fetching and ANIM s after
     while True:
         with lock:
             s = snap
@@ -2441,7 +2442,12 @@ def tui(scr, a):
 
         h, w = scr.getmaxyx()
         scr.erase()
-        bx = brand(time.time(), w, loading)
+        now = time.time()
+        if s.at != fresh_at:
+            fresh_at, fresh = s.at, now
+        if loading or now - fresh < ANIM:
+            still = now  # animate; otherwise the title holds its last frame
+        bx = brand(still, w, loading, fresh)
         head = f"  {s.autohead} " if s.autohead else ""  # fetching: the boat sails
         put(0, bx, head, w - 1 - bx, curses.A_BOLD)
         if s.error:
