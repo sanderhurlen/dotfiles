@@ -1945,7 +1945,8 @@ def handled(snap, x):
 def mine_status(m, quiet=False):
     """(icon, tone, [(chip, tone)]) — worst first. quiet: an agent handles it, so what autopilot fixes
     (conflict, red build, threads) is one calm «🤖 3», how many; the icon still says how it stands.
-    A build — red, expired or running — is no chip and doesn't make the row ✗/⏸: it's ○ until it's green."""
+    A build — red, expired or running — is no chip and doesn't make the row ✗/⏸: it's ○ until it's green,
+    ◌ while it's queued or running."""
     chips, hidden = [], []
     (hidden if quiet else chips).extend([(" konflikt ", "b-bad")] if m.pr.conflicts else [])
     chips += [(f"@{n} {'✗' if v == -10 else '⏸'}", "red" if v == -10 else "yellow") for n, v in m.votes]
@@ -1953,8 +1954,6 @@ def mine_status(m, quiet=False):
         (hidden if quiet else chips).append((f"💬 {m.threads}", "yellow"))
     if hidden or quiet and m.failing:
         chips.insert(0, (f"🤖 {bool(m.pr.conflicts) + len(m.failing) + m.threads}", "cyan"))
-    waiting = [n for n, st, b in m.pr.policies if b and st in ("queued", "running")]
-    chips += [("bygg …", "dim")] if waiting else []
     tones = [t for _, t in chips + hidden]
     if "red" in tones or "b-bad" in tones:
         return "✗", "red", chips
@@ -1962,7 +1961,8 @@ def mine_status(m, quiet=False):
         return "⏸", "yellow", chips
     if m.pr.ready:
         return "✓", "green", chips + [(" ✓ klar ", "b-ok")]
-    return "○", "dim", chips
+    building = any(b and st in ("queued", "running") for _, st, b in m.pr.policies)
+    return "◌" if building else "○", "dim", chips
 
 
 def pr_chip(w):
@@ -2801,8 +2801,8 @@ GUIDE = """\
                Default bare der jeg er reviewer; `a` / -a viser alle andres.
   Mine PRer    aktive PRer jeg har laget, draft også. Viser det som blokkerer:
                  konflikt · @navn ✗/⏸ (avvist / venter på endringer) · 💬 n aktive tråder
-                 <policy> … (kjører/i kø) · draft · klar
-               ✗ rødt = konflikt/avvist, ⏸ gult = venter på meg, ✓ = klar til complete, ○ = ellers (også rødt eller utløpt bygg). ↯ etter ikonet = auto-complete er satt.
+                 draft · klar
+               ✗ rødt = konflikt/avvist, ⏸ gult = venter på meg, ✓ = klar til complete, ◌ = bygget kjører, ○ = ellers (også rødt eller utløpt bygg). ↯ etter ikonet = auto-complete er satt.
                Work items som PR-en lenker (eller har id-en i branchen) får «↳ !<pr> ✗/⏸/✓» på linja.
                To eller flere som deler et work item står under det («▾ #<wi>»); enter der:
                fix-agent på hver PR, eller åpne work itemet.
