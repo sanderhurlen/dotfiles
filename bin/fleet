@@ -2348,19 +2348,19 @@ def tui(scr, a):
             put(0, 0, " ⛵ fleet ", w - 1, look("b-title"))
             return 10
         sea = SEA_W
-        boat = 1 + (int(t * 8) % (sea - 3) if sailing else round((math.sin(t * 0.5) + 1) / 2 * (sea - 4)))
+        boat = 1 + (int(t * 3) % (sea - 3) if sailing else round((math.sin(t * 0.5) + 1) / 2 * (sea - 4)))
         x = 1
         while x < sea:
             if x == boat:
                 put(0, x, "⛵", w - 1 - x, ink(231))
                 x += 2
                 continue
-            ph = math.sin(x * 0.8 - t * 3)
+            ph = math.sin(x * 0.8 - t * 1.5)
             put(0, x, "≈" if ph > 0.35 else "∼" if ph > -0.35 else "·", w - 1 - x,
                 ink(WAVES[min(len(WAVES) - 1, int((ph + 1) / 2 * len(WAVES)))]))
             x += 1
         x += 1
-        glint = (t * 6) % 14  # sweeps the five letters, then rests
+        glint = (t * 3) % 14  # sweeps the five letters, then rests
         for i, ch in enumerate("fleet"):
             d = abs(i - glint)
             put(0, x + i, ch, w - 1 - x - i, ink(GLINT[min(len(GLINT) - 1, int(d))], True))
@@ -2398,7 +2398,7 @@ def tui(scr, a):
             wake.clear()
 
     threading.Thread(target=loader, daemon=True).start()
-    scr.timeout(150)  # the title is animated
+    scr.timeout(400)  # the title is animated, slowly
 
     def act(fn):
         nonlocal msg, err
