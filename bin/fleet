@@ -1459,7 +1459,7 @@ class Pilot:
                 fp = f"{x.key}@{'+'.join(fresh_c)}"
             elif "@re-" not in fp and (len(tries) >= 1 if isinstance(x, (Review, Group)) else
                                        any(not q.startswith("c-") for q in fp_parts(fp)) and spent):
-                chips[x.key] = ("🤖 ga opp", "red")
+                chips[x.key] = (" ⛔ ga opp ", "b-bad")
                 if x.key not in st["gaveup"]:
                     st["gaveup"].append(x.key)
                     s.news.append(f"🤖 ga opp {x.key} etter {len(tries)} forsøk: {why}")
@@ -1708,16 +1708,16 @@ def post_option(r):
 
 
 def draft_chip(r):
-    """📝 the draft waiting to be posted; else 🔁 when the author pushed after I posted; else the posted one, dim."""
+    """«📝 post» when a draft waits for me to post it (m → p); else 🔁 when the author pushed after I posted."""
     try:
         d = wr.load_draft(r.id)
     except RuntimeError:
         return [("  📝 utkast feil", "red")]
     if d and not d.get("posted"):
-        return [(f"  📝 {wr.draft_line(d)}", "yellow")]
+        return [("  📝 post", "yellow")]
     if pushed_since(r):
         return [("  🔁 nye commits siden min review", "yellow")]
-    return [(f"  📝 {wr.draft_line(d)}", "dim")] if d else []
+    return []
 
 
 def auto_complete(r):
@@ -1853,9 +1853,8 @@ def status_menu(w):
 
 AGENT = {"running": ("▶", "cyan"), "working": ("▶", "cyan"), "blocked": ("⏸", "yellow"),
          "done": ("✓", "green"), "idle": ("✓", "green"), "failed": ("✗", "red"), "error": ("✗", "red")}
-VOTE = {-10: ("✗", "red"), -5: ("⏸", "yellow"), 0: ("○", "dim")}
 KIND = {"map": ("kart", "b-map"), "spec": ("spec", "b-spec")}
-TYPE = {"bug": ("bug", "b-bug"), "issue": ("issue", "b-issue"), "task": ("task", "b-task"),
+TYPE = {"bug": ("bug", "b-bug"), "issue": ("issue", "t-issue"), "task": ("task", "b-task"),
         "user story": ("story", "b-task"), "feature": ("feat", "b-issue"), "epic": ("epic", "b-issue")}
 STATUS = {"ledig": "green", "tatt": "yellow", "blokkert": "red"}
 
@@ -1866,14 +1865,23 @@ TONES = {"green": ((114, 2), None, ""), "red": ((203, 1), None, ""), "yellow": (
          "cyan": ((81, 6), None, ""), "magenta": ((177, 5), None, ""), "blue": ((75, 4), None, ""),
          "dim": (None, None, "dim"), "bold": (None, None, "bold"), "rule": ((239, 0), None, ""),
          "run": ((81, 6), None, "bold"), "skill": ((141, 5), None, ""),
+         "t-issue": ((177, 5), None, "bold"),  # issue: coloured text, no box
          "b-bug": _BADGE((203, 1)), "b-issue": _BADGE((177, 5)), "b-map": _BADGE((81, 6)),
          "b-spec": _BADGE((114, 2)), "b-task": _BADGE((75, 4)), "b-item": _BADGE((250, 7)),
          "b-warn": _BADGE((221, 3)), "b-ok": _BADGE((114, 2)), "b-bad": _BADGE((203, 1)),
          "b-title": _BADGE((81, 6)),
+         "flex": (None, None, ""), "flex-dim": (None, None, "dim"),  # a title that gets the row's spare room
          **{f"h{i}": (c, None, "bold") for i, c in enumerate(_HUES)},
          **{f"H{i}": (c, None, "") for i, c in enumerate(_HUES)}}
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 SECTION = {"work": "yellow", "review": "magenta", "mine": "green", "warn": "yellow", "orphan": "red", "clean": "dim"}
+
+
+REPO_PREFIX = "visense-"  # every repo has it; the list shows the rest
+
+
+def rname(repo):
+    return repo[len(REPO_PREFIX):] if repo.startswith(REPO_PREFIX) and len(repo) > len(REPO_PREFIX) else repo
 
 
 def hue(s, strong=True):
@@ -1916,25 +1924,32 @@ def agent_chip(snap, x):
 
 def auto_chip(snap, x):
     c = snap.auto.get(x.key)
-    return [(f"  {c[0]}", c[1])] if c else []
+    if c and c[0] == "🤖 auto" and owned(snap.agents, x):
+        return []
+    return ([("  ", None), c] if c[1].startswith("b-") else [(f"  {c[0]}", c[1])]) if c else []
 
 
-def mine_status(m):
-    """(icon, tone, [(chip, tone)]) — worst first."""
-    chips = []
-    if m.pr.conflicts:
-        chips.append((" konflikt ", "b-bad"))
-    chips += [(f"{n} ✗", "red") for n in m.failing]
+def handled(snap, x):
+    """An agent is on it (working, or waiting on me) or autopilot has it queued."""
+    return any(st in BUSY for _, st in owned(snap.agents, x)) or snap.auto.get(x.key, ("",))[0].startswith("⏳")
+
+
+def mine_status(m, quiet=False):
+    """(icon, tone, [(chip, tone)]) — worst first. quiet: an agent handles it, so what autopilot fixes
+    (conflict, red build, threads) is one calm «🤖 3», how many; the icon still says how it stands."""
+    chips, hidden = [], []
+    (hidden if quiet else chips).extend(
+        ([(" konflikt ", "b-bad")] if m.pr.conflicts else []) + [(f"{n} ✗", "red") for n in m.failing])
     chips += [(f"@{n} {'✗' if v == -10 else '⏸'}", "red" if v == -10 else "yellow") for n, v in m.votes]
     if m.threads:
-        chips.append((f"💬 {m.threads}", "yellow"))
+        (hidden if quiet else chips).append((f"💬 {m.threads}", "yellow"))
+    if hidden:
+        chips.insert(0, (f"🤖 {bool(m.pr.conflicts) + len(m.failing) + m.threads}", "cyan"))
     waiting = [n for n, st, b in m.pr.policies if b and st in ("queued", "running")]
-    chips += [(f"{n} …", "dim") for n in waiting]
-    if m.pr.draft:
-        chips.append(("draft", "dim"))
+    chips += [("bygg …", "dim")] if waiting else []
     if m.pr.auto:
         chips.append(("auto", "cyan"))
-    tones = [t for _, t in chips]
+    tones = [t for _, t in chips + hidden]
     if "red" in tones or "b-bad" in tones:
         return "✗", "red", chips
     if "yellow" in tones:
@@ -1993,9 +2008,9 @@ def group_row(snap, g):
 
 
 def pr_row(snap, r, wrepo, indent=""):
-    icon, tone = VOTE.get(r.vote, ("○", "dim"))
-    parts = [(indent + icon + " ", tone), (f"!{r.id:<5} ", "dim"), (f"{r.repo:<{wrepo}}  ", hue(r.repo)),
-             (r.title[:60], None), ("  ", None), (f"@{r.who}", hue(r.who, False)),
+    done = settled(r) and not pushed_since(r)  # ✓ I've done my part; ○ it's my turn
+    parts = [(indent + ("✓ " if done else "○ "), "green" if done else "dim"), (f"!{r.id:<5} ", "dim"), (f"{rname(r.repo):<{wrepo}}  ", hue(r.repo)),
+             (r.title, "flex"), ("  ", None), (f"@{r.who}", hue(r.who, False)),
              (f" {ago(r.created)}", age_tone(r.created))]
     if not r.asked:
         parts.append(("  (ikke reviewer)", "dim"))
@@ -2007,14 +2022,14 @@ def bundle_row(b):
 
 
 def mine_row(snap, m, wrepo, indent=""):
-    icon, tone, chips = mine_status(m)
-    parts = [(indent + icon + " ", tone), (f"!{m.id:<5} ", "dim"), (f"{m.repo:<{wrepo}}  ", hue(m.repo)),
-             (m.title[:60], None), (f"  {ago(m.created)}", age_tone(m.created))]
+    icon, tone, chips = mine_status(m, handled(snap, m))
+    parts = [(indent + icon + " ", tone), (f"!{m.id:<5} ", "dim"), (f"{rname(m.repo):<{wrepo}}  ", hue(m.repo)),
+             (m.title, "flex-dim" if m.pr.draft else "flex"), (f"  {ago(m.created)}", age_tone(m.created))]
     for c, t in chips:
         parts += [("  ", None), (c, t)] if t.startswith("b-") else [(f"  {c}", t)]
     try:
         d = wr.load_draft(m.id)
-        parts += [(f"  📝 {wr.draft_line(d)}", "yellow")] if d and not d.get("posted") else []
+        parts += [("  📝 post", "yellow")] if d and not d.get("posted") else []  # the fix agent's answers, mine to post
     except RuntimeError:
         parts.append(("  📝 utkast feil", "red"))
     return parts + agent_chip(snap, m) + auto_chip(snap, m)
@@ -2048,7 +2063,7 @@ def lines(snap, everyone, open_=()):
     out.append(([], None))
     who = "alle andres" if everyone else "der jeg er reviewer"
     out.append((section("review", "PRer uten min godkjenning", len(snap.prs), who), None))
-    wrepo = max([len(r.repo) for r in snap.prs] + [4])
+    wrepo = max([len(rname(r.repo)) for r in snap.prs] + [4])
     shown = set()
     for r in snap.prs:
         if not r.group:
@@ -2062,7 +2077,7 @@ def lines(snap, everyone, open_=()):
     if snap.mine:
         out.append(([], None))
         out.append((section("mine", "Mine PRer", len(snap.mine)), None))
-        wmine = max([len(m.repo) for m in snap.mine] + [4])
+        wmine = max([len(rname(m.repo)) for m in snap.mine] + [4])
         shown = set()
         for m in snap.mine:
             if not m.group:
@@ -2095,8 +2110,22 @@ def lines(snap, everyone, open_=()):
     return out
 
 
+FLEX = 60  # a flex title's length where the width isn't known (screen.txt)
+
+
+def fit(t, n):
+    return t if len(t) <= n else t[:max(1, n - 1)] + "…"
+
+
+def flexed(parts, room):
+    """parts with each flex title cut to what room (columns) leaves after the rest, at least 20."""
+    rest = sum(len(s) for s, t in parts if not (t or "").startswith("flex"))
+    n = max(20, room - rest)
+    return [(fit(s, n), t) if (t or "").startswith("flex") else (s, t) for s, t in parts]
+
+
 def plain(parts):
-    return "".join(s for s, _ in parts)
+    return "".join(s for s, _ in flexed(parts, FLEX + sum(len(s) for s, t in parts if not (t or "").startswith("flex"))))
 
 
 RICH = os.environ.get("COLORTERM") in ("truecolor", "24bit") or "256" in os.environ.get("TERM", "") \
@@ -2374,14 +2403,14 @@ def tui(scr, a):
             hl = it is not None and it is cur
             if hl:
                 put(row, 0, "▌", 1, look("cyan") | curses.A_BOLD)
-            for txt, t in parts:
+            for txt, t in flexed(parts, w - 2):
                 if x >= w - 1:
                     break
                 if t == "rule":
                     txt = "─" * (w - 1 - x)
                 elif t == "run":
                     txt = txt.replace("▶", frame, 1)
-                put(row, x, txt, w - 1 - x, look(t, hl) | (curses.A_BOLD if hl and t is None else 0))
+                put(row, x, txt, w - 1 - x, look(t, hl) | (curses.A_BOLD if hl and t in (None, "flex") else 0))
                 x += len(txt)
             if hl and x < w - 1:
                 put(row, x, " " * (w - 1 - x), w - 1 - x, look(None, True))
@@ -2836,7 +2865,7 @@ GUIDE = """\
                     på kildebranchen, target som fast punkt. Uten lokal klone: forklar PR-en.
                     Poster ingenting i ADO. Én gang per PR.
     min PR får rødt bygg / konflikt → fleet-pr-<id>-fix: merger target inn, fikser, pusher. Ingen
-                    force-push, svarer ikke i tråder. Én gang per commit, maks {tries} forsøk, så «🤖 ga opp».
+                    force-push, svarer ikke i tråder. Én gang per commit, maks {tries} forsøk, så «⛔ ga opp».
     min PR får kommentar (aktiv tråd der siste ord ikke er mitt; trigger «comments») → samme fix-agent:
                     fikser og pusher, svarene skrives som utkast (`wr draft <id>`, 📝 på linja, m → p poster).
                     Én runde per ny kommentar — min egen push starter ingen ny; gir ikke opp, heller ikke
@@ -2852,7 +2881,8 @@ GUIDE = """\
   En agent som har stått ⏸ over {blocked} min (transkriptet urørt) er ferdig med turen og venter
                     på meg — den teller ikke, så køen går videre. Det samme gjelder en ▶ som har vært stille
                     over {stuck} min: den henger. Linja viser hvor lenge: «⏸ fix blocked 5d».
-  Linja: 🤖 auto · ⏳ i kø / venter til 07:00 · 🤖 feilet: … · 🤖 ga opp · 🔕 auto av · 💤 for gammel (m → n).
+  Linja: 🤖 auto · ⏳ i kø / venter til 07:00 · 🤖 feilet: … · ⛔ ga opp · 🔕 auto av · 💤 for gammel (m → n).
+  Mine PRer: mens en agent jobber (eller står i kø) blir konflikt/bygg/💬 én «🤖 3» (hvor mange).
   Demping (m → z) huskes til raden er borte fra lista; av/på og utenfor arbeidstid (A) gjelder økta.
   Konfig: {config}   tilstand: {state}
 
