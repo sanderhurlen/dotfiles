@@ -1914,7 +1914,7 @@ def handled(snap, x):
 
 def mine_status(m, quiet=False):
     """(icon, tone, [(chip, tone)]) — worst first. quiet: an agent handles it, so what autopilot fixes
-    (conflict, red build, threads) is one calm «🤖 konflikt, build, 2 tråder»; the icon still says how it stands."""
+    (conflict, red build, threads) is one calm «🤖 3», how many; the icon still says how it stands."""
     chips, hidden = [], []
     (hidden if quiet else chips).extend(
         ([(" konflikt ", "b-bad")] if m.pr.conflicts else []) + [(f"{n} ✗", "red") for n in m.failing])
@@ -1922,9 +1922,7 @@ def mine_status(m, quiet=False):
     if m.threads:
         (hidden if quiet else chips).append((f"💬 {m.threads}", "yellow"))
     if hidden:
-        what = (["konflikt"] if m.pr.conflicts else []) + list(m.failing) \
-            + ([f"{m.threads} tråd{'er' if m.threads > 1 else ''}"] if m.threads else [])
-        chips.insert(0, (f"🤖 {', '.join(what)}", "cyan"))
+        chips.insert(0, (f"🤖 {bool(m.pr.conflicts) + len(m.failing) + m.threads}", "cyan"))
     waiting = [n for n, st, b in m.pr.policies if b and st in ("queued", "running")]
     chips += [(f"{n} …", "dim") for n in waiting]
     if m.pr.draft:
@@ -2848,7 +2846,7 @@ GUIDE = """\
   En agent som har stått ⏸ over {blocked} min (transkriptet urørt) er ferdig med turen og venter
                     på meg — den teller ikke, så køen går videre. Linja viser hvor lenge: «⏸ fix blocked 5d».
   Linja: 🤖 auto · ⏳ i kø / venter til 07:00 · 🤖 feilet: … · ⛔ ga opp · 🔕 auto av · 💤 for gammel (m → n).
-  Mine PRer: mens en agent jobber (eller står i kø) blir konflikt/bygg/💬 én «🤖 konflikt, build, 2 tråder».
+  Mine PRer: mens en agent jobber (eller står i kø) blir konflikt/bygg/💬 én «🤖 3» (hvor mange).
   Demping (m → z) huskes til raden er borte fra lista; av/på og utenfor arbeidstid (A) gjelder økta.
   Konfig: {config}   tilstand: {state}
 
