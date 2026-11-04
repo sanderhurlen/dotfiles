@@ -1432,8 +1432,6 @@ class Pilot:
         for x in live.values():
             if x.key in st["failed"]:
                 chips[x.key] = (f"🤖 feilet: {st['failed'][x.key]}", "red")
-            elif x.key in st["started"]:
-                chips[x.key] = ("🤖 auto", "cyan")
             t = self.trigger(x)
             if not t:
                 continue
@@ -1482,7 +1480,8 @@ class Pilot:
                 continue
             line = self.start(x, st, why, fp)
             s.news.append(line)
-            chips[x.key] = (f"🤖 feilet: {st['failed'][x.key]}", "red") if x.key in st["failed"] else ("🤖 auto", "cyan")
+            if x.key in st["failed"]:
+                chips[x.key] = (f"🤖 feilet: {st['failed'][x.key]}", "red")
             free -= 0 if x.key in st["failed"] else 1
         self.triage(s, st, chips, work)
         self.save(st)
@@ -1918,9 +1917,8 @@ def agent_chip(snap, x):
 
 
 def auto_chip(snap, x):
+    """What autopilot says about the row: queued, failed, gave up, muted. Once it has started an agent, the agent's chip says it."""
     c = snap.auto.get(x.key)
-    if c and c[0] == "🤖 auto" and owned(snap.agents, x):
-        return []
     return ([("  ", None), c] if c[1].startswith("b-") else [(f"  {c[0]}", c[1])]) if c else []
 
 
@@ -1942,8 +1940,6 @@ def mine_status(m, quiet=False):
         chips.insert(0, (f"🤖 {bool(m.pr.conflicts) + len(m.failing) + m.threads}", "cyan"))
     waiting = [n for n, st, b in m.pr.policies if b and st in ("queued", "running")]
     chips += [("bygg …", "dim")] if waiting else []
-    if m.pr.auto:
-        chips.append(("auto", "cyan"))
     tones = [t for _, t in chips + hidden]
     if "red" in tones or "b-bad" in tones:
         return "✗", "red", chips
@@ -2026,7 +2022,8 @@ def bundle_row(b):
 
 def mine_row(snap, m, wrepo, indent=""):
     icon, tone, chips = mine_status(m, handled(snap, m))
-    parts = [(indent + icon + " ", tone), (f"!{m.id:<5} ", "dim"), (f"{rname(m.repo):<{wrepo}}  ", hue(m.repo)),
+    parts = [(indent + icon, tone), ("↯ " if m.pr.auto else "  ", "cyan"),  # ↯ auto-complete is set
+             (f"!{m.id:<5} ", "dim"), (f"{rname(m.repo):<{wrepo}}  ", hue(m.repo)),
              (m.title, "flex-dim" if m.pr.draft else "flex"), (f"  {ago(m.created)}", age_tone(m.created))]
     for c, t in chips:
         parts += [("  ", None), (c, t)] if t.startswith("b-") else [(f"  {c}", t)]
@@ -2768,8 +2765,8 @@ GUIDE = """\
                Default bare der jeg er reviewer; `a` / -a viser alle andres.
   Mine PRer    aktive PRer jeg har laget, draft også. Viser det som blokkerer:
                  konflikt · <bygg> ✗ · @navn ✗/⏸ (avvist / venter på endringer) · 💬 n aktive tråder
-                 <policy> … (kjører/i kø) · draft · auto · klar
-               ✗ rødt = noe feiler, ⏸ gult = venter på meg, ✓ = klar til complete.
+                 <policy> … (kjører/i kø) · draft · klar
+               ✗ rødt = noe feiler, ⏸ gult = venter på meg, ✓ = klar til complete. ↯ etter ikonet = auto-complete er satt.
                Work items som PR-en lenker (eller har id-en i branchen) får «↳ !<pr> ✗/⏸/✓» på linja.
                To eller flere som deler et work item står under det («▾ #<wi>»); enter der:
                fix-agent på hver PR, eller åpne work itemet.
@@ -2879,7 +2876,7 @@ GUIDE = """\
   En agent som har stått ⏸ over {blocked} min (transkriptet urørt) er ferdig med turen og venter
                     på meg — den teller ikke, så køen går videre. Det samme gjelder en ▶ som har vært stille
                     over {stuck} min: den henger. Linja viser hvor lenge: «⏸ fix blocked 5d».
-  Linja: 🤖 auto · ⏳ i kø / venter til 07:00 · 🤖 feilet: … · ⛔ ga opp · 🔕 auto av · 💤 for gammel (m → n).
+  Linja: ⏳ i kø / venter til 07:00 · 🤖 feilet: … · ⛔ ga opp · 🔕 auto av · 💤 for gammel (m → n).
   Mine PRer: mens en agent jobber (eller står i kø) blir konflikt/bygg/💬 én «🤖 3» (hvor mange).
   Demping (m → z) huskes til raden er borte fra lista; av/på og utenfor arbeidstid (A) gjelder økta.
   Konfig: {config}   tilstand: {state}
