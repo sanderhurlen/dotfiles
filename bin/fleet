@@ -1448,7 +1448,7 @@ class Pilot:
             if "@re-" not in fp and (len(tries) >= 1 if isinstance(x, (Review, Group)) else
                                      any(not q.startswith("c-") for q in fp_parts(fp))
                                      and len(fixes) >= self.c["max_fix_attempts"]):
-                chips[x.key] = ("🤖 ga opp", "red")
+                chips[x.key] = (" ⛔ ga opp ", "b-bad")
                 if x.key not in st["gaveup"]:
                     st["gaveup"].append(x.key)
                     s.news.append(f"🤖 ga opp {x.key} etter {len(tries)} forsøk: {why}")
@@ -1904,7 +1904,7 @@ def agent_chip(snap, x):
 
 def auto_chip(snap, x):
     c = snap.auto.get(x.key)
-    return [(f"  {c[0]}", c[1])] if c else []
+    return ([("  ", None), c] if c[1].startswith("b-") else [(f"  {c[0]}", c[1])]) if c else []
 
 
 def handled(snap, x):
@@ -1913,14 +1913,18 @@ def handled(snap, x):
 
 
 def mine_status(m, quiet=False):
-    """(icon, tone, [(chip, tone)]) — worst first. quiet: an agent handles it, so the chips for what
-    autopilot fixes (conflict, red build, threads) stay out; the icon still says how it stands."""
+    """(icon, tone, [(chip, tone)]) — worst first. quiet: an agent handles it, so what autopilot fixes
+    (conflict, red build, threads) is one calm «🤖 konflikt, build, 2 tråder»; the icon still says how it stands."""
     chips, hidden = [], []
     (hidden if quiet else chips).extend(
         ([(" konflikt ", "b-bad")] if m.pr.conflicts else []) + [(f"{n} ✗", "red") for n in m.failing])
     chips += [(f"@{n} {'✗' if v == -10 else '⏸'}", "red" if v == -10 else "yellow") for n, v in m.votes]
     if m.threads:
         (hidden if quiet else chips).append((f"💬 {m.threads}", "yellow"))
+    if hidden:
+        what = (["konflikt"] if m.pr.conflicts else []) + list(m.failing) \
+            + ([f"{m.threads} tråd{'er' if m.threads > 1 else ''}"] if m.threads else [])
+        chips.insert(0, (f"🤖 {', '.join(what)}", "cyan"))
     waiting = [n for n, st, b in m.pr.policies if b and st in ("queued", "running")]
     chips += [(f"{n} …", "dim") for n in waiting]
     if m.pr.draft:
@@ -2829,7 +2833,7 @@ GUIDE = """\
                     på kildebranchen, target som fast punkt. Uten lokal klone: forklar PR-en.
                     Poster ingenting i ADO. Én gang per PR.
     min PR får rødt bygg / konflikt → fleet-pr-<id>-fix: merger target inn, fikser, pusher. Ingen
-                    force-push, svarer ikke i tråder. Én gang per commit, maks {tries} forsøk, så «🤖 ga opp».
+                    force-push, svarer ikke i tråder. Én gang per commit, maks {tries} forsøk, så «⛔ ga opp».
     min PR får kommentar (aktiv tråd der siste ord ikke er mitt; trigger «comments») → samme fix-agent:
                     fikser og pusher, svarene skrives som utkast (`wr draft <id>`, 📝 på linja, m → p poster).
                     Én runde per ny kommentar — min egen push starter ingen ny; gir ikke opp.
@@ -2843,7 +2847,8 @@ GUIDE = """\
   Maks {par} fleet-agenter kjører samtidig (mine teller med); resten «⏳ i kø», fix før review.
   En agent som har stått ⏸ over {blocked} min (transkriptet urørt) er ferdig med turen og venter
                     på meg — den teller ikke, så køen går videre. Linja viser hvor lenge: «⏸ fix blocked 5d».
-  Linja: 🤖 auto · ⏳ i kø / venter til 07:00 · 🤖 feilet: … · 🤖 ga opp · 🔕 auto av · 💤 for gammel (m → n).
+  Linja: 🤖 auto · ⏳ i kø / venter til 07:00 · 🤖 feilet: … · ⛔ ga opp · 🔕 auto av · 💤 for gammel (m → n).
+  Mine PRer: mens en agent jobber (eller står i kø) blir konflikt/bygg/💬 én «🤖 konflikt, build, 2 tråder».
   Demping (m → z) huskes til raden er borte fra lista; av/på og utenfor arbeidstid (A) gjelder økta.
   Konfig: {config}   tilstand: {state}
 
