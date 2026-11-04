@@ -154,12 +154,11 @@ function ReviewItem({ p, act, refresh }: { p: ReviewPr; act: Act; refresh: React
   const d = draft(p.id);
   return (
     <List.Item
-      icon={d ? { source: Icon.Pencil, tintColor: Color.Yellow } : Icon.Eye}
+      icon={Icon.Eye}
       title={p.title}
       subtitle={`!${p.id} ${p.repo}`}
       keywords={[String(p.id), p.repo, p.author]}
       accessories={[
-        ...(d ? [{ tag: { value: `📝 ${draftLine(d)}`, color: Color.Yellow } }] : []),
         ...agentTags(p.agents),
         { text: `@${p.author.split("@")[0]}` },
       ]}

@@ -4,7 +4,7 @@
 // offers `fleet ls`.
 
 import { Color, Icon, LaunchType, MenuBarExtra, launchCommand, open, showHUD } from "@raycast/api";
-import { activate, draft, draftLine, needs, readState, run, stale, when } from "./state";
+import { activate, needs, readState, run, stale, when } from "./state";
 
 const agentRow = (name: string) => name.match(/^fleet-(pr|wi)-(\d+)-(\w+)$/);
 
@@ -69,18 +69,15 @@ export default function Command() {
 
       {n.review.length > 0 && (
         <MenuBarExtra.Section title="Til review">
-          {n.review.map((p) => {
-            const d = draft(p.id);
-            return (
-              <MenuBarExtra.Item
-                key={p.id}
-                icon={d ? { source: Icon.Pencil, tintColor: Color.Yellow } : Icon.Eye}
-                title={`!${p.id} ${p.title}`}
-                subtitle={d ? `📝 ${draftLine(d)}` : `@${p.author.split("@")[0]}`}
-                onAction={() => open(p.url)}
-              />
-            );
-          })}
+          {n.review.map((p) => (
+            <MenuBarExtra.Item
+              key={p.id}
+              icon={Icon.Eye}
+              title={`!${p.id} ${p.title}`}
+              subtitle={`@${p.author.split("@")[0]}`}
+              onAction={() => open(p.url)}
+            />
+          ))}
         </MenuBarExtra.Section>
       )}
 
