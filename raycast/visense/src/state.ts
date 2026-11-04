@@ -53,7 +53,7 @@ export interface MyPr {
   ready: boolean;
   conflicts: boolean;
   autoComplete: boolean;
-  policies: { name: string; status: string; blocking: boolean }[];
+  policies: { name: string; status: string; blocking: boolean; build?: boolean }[];
   todo: string[];
   group: { id: number; title: string; url: string } | null; // the work item it shares with my other PRs
   agents: Record<string, AgentState>;
@@ -102,6 +102,11 @@ export function attention(m: MyPr): string[] {
     (m.policies ?? []).filter((p) => p.blocking && ["rejected", "broken"].includes(p.status)).map((p) => `${p.name} feiler`),
   );
   return m.todo.filter((t) => !builds.has(t));
+}
+
+/** A blocking build is queued or running — fleet's ◌. Reviewer policies wait in «queued» too, so only builds count. */
+export function building(m: MyPr): boolean {
+  return (m.policies ?? []).some((p) => p.build && p.blocking && ["queued", "running"].includes(p.status));
 }
 
 /** «Spec: Foo» → «Foo», like fleet: the kind already says it. */

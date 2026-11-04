@@ -1874,7 +1874,7 @@ _BADGE = lambda bg: ((16, 0), bg, "bold")
 TONES = {"green": ((114, 2), None, ""), "red": ((203, 1), None, ""), "yellow": ((221, 3), None, ""),
          "cyan": ((81, 6), None, ""), "magenta": ((177, 5), None, ""), "blue": ((75, 4), None, ""),
          "dim": (None, None, "dim"), "bold": (None, None, "bold"), "rule": ((239, 0), None, ""),
-         "run": ((81, 6), None, "bold"), "skill": ((141, 5), None, ""),
+         "run": ((81, 6), None, "bold"),
          "t-issue": ((177, 5), None, "bold"),  # issue: coloured text, no box
          "b-bug": _BADGE((203, 1)), "b-issue": _BADGE((177, 5)), "b-map": _BADGE((81, 6)),
          "b-spec": _BADGE((114, 2)), "b-task": _BADGE((75, 4)), "b-item": _BADGE((250, 7)),
@@ -1964,7 +1964,7 @@ def mine_status(m, quiet=False):
         return "⏸", "yellow", chips
     if m.pr.ready:
         return "✓", "green", chips + [(" ✓ klar ", "b-ok")]
-    building = any(b and st in ("queued", "running") for _, st, b in m.pr.policies)
+    building = any(b and st in ("queued", "running") and n in m.pr.builds for n, st, b in m.pr.policies)
     return "◌" if building else "○", "dim", chips
 
 
@@ -2222,7 +2222,8 @@ def write_state(snap, everyone, open_=(), cur=None, msg=""):
         "myPullRequests": [{"id": m.id, "title": m.title, "project": m.project, "repo": m.repo,
                             "source": m.source, "target": m.target, "url": m.url, "draft": m.pr.draft,
                             "autoComplete": m.pr.auto, "ready": m.pr.ready, "conflicts": m.pr.conflicts,
-                            "policies": [{"name": n, "status": st, "blocking": b} for n, st, b in m.pr.policies],
+                            "policies": [{"name": n, "status": st, "blocking": b, "build": n in m.pr.builds}
+                                         for n, st, b in m.pr.policies],
                             "negativeVotes": dict(m.votes), "activeThreads": m.threads,
                             "workItems": sorted(m.items), "todo": m.todo,
                             "group": {"id": m.group.id, "title": m.group.title, "url": m.group.url}

@@ -121,6 +121,7 @@ class PR:
                    f"/pullrequest/{self.id}"
         self.policies = []  # [(name, status, blocking)]; a build main has moved past is "expired"
         self.expired = []  # evaluation ids of expired build policies, for requeue()
+        self.builds = set()  # names of the build/status policies (not reviewers, comments, wi)
         self.done_at = {}  # policy name: when its evaluation last finished (datetime | None)
         self.allowed = None  # merge strategies the merge-strategy policy allows, None = any
 
@@ -162,6 +163,8 @@ def policies(pr):
             status = "expired"
             pr.expired.append(e["evaluationId"])
         pr.policies.append((name, status, cfg.get("isBlocking", False)))
+        if kind in ("Build", "Status"):
+            pr.builds.add(name)
         pr.done_at[name] = ts(e.get("completedDate"))
 
 

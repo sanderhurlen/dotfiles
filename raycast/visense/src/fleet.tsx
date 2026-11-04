@@ -22,6 +22,7 @@ import {
   WorkItem,
   activate,
   attention,
+  building,
   bare,
   draft,
   draftLine,
@@ -127,7 +128,13 @@ function bundles(mine: MyPr[]): [NonNullable<MyPr["group"]>, MyPr[]][] {
 function MyPrItem({ m, act, refresh }: { m: MyPr; act: Act; refresh: ReactNode }) {
   return (
     <List.Item
-      icon={attention(m).length ? { source: Icon.XMarkCircle, tintColor: Color.Red } : Icon.Circle}
+      icon={
+        attention(m).length
+          ? { source: Icon.XMarkCircle, tintColor: Color.Red }
+          : building(m)
+            ? { value: Icon.CircleEllipsis, tooltip: "bygget kjører" }
+            : Icon.Circle
+      }
       title={m.title}
       subtitle={`!${m.id} ${m.repo}${m.autoComplete ? " ↯" : ""}`}
       keywords={[String(m.id), m.repo, ...(m.group ? [String(m.group.id)] : [])]}
