@@ -1707,17 +1707,8 @@ def post_option(r):
              f"post på !{r.id}: {wr.draft_line(d)}?")]
 
 
-POST_CHIP = [("  ", None), (" post ", "b-warn")]  # yellow badge = my turn, like ⏸
-
-
-def draft_chip(r):
-    """« post » badge when a draft waits for me to post it (m → p); else 🔁 when the author pushed after I posted."""
-    try:
-        d = wr.load_draft(r.id)
-    except RuntimeError:
-        return [("  utkast feil", "red")]
-    if d and not d.get("posted"):
-        return POST_CHIP
+def pushed_chip(r):
+    """🔁 when the author pushed after I posted. A draft waiting to be posted isn't on the row (m → p has it)."""
     if pushed_since(r):
         return [("  🔁 nye commits siden min review", "yellow")]
     return []
@@ -1979,6 +1970,14 @@ def tree_chip(w):
     return [(f"  ⎇ {name}", "cyan")]
 
 
+KIND_PREFIX = re.compile(r"^\s*(spec|wayfinder-kart|kart)\s*:\s*", re.I)  # the badge says it
+
+
+def bare(title):
+    """«Spec: Foo» → «Foo»: the kart/spec badge already says what it is."""
+    return KIND_PREFIX.sub("", title) or title
+
+
 def work_row(snap, w, multi, folded):
     label, tone = KIND.get(w.kind) or TYPE.get(w.type.lower(), (w.type.lower()[:5], "b-item"))
     parts = [("● " if w.state == "Doing" else "○ ", "yellow" if w.state == "Doing" else "dim"),
@@ -1987,7 +1986,7 @@ def work_row(snap, w, multi, folded):
         parts.append((f"{w.project[:12]:<12}  ", hue(w.project, False)))
     if w.folds:
         parts.append(("▸ " if folded else "▾ ", "cyan"))
-    parts += [(w.title[:70], "bold"), (f"  {w.state}", "yellow" if w.state == "Doing" else "dim")]
+    parts += [(bare(w.title)[:70], "bold"), (f"  {w.state}", "yellow" if w.state == "Doing" else "dim")]
     if w.folds:
         parts.append((f"  {len(w.children)} åpne, {w.done_children} done", "dim"))
     parts.append((f"  → {w.skill}", "skill"))
@@ -1998,7 +1997,7 @@ def child_row(snap, t, last, pad):
     kind = t.it.kind or t.type.lower()[:5]
     who = f" @{t.it.assignee.split('@')[0]}" if t.it.assignee else ""
     parts = [(" " * pad + ("└ " if last else "├ "), "dim"), (f"#{t.id:<5} ", "dim"), (f"{kind:<9} ", "cyan"),
-             (f"{t.status:<8} ", STATUS.get(t.status, "dim")), (t.title[:70], None),
+             (f"{t.status:<8} ", STATUS.get(t.status, "dim")), (bare(t.title)[:70], None),
              (who, hue(who.strip(" @"), False) if who else "dim")]
     if t.it.hitl:
         parts += [("  ", None), (" HITL ", "b-bad")]
@@ -2018,7 +2017,7 @@ def pr_row(snap, r, wrepo, indent=""):
              (f" {ago(r.created)}", age_tone(r.created))]
     if not r.asked:
         parts.append(("  (ikke reviewer)", "dim"))
-    return parts + agent_chip(snap, r) + draft_chip(r) + auto_chip(snap, r)
+    return parts + agent_chip(snap, r) + pushed_chip(r) + auto_chip(snap, r)
 
 
 def bundle_row(b):
@@ -2031,11 +2030,6 @@ def mine_row(snap, m, wrepo, indent=""):
              (m.title, "flex-dim" if m.pr.draft else "flex"), (f"  {ago(m.created)}", age_tone(m.created))]
     for c, t in chips:
         parts += [("  ", None), (c, t)] if t.startswith("b-") else [(f"  {c}", t)]
-    try:
-        d = wr.load_draft(m.id)
-        parts += POST_CHIP if d and not d.get("posted") else []  # the fix agent's answers, mine to post
-    except RuntimeError:
-        parts.append(("  utkast feil", "red"))
     return parts + agent_chip(snap, m) + auto_chip(snap, m)
 
 
@@ -2819,14 +2813,14 @@ GUIDE = """\
               gruppe     (▾ #id: review-PRer av samme forfatter på samme work item) g én review-agent for
                          alle · r re-review · z/n autopilot · o åpne work item
               PR         a approve · u auto-complete · c complete · x abandon · g review-agent ·
-                         p post review-utkastet («post» på raden; `wr draft <id>` viser det) ·
+                         p post review-utkastet (`wr draft <id>` viser det) ·
                          r re-review når forfatteren har pushet etter at jeg postet (🔁) ·
                          z demp/slå på autopilot · n kjør auto nå · o åpne
               work item  t triage (Issue/Bug: `wi triage` her i terminalen, y skriver til ADO) ·
                          s endre status (1–9) · i nåværende sprint · g agent · v VS Code ·
                          z demp/slå på auto-triage · n triager nå (utriagerte) · o åpne
               min PR     f fix-agent · u auto-complete · c complete · x abandon ·
-                         p post svar-utkastet («post») · z demp/slå på autopilot · n kjør auto nå · o åpne
+                         p post svar-utkastet · z demp/slå på autopilot · n kjør auto nå · o åpne
               agent      x fjern (stop + rm) · s stopp
               pipeline-varsel  forslag fra `wp upkeep` (launchd kl 11) — ingenting er opprettet ennå:
                          c opprett Issue + Task per repo og start agentene · t bare Issue + Tasks ·
@@ -2871,7 +2865,7 @@ GUIDE = """\
     min PR får rødt bygg / konflikt → fleet-pr-<id>-fix: merger target inn, fikser, pusher. Ingen
                     force-push, svarer ikke i tråder. Én gang per commit, maks {tries} forsøk, så «⛔ ga opp».
     min PR får kommentar (aktiv tråd der siste ord ikke er mitt; trigger «comments») → samme fix-agent:
-                    fikser og pusher, svarene skrives som utkast (`wr draft <id>`, «post» på linja, m → p poster).
+                    fikser og pusher, svarene skrives som utkast (`wr draft <id>`, m → p poster).
                     Én runde per ny kommentar — min egen push starter ingen ny; gir ikke opp, heller ikke
                     når fix-forsøkene på bygg/konflikt er brukt opp.
   Triagerer selv (trigger «triage»):
