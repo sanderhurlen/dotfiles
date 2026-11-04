@@ -1944,19 +1944,17 @@ def handled(snap, x):
 
 def mine_status(m, quiet=False):
     """(icon, tone, [(chip, tone)]) — worst first. quiet: an agent handles it, so what autopilot fixes
-    (conflict, red build, threads) is one calm «🤖 3», how many; the icon still says how it stands."""
+    (conflict, red build, threads) is one calm «🤖 3», how many; the icon still says how it stands.
+    A build — red, expired or running — is no chip and doesn't make the row ✗/⏸: it's ○ until it's green."""
     chips, hidden = [], []
-    (hidden if quiet else chips).extend(
-        ([(" konflikt ", "b-bad")] if m.pr.conflicts else []) + [(f"{n} ✗", "red") for n in m.failing])
+    (hidden if quiet else chips).extend([(" konflikt ", "b-bad")] if m.pr.conflicts else [])
     chips += [(f"@{n} {'✗' if v == -10 else '⏸'}", "red" if v == -10 else "yellow") for n, v in m.votes]
     if m.threads:
         (hidden if quiet else chips).append((f"💬 {m.threads}", "yellow"))
-    if hidden:
+    if hidden or quiet and m.failing:
         chips.insert(0, (f"🤖 {bool(m.pr.conflicts) + len(m.failing) + m.threads}", "cyan"))
     waiting = [n for n, st, b in m.pr.policies if b and st in ("queued", "running")]
     chips += [("bygg …", "dim")] if waiting else []
-    if any(b and st == "expired" for _, st, b in m.pr.policies):
-        chips.append(("↻ bygg utløpt", "yellow"))  # main moved on; m → b (autopilot does it with «expired»)
     tones = [t for _, t in chips + hidden]
     if "red" in tones or "b-bad" in tones:
         return "✗", "red", chips
@@ -2782,9 +2780,9 @@ GUIDE = """\
   PRer         aktive, ikke draft, ikke mine, uten min godkjenning (stemme < 5).
                Default bare der jeg er reviewer; `a` / -a viser alle andres.
   Mine PRer    aktive PRer jeg har laget, draft også. Viser det som blokkerer:
-                 konflikt · <bygg> ✗ · @navn ✗/⏸ (avvist / venter på endringer) · 💬 n aktive tråder
-                 <policy> … (kjører/i kø) · ↻ bygg utløpt (grønt, men main har flyttet seg; m → b) · draft · klar
-               ✗ rødt = noe feiler, ⏸ gult = venter på meg, ✓ = klar til complete. ↯ etter ikonet = auto-complete er satt.
+                 konflikt · @navn ✗/⏸ (avvist / venter på endringer) · 💬 n aktive tråder
+                 <policy> … (kjører/i kø) · draft · klar
+               ✗ rødt = konflikt/avvist, ⏸ gult = venter på meg, ✓ = klar til complete, ○ = ellers (også rødt eller utløpt bygg). ↯ etter ikonet = auto-complete er satt.
                Work items som PR-en lenker (eller har id-en i branchen) får «↳ !<pr> ✗/⏸/✓» på linja.
                To eller flere som deler et work item står under det («▾ #<wi>»); enter der:
                fix-agent på hver PR, eller åpne work itemet.
@@ -2834,7 +2832,7 @@ GUIDE = """\
               work item  t triage (Issue/Bug: `wi triage` her i terminalen, y skriver til ADO) ·
                          s endre status (1–9) · i nåværende sprint · g agent · v VS Code ·
                          z demp/slå på auto-triage · n triager nå (utriagerte) · o åpne
-              min PR     f fix-agent · u auto-complete · b bygg på nytt (↻ utløpt) · c complete · x abandon ·
+              min PR     f fix-agent · u auto-complete · b bygg på nytt (utløpt) · c complete · x abandon ·
                          p post svar-utkastet · z demp/slå på autopilot · n kjør auto nå · o åpne
               agent      x fjern (stop + rm) · s stopp
               pipeline-varsel  forslag fra `wp upkeep` (launchd kl 11) — ingenting er opprettet ennå:
@@ -2883,7 +2881,7 @@ GUIDE = """\
                     fikser og pusher, svarene skrives som utkast (`wr draft <id>`, m → p poster).
                     Én runde per ny kommentar — min egen push starter ingen ny; gir ikke opp, heller ikke
                     når fix-forsøkene på bygg/konflikt er brukt opp.
-  Kjører utløpte bygg på nytt (trigger «expired»): min PR med ↻ bygg utløpt → requeue av byggpolicyen
+  Kjører utløpte bygg på nytt (trigger «expired»): min PR med utløpt bygg (grønt, men main har flyttet seg) → requeue av byggpolicyen
                     i ADO, ingen agent. Maks hvert 10. min per PR; gjelder også utenfor arbeidstid.
   Triagerer selv (trigger «triage»):
     Issue/Bug tildelt meg i To Do uten triage-tag (og ikke wayfinder) → `wi triage <id> --save` i
