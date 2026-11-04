@@ -1925,8 +1925,6 @@ def mine_status(m, quiet=False):
         chips.insert(0, (f"🤖 {bool(m.pr.conflicts) + len(m.failing) + m.threads}", "cyan"))
     waiting = [n for n, st, b in m.pr.policies if b and st in ("queued", "running")]
     chips += [(f"{n} …", "dim") for n in waiting]
-    if m.pr.draft:
-        chips.append(("draft", "dim"))
     if m.pr.auto:
         chips.append(("auto", "cyan"))
     tones = [t for _, t in chips + hidden]
