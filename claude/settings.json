@@ -1,4 +1,7 @@
 {
+  "env": {
+    "CLAUDE_CODE_PLUGIN_DIRS": "~/.dotfiles/claude/mods/pr-utkast"
+  },
   "permissions": {
     "deny": [
       "EnterPlanMode",
@@ -32,7 +35,8 @@
   "disableWorkflows": true,
   "enabledPlugins": {
     "figma@claude-plugins-official": true,
-    "telegram@claude-plugins-official": true
+    "telegram@claude-plugins-official": true,
+    "stripe@claude-plugins-official": true
   },
   "effortLevel": "medium",
   "tui": "fullscreen",
@@ -67,8 +71,5 @@
       "**Org-specific CLIs**: None configured"
     ]
   },
-  "voiceEnabled": true,
-  "env": {
-    "CLAUDE_CODE_PLUGIN_DIRS": "~/.dotfiles/claude/mods/pr-utkast"
-  }
+  "voiceEnabled": true
 }
