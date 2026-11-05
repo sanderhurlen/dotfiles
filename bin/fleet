@@ -1805,7 +1805,7 @@ def iterations(project):
 
 
 class Iteration:
-    """An «Andre iterasjoner» group's header: →/← folds its items in and out (folded when fleet starts)."""
+    """A header for my items in another iteration: →/← folds its items in and out (folded when fleet starts)."""
     def __init__(self, label, dates, items):
         self.label, self.dates, self.items = label, dates, items
         self.id = f"iter:{label}"  # in the TUI's open_ next to map ids
@@ -2011,7 +2011,7 @@ TONES = {"green": ((114, 2), None, ""), "red": ((203, 1), None, ""), "yellow": (
          **{f"H{i}": (c, None, "") for i, c in enumerate(_HUES)}}
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 ANIM, SEA_W, WAVES, GLINT = 3, 13, (24, 25, 31, 32, 38, 39, 45, 81), (231, 195, 159, 123, 117, 81)  # the title's sea and glint
-SECTION = {"work": "yellow", "later": "cyan", "review": "magenta", "mine": "green", "warn": "yellow", "orphan": "red", "clean": "dim"}
+SECTION = {"work": "yellow", "review": "magenta", "mine": "green", "warn": "yellow", "orphan": "red", "clean": "dim"}
 
 
 REPO_PREFIX = "visense-"  # every repo has it; the list shows the rest
@@ -2159,8 +2159,9 @@ def child_row(snap, t, last, pad, quiet=False):
 
 
 def iteration_row(snap, g, folded):
-    """«▸ Sprint 18  3  14.10–27.10  ● 1  ▶ 1» — folded, it still says what's in Doing and which agents run or wait."""
-    parts = [("▸ " if folded else "▾ ", "cyan"), (g.label, "bold"), (f"  {len(g.items)}", "cyan")] \
+    """«▸ Sprint 18  3  14.10–27.10  ● 1  ▶ 1» — grey like the old ones' row it sits by; folded, it still says
+    what's in Doing and which agents run or wait."""
+    parts = [("▸ " if folded else "▾ ", "dim"), (g.label, "dim"), (f"  {len(g.items)}", "dim")] \
         + ([(f"  {g.dates}", "dim")] if g.dates else [])
     if folded:
         doing = sum(w.state == "Doing" for w in g.items)
@@ -2231,18 +2232,15 @@ def lines(snap, everyone, open_=()):
         item(w)
     if not now:
         out.append(([("  ingen", "dim")], None))
+    for label, dates, ws in by_iteration(later):  # the rest, at the bottom with the old ones: folded, grey
+        g = Iteration(label, dates, ws)
+        out.append((iteration_row(snap, g, g.id not in open_), g))
+        if g.id in open_:
+            for w in ws:
+                item(w, g)
     if snap.old and snap.old.n:
         out.append(([(f"… {snap.old.title} (eldre enn {OLD} dager)", "dim"), ("  → åpne query", "dim")], snap.old))
     out.append(([], None))
-    if later:
-        out.append((section("later", "Andre iterasjoner", len(later), "To Do/Doing utenfor nåværende sprint"), None))
-        for label, dates, ws in by_iteration(later):
-            g = Iteration(label, dates, ws)
-            out.append((iteration_row(snap, g, g.id not in open_), g))
-            if g.id in open_:
-                for w in ws:
-                    item(w, g)
-        out.append(([], None))
     who = "alle andres" if everyone else "der jeg er reviewer"
     out.append((section("review", "PRer uten min godkjenning", len(snap.prs), who), None))
     wrepo = max([len(rname(r.repo)) for r in snap.prs] + [4])
@@ -3002,10 +3000,10 @@ GUIDE = """\
 
 {b}LISTA{r}
   Work items   tildelt meg, state To Do eller Doing. Doing først (●, To Do ○), så ▸/▾ på kart/spec. Tickets: ○ ledig ▶ tatt ⏸ blokkert ✓ done.
-               Bare nåværende sprint (eller kart/spec/Issue med en task av meg i den); resten under
-  Andre iterasjoner  gruppert per iterasjon i datorekkefølge, «ingen sprint» sist. Grå, unntatt PR-, agent- og
-               autopilot-merker. Foldet inn ved start (→/← eller enter på headeren); innfoldet viser den
-               ● Doing, ▶ agenter som kjører og ⏸ som venter. i flytter et item til nåværende sprint.
+               Først nåværende sprint (eller kart/spec/Issue med en task av meg i den).
+               Andre iterasjoner nederst, over de gamle: én grå rad per iterasjon i datorekkefølge, «ingen sprint»
+               sist. Foldet inn ved start (→/← eller enter); innfoldet viser den ● Doing, ▶ agenter som kjører og
+               ⏸ som venter. Itemene er grå, unntatt PR-, agent- og autopilot-merker. m → i flytter sprint.
   PRer         aktive, ikke draft, ikke mine, uten min godkjenning (stemme < 5).
                Default bare der jeg er reviewer; `a` / -a viser alle andres.
   Mine PRer    aktive PRer jeg har laget, draft også. Viser det som blokkerer:
