@@ -103,16 +103,29 @@ export default function Command() {
         ))}
       </List.Section>
 
-      <List.Section title="Work items" subtitle={String(s.workItems.length)}>
-        {s.workItems.flatMap((w) => [w, ...(w.tickets ?? [])]).map((w) => (
-          <WorkRow key={w.id} w={w} act={act} refresh={refresh} />
-        ))}
-      </List.Section>
+      {iterations(s.workItems).map(([title, dates, ws]) => (
+        <List.Section key={title} title={title} subtitle={[String(ws.length), dates].filter(Boolean).join(" · ")}>
+          {ws.flatMap((w) => [w, ...(w.tickets ?? [])]).map((w) => (
+            <WorkRow key={w.id} w={w} act={act} refresh={refresh} />
+          ))}
+        </List.Section>
+      ))}
     </List>
   );
 }
 
 type Act = (title: string, bin: string, args: string[], confirm?: string) => Promise<void>;
+
+/** Work items per section, in fleet's order: the current sprint, then one per other iteration. */
+function iterations(items: WorkItem[]): [string, string, WorkItem[]][] {
+  const by = new Map<string, [string, string, WorkItem[]]>();
+  for (const w of items) {
+    const title = w.currentSprint === false ? `Iterasjon: ${w.iterationLabel ?? "?"}` : "Work items";
+    if (!by.has(title)) by.set(title, [title, w.iterationDates ?? "", []]);
+    by.get(title)![2].push(w);
+  }
+  return [...by.values()];
+}
 
 /** My PRs that share a work item, per item, in the order fleet lists them. */
 function bundles(mine: MyPr[]): [NonNullable<MyPr["group"]>, MyPr[]][] {

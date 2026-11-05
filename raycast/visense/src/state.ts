@@ -31,6 +31,9 @@ export interface WorkItem {
   hitl?: boolean;
   doneTickets?: number;
   tickets?: WorkItem[];
+  currentSprint?: boolean; // false: in another iteration, see iterationLabel
+  iterationLabel?: string;
+  iterationDates?: string | null;
 }
 
 export interface ReviewPr {

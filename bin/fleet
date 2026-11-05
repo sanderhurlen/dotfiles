@@ -134,6 +134,7 @@ class Work:
         self.children, self.done_children = [], 0  # a map's/spec's open tickets (Work), and how many are done
         self.trees = []  # local worktrees for this item, see worktrees()
         self.prs = []  # my active PRs (Mine) that link this item or carry its id in their branch
+        self.current = True  # in its project's current sprint (or a task of mine under it is), see work()
 
     @property
     def decision(self):
@@ -204,9 +205,10 @@ def wiql(when):
 
 
 def work():
-    """(items, Old): my work items in To Do/Doing across the org created the last OLD days: my bugs
-    first, then mine in the project's current sprint, then the rest; within each Doing first, then by id. Tasks under a map, spec or Issue/Bug only show as its children; the parent
-    is listed even if not mine."""
+    """(items, Old): my work items in To Do/Doing across the org created the last OLD days: those in
+    the project's current sprint first (Work.current), then the rest; within each my bugs first, then
+    Doing, then by id. Tasks under a map, spec or Issue/Bug only show as its children; the parent is
+    listed even if not mine, and is current if it or one of my tasks under it is."""
     q = lambda when: [w["id"] for w in rest("wit/wiql", {"query": wiql(when)}, scope="org")["workItems"]]
     ids, old = q(f"[System.CreatedDate] >= @Today - {OLD}"), Old(len(q(f"[System.CreatedDate] < @Today - {OLD}")))
     wf._cache.clear()
@@ -215,6 +217,8 @@ def work():
     heads = {p.id: p for t in its for p in wf.many(t.links(wf.PARENT)) if head(p)}
     items = [Work(t, next((Work(heads[p]) for p in t.links(wf.PARENT) if p in heads), None)) for t in its]
     under = {w.parent.id for w in items if w.task and w.parent}
+    now = sprints({t.project for t in its})
+    hot = {w.parent.id for w in items if w.task and w.parent and w.it.iteration in now}
     items = [w for w in items if not (w.task and w.parent)]
     mine_ = {w.id for w in items}
     items += [Work(heads[i]) for i in sorted(under - mine_)]
@@ -222,22 +226,23 @@ def work():
     wf.fetch([c for m in folds for c in m.it.links(wf.CHILD)])
     for m in folds:
         unfold(m)
-    now = in_sprint({t.project for t in its}, q)
-    return sorted(items, key=lambda w: (not (w.id in ids and w.type.lower() == "bug"), w.id not in now,
+    for w in items:
+        w.current = not now or w.it.iteration in now or w.id in hot  # no sprint known: all are current
+    for p in {w.project for w in items if not w.current}:
+        iterations(p)  # warm the cache by_iteration reads, so drawing the list never waits on ADO
+    return sorted(items, key=lambda w: (not w.current, not (w.id in ids and w.type.lower() == "bug"),
                                         STATES.index(w.state) if w.state in STATES else 9, w.id)), old
 
 
-def in_sprint(projects, q):
-    """Ids of my To Do/Doing items in their project's current sprint (projects without one are skipped)."""
-    paths = []
+def sprints(projects):
+    """Paths of the projects' current sprints (projects without one are skipped)."""
+    out = set()
     for p in projects:
         try:
-            paths.append(sprint(p)[1])
+            out.add(sprint(p)[1])
         except Exception:
             pass
-    if not paths:
-        return set()
-    return set(q("[System.IterationPath] IN (" + ", ".join("'" + p.replace("'", "''") + "'" for p in paths) + ")"))
+    return out
 
 
 class Review:
@@ -1280,8 +1285,8 @@ def wi_env(w):
     return os.environ | {"WF_ORG": A().org, "WF_PROJECT": w.project, "WI_NO_GO": "1"}
 
 
-ROUTE = {"ready-for-agent": ("agent-klar", "green"), "ready-for-human": ("for meg", "yellow"),
-         "needs-info": ("trenger info", "red"), "wayfinder": ("bør bli kart", "cyan")}
+ROUTE = {"ready-for-agent": ("agent-klar", "green", "🚀"), "ready-for-human": ("for meg", "yellow", "👤"),
+         "needs-info": ("trenger info", "red", "❓"), "wayfinder": ("bør bli kart", "cyan", "🧭")}  # the row shows the icon
 TRIAGE_PAR = 2  # `wi triage` runs at once; they're short and don't hold an agent slot
 
 
@@ -1526,12 +1531,12 @@ class Pilot:
         for k, w in work.items():
             r = wi.triage_record(w.id)
             if k in self.procs:
-                chips[k] = ("🧭 triagerer …", "cyan")
+                chips[k] = ("🔍 …", "cyan")
             elif r:
-                label, tone = ROUTE[r["proposal"]["route"]]
-                chips[k] = (f"🧭 {label} · m → t", tone)
+                _, tone, icon = ROUTE[r["proposal"]["route"]]
+                chips[k] = (icon, tone)
             elif k in st["failed"]:
-                chips[k] = (f"🧭 feilet: {st['failed'][k]}", "red")
+                chips[k] = (f"🔍 ✗ {st['failed'][k]}", "red")
             elif k in st["muted"] or k in st["started"] or not self.on:
                 continue
             elif not self.open_():
@@ -1540,7 +1545,7 @@ class Pilot:
                 chips[k] = ("⏳ triage i kø", "dim")
             else:
                 self.spawn(w, st)
-                chips[k] = ("🧭 triagerer …", "cyan")
+                chips[k] = ("🔍 …", "cyan")
 
     def header(self, s):
         if not self.lock:
@@ -1764,19 +1769,54 @@ def set_state(w, state):
     return f"✓ #{w.id} → {state}"
 
 
-_sprints = {}
+_sprints, _teams, _iterations = {}, {}, {}
+
+
+def team(project):
+    if project not in _teams:
+        _teams[project] = rest(f"projects/{urllib.parse.quote(project)}", scope="org").get("defaultTeam", {}) \
+            .get("name") or f"{project} Team"
+    return _teams[project]
 
 
 def sprint(project):
-    """(name, path) of the project's default team's current iteration."""
-    if project not in _sprints:
-        team = rest(f"projects/{urllib.parse.quote(project)}", scope="org").get("defaultTeam", {}).get("name") \
-            or f"{project} Team"
-        cur = rest("work/teamsettings/iterations?$timeframe=current", project=f"{project}/{team}")["value"]
+    """(name, path) of the project's default team's current iteration (cached an hour: sprints roll over)."""
+    if time.time() - _sprints.get(project, (0,))[0] > 3600:
+        cur = rest("work/teamsettings/iterations?$timeframe=current", project=f"{project}/{team(project)}")["value"]
         if not cur:
-            raise RuntimeError(f"{team} har ingen nåværende sprint")
-        _sprints[project] = (cur[0]["name"], cur[0]["path"])
-    return _sprints[project]
+            raise RuntimeError(f"{team(project)} har ingen nåværende sprint")
+        _sprints[project] = (time.time(), cur[0]["name"], cur[0]["path"])
+    return _sprints[project][1:]
+
+
+def iterations(project):
+    """{path: (start, finish)} — the default team's iterations, dates as «YYYY-MM-DD» or "" (cached a day)."""
+    at, its = _iterations.get(project, (0, None))
+    if time.time() - at > 86400:
+        try:
+            raw = rest("work/teamsettings/iterations", project=f"{project}/{team(project)}")["value"]
+        except RuntimeError:
+            raw = []
+        its = {i["path"]: (((i.get("attributes") or {}).get("startDate") or "")[:10],
+                           ((i.get("attributes") or {}).get("finishDate") or "")[:10]) for i in raw}
+        _iterations[project] = (time.time(), its)
+    return its
+
+
+def by_iteration(items):
+    """[(label, dates, [Work])] for items outside the current sprint, grouped by iteration path, in
+    date order; iterations the team doesn't have (no dates) after, the project's root (no sprint) last."""
+    by = {}
+    for w in items:
+        by.setdefault(w.it.iteration or w.project, []).append(w)
+    out = []
+    for path, ws in by.items():
+        project, _, rest_ = path.partition("\\")
+        start, finish = (_iterations.get(project) or (0, {}))[1].get(path, ("", ""))
+        dm = lambda d: f"{d[8:10]}.{d[5:7]}"
+        dates = f"{dm(start)}–{dm(finish)}" if start and finish else ""
+        out.append(((not rest_, not start, start, path), rest_ or f"{project} (ingen sprint)", dates, ws))
+    return [x[1:] for x in sorted(out, key=lambda x: x[0])]
 
 
 def set_sprint(w):
@@ -1885,7 +1925,7 @@ TONES = {"green": ((114, 2), None, ""), "red": ((203, 1), None, ""), "yellow": (
          **{f"H{i}": (c, None, "") for i, c in enumerate(_HUES)}}
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 ANIM, SEA_W, WAVES, GLINT = 3, 13, (24, 25, 31, 32, 38, 39, 45, 81), (231, 195, 159, 123, 117, 81)  # the title's sea and glint
-SECTION = {"work": "yellow", "review": "magenta", "mine": "green", "warn": "yellow", "orphan": "red", "clean": "dim"}
+SECTION = {"work": "yellow", "later": "cyan", "review": "magenta", "mine": "green", "warn": "yellow", "orphan": "red", "clean": "dim"}
 
 
 REPO_PREFIX = "visense-"  # every repo has it; the list shows the rest
@@ -2069,8 +2109,8 @@ def lines(snap, everyone, open_=()):
     open_ (ids) show their open tickets under them."""
     out = []
     multi = len({w.project for w in snap.items}) > 1
-    out.append((section("work", "Work items", len(snap.items), "To Do/Doing"), None))
-    for w in snap.items:
+
+    def item(w):
         folded = w.id not in open_
         out.append((work_row(snap, w, multi, folded), w))
         if w.folds and not folded:
@@ -2079,11 +2119,25 @@ def lines(snap, everyone, open_=()):
                 out.append((child_row(snap, t, n == len(w.children) - 1, pad), t))
             if not w.children:
                 out.append(([(" " * pad + "└ ingen åpne tickets", "dim")], None))
-    if not snap.items:
+
+    now, later = [w for w in snap.items if w.current], [w for w in snap.items if not w.current]
+    names = ", ".join(sorted({_sprints[w.project][1] for w in now if w.project in _sprints}))
+    out.append((section("work", "Work items", len(now), "To Do/Doing" + (f" · {names}" if names else "")), None))
+    for w in now:
+        item(w)
+    if not now:
         out.append(([("  ingen", "dim")], None))
     if snap.old and snap.old.n:
         out.append(([(f"… {snap.old.title} (eldre enn {OLD} dager)", "dim"), ("  → åpne query", "dim")], snap.old))
     out.append(([], None))
+    if later:
+        out.append((section("later", "Andre iterasjoner", len(later), "To Do/Doing utenfor nåværende sprint"), None))
+        for label, dates, ws in by_iteration(later):
+            out.append(([("─ ", "cyan"), (label, "bold"), (f"  {len(ws)}", "cyan")]
+                        + ([(f"  {dates}", "dim")] if dates else []), None))
+            for w in ws:
+                item(w)
+        out.append(([], None))
     who = "alle andres" if everyone else "der jeg er reviewer"
     out.append((section("review", "PRer uten min godkjenning", len(snap.prs), who), None))
     wrepo = max([len(rname(r.repo)) for r in snap.prs] + [4])
@@ -2183,7 +2237,8 @@ def work_json(snap, w):
     out = {"id": w.id, "title": w.title, "state": w.state, "type": w.type, "kind": w.kind,
            "project": w.project, "url": w.url, "prompt": w.prompt, "agent": agent_name(w),
            "agents": dict(owned(snap.agents, w)), "start": f"fleet go {w.id}",
-           "worktrees": [t for _, t in w.trees], "myPrs": [m.id for m in w.prs]}
+           "worktrees": [t for _, t in w.trees], "myPrs": [m.id for m in w.prs],
+           "iteration": w.it.iteration, "currentSprint": w.current}
     if w.trees:
         out["openInCode"] = f"fleet code {w.id}"
     if w.parent:
@@ -2211,7 +2266,9 @@ def write_state(snap, everyone, open_=(), cur=None, msg=""):
     state = {
         "updated": now, "dataAt": snap.at, "error": snap.error or None, "message": msg or None,
         "allPrs": everyone, "selected": cur.key if cur else None, "unfoldedMaps": sorted(open_),
-        "workItems": [work_json(snap, w) for w in snap.items],
+        "workItems": [work_json(snap, w) for w in snap.items if w.current]
+        + [dict(work_json(snap, w), iterationLabel=label, iterationDates=dates or None)
+           for label, dates, ws in by_iteration([w for w in snap.items if not w.current]) for w in ws],
         "oldWorkItems": {"count": snap.old.n, "query": snap.old.url} if snap.old else None,
         "pullRequests": [{"id": r.id, "title": r.title, "project": r.project, "repo": r.repo,
                           "author": r.who, "source": r.source, "target": r.target, "url": r.url,
@@ -2827,6 +2884,8 @@ GUIDE = """\
 
 {b}LISTA{r}
   Work items   tildelt meg, state To Do eller Doing. Doing først (●, To Do ○), så ▸/▾ på kart/spec. Tickets: ○ ledig ▶ tatt ⏸ blokkert ✓ done.
+               Bare nåværende sprint (eller kart/spec/Issue med en task av meg i den); resten under
+  Andre iterasjoner  gruppert per iterasjon i datorekkefølge, «ingen sprint» sist. i flytter til nåværende sprint.
   PRer         aktive, ikke draft, ikke mine, uten min godkjenning (stemme < 5).
                Default bare der jeg er reviewer; `a` / -a viser alle andres.
   Mine PRer    aktive PRer jeg har laget, draft også. Viser det som blokkerer:
@@ -2936,7 +2995,7 @@ GUIDE = """\
   Triagerer selv (trigger «triage»):
     Issue/Bug tildelt meg i To Do uten triage-tag (og ikke wayfinder) → `wi triage <id> --save` i
                     bakgrunnen, maks 2 om gangen, én gang per item. Bare et forslag i ~/.cache/wi/triage —
-                    skriver ingenting i ADO. Linja: 🧭 agent-klar / for meg / trenger info / bør bli kart · m → t;
+                    skriver ingenting i ADO. Linja: 🔍 … triagerer, så 🚀 agent-klar · 👤 for meg · ❓ trenger info · 🧭 bør bli kart;
                     m → t viser forslaget og y skriver det. Holder ikke agentplass, ingen {backlog} t-grense.
   Ikke: rødt bygg på draft (konflikt fikses) · PRer der jeg har en egen agent jeg har brukt etter hendelsen · hendelser eldre enn
   {backlog} t (helg teller ikke; review regnes fra da fleet først så meg som reviewer) · utenfor {hours} {days} — da i kø til arbeidstid starter.

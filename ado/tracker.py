@@ -32,11 +32,12 @@ def sh(*cmd, input=None):
 
 class Item:
     def __init__(self, id, title, state, done, tags, assignee, description, url,
-                 rels, type="", criteria="", project=None, repos=()):
+                 rels, type="", criteria="", project=None, repos=(), iteration=None):
         self.id, self.title, self.state, self.done = id, title, state, done
         self.tags, self.assignee, self.description, self.url = tags, assignee, description, url
         self.rels, self.type, self.criteria, self.project = rels, type, criteria, project
         self.repos = set(repos)
+        self.iteration = iteration  # ADO: System.IterationPath
 
     def links(self, rel):
         return sorted(t for r, t in self.rels if r == rel)
@@ -137,7 +138,7 @@ class Ado:
             description=(f.get("System.Description") or "") + (f.get("Microsoft.VSTS.TCM.ReproSteps") or ""),
             criteria=f.get("Microsoft.VSTS.Common.AcceptanceCriteria") or "",
             url=f"{self.org}/{proj}/_workitems/edit/{raw['id']}",
-            type=f.get("System.WorkItemType", ""), project=proj,
+            type=f.get("System.WorkItemType", ""), project=proj, iteration=f.get("System.IterationPath"),
             # commit/PR links: vstfs:///Git/Commit/<project>%2f<repo>%2f<sha>
             repos=[urllib.parse.unquote(r["url"]).split("/Git/", 1)[1].split("/")[2]
                    for r in raw.get("relations") or [] if r["url"].startswith("vstfs:///Git/")],
