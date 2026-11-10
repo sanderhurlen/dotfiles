@@ -48,6 +48,7 @@ import curses
 import datetime
 import concurrent.futures
 import fcntl
+import getpass
 import difflib
 import html
 import json
@@ -172,7 +173,7 @@ def figma_token():
     global _token
     if _token is None:
         _token = os.environ.get("FIGMA_TOKEN") or sh(
-            "security", "find-generic-password", "-a", os.environ.get("USER", ""), "-s", "figma-token", "-w")
+            "security", "find-generic-password", "-a", getpass.getuser(), "-s", "figma-token", "-w")
     return _token
 
 
