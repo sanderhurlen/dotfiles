@@ -31,7 +31,7 @@
 # default ~/visense), else in the first root. Named for what they work on and their role:
 # fleet-wi-<id>-<role> / fleet-pr-<id>-<role> (fleet-pr-7012-fix, fleet-pr-6966-review), so every
 # agent on a PR or work item shows on its row and goes when it does.
-# TUI: ? what fleet does · ↑↓/jk move · m actions for the row · enter start agent (pick prompt, or type one) · →/← unfold/fold a map, spec or iteration · o open · a all PRs · A autopilot · J launchd jobs · r refresh · q quit
+# TUI: ? what fleet does · ↑↓/jk move · m actions for the row · enter start agent (pick prompt, or type one) · →/← unfold/fold a map, spec or iteration · o open · a all PRs · R reviewed PRs · A autopilot · J launchd jobs · r refresh · q quit
 
 import argparse
 import concurrent.futures
@@ -327,12 +327,12 @@ def active():
 
 
 def reviews(raw, everyone):
-    """Active, non-draft PRs by others that I haven't approved. Only those I'm a reviewer
-    on unless everyone. Newest first."""
+    """Active, non-draft PRs by others, approved by me or not (reviewed() splits them in the list).
+    Only those I'm a reviewer on unless everyone. Newest first."""
     my_id = me()[0]
     out = [Review(r, my_id) for r in raw
            if not r.get("isDraft") and (r.get("createdBy") or {}).get("id") != my_id]
-    return [r for r in out if r.vote < 5 and (everyone or r.asked)]
+    return [r for r in out if everyone or r.asked]
 
 
 class Mine:
@@ -638,6 +638,13 @@ def settled(r):
     return bool(d) or r.vote != 0
 
 
+def reviewed(r):
+    """A Review on the «reviewa» side of the list (R): I've approved it, or it's settled and the author
+    hasn't pushed since. Approved with suggestions (5) comes back to «å reviewe» on a push, like
+    waiting/rejected do; approved (10) stays put."""
+    return r.vote >= 10 or (settled(r) and not pushed_since(r))
+
+
 def settled_agents(raw, ids):
     """Finished sessions on the settled PRs ids, untouched for GRACE (those outside a worktree)."""
     keys = {f"fleet-pr-{i}" for i in ids}
@@ -805,9 +812,9 @@ def pr_cleanups(ts_, raw, listed):
 
 
 def listed_prs(prs):
-    """Ids of the PRs the list shows, others' (all) and mine: a PR not among them is done with."""
+    """Ids of the PRs the list shows, others' (all, but not those I've approved) and mine: a PR not among them is done with."""
     my_id = me()[0]
-    return {r.id for r in reviews(prs, True)} | {p["pullRequestId"] for p in prs
+    return {r.id for r in reviews(prs, True) if r.vote < 10} | {p["pullRequestId"] for p in prs
                                                  if (p.get("createdBy") or {}).get("id") == my_id}
 
 
@@ -1360,14 +1367,14 @@ class Pilot:
         """(why, fingerprint, when it happened | None) when autopilot would start on x, else None."""
         trig = self.c["triggers"]
         if isinstance(x, Group):
-            pushed = [pushed_since(r)[1][:7] for r in x.prs if pushed_since(r)]
+            pushed = [pushed_since(r)[1][:7] for r in x.prs if r.vote < 10 and pushed_since(r)]
             if "rereview" in trig and pushed:
                 return REREVIEW, f"{x.key}@re-{'-'.join(pushed)}", None
             if "review" not in trig or not any(r.asked and not r.vote for r in x.prs):
                 return None
             return "review", f"{x.key}@review-{'-'.join(str(r.id) for r in x.prs)}", None
         if isinstance(x, Review):
-            if "rereview" in trig and pushed_since(x):
+            if "rereview" in trig and x.vote < 10 and pushed_since(x):
                 return REREVIEW, f"{x.key}@re-{pushed_since(x)[1][:10]}", None
             if "review" not in trig or not x.asked or x.vote:
                 return None
@@ -2177,13 +2184,27 @@ def group_row(snap, g):
             (f"  {len(g.prs)} PRer ", "dim"), (f"@{g.who}", hue(g.who, False))] + agent_chip(snap, g) + auto_chip(snap, g)
 
 
+class ReviewHeader:
+    """The PR list's header as a row: enter/space switches side, like R."""
+    key, id, title, url = "fleet-review-header", "review-header", "PRer", None
+
+
+REVIEW_HEADER = ReviewHeader()
+
+
+VOTE = {10: ("  ✓ godkjent", "green"), 5: ("  ≈ godkjent m/forslag", "green"),
+        -5: ("  ⏸ venter på forfatter", "yellow"), -10: ("  ✗ avvist", "red")}
+
+
 def pr_row(snap, r, wrepo, indent=""):
-    done = settled(r) and not pushed_since(r)  # ✓ I've done my part; ○ it's my turn
+    done = reviewed(r)  # ✓ I've done my part; ○ it's my turn
     parts = [(indent + ("✓ " if done else "○ "), "green" if done else "dim"), (f"!{r.id:<5} ", "dim"), (f"{rname(r.repo):<{wrepo}}  ", hue(r.repo)),
              (r.title, "flex"), ("  ", None), (f"@{r.who}", hue(r.who, False)),
              (f" {ago(r.created)}", age_tone(r.created))]
     if not r.asked:
         parts.append(("  (ikke reviewer)", "dim"))
+    if r.vote:
+        parts.append(VOTE[r.vote])
     return parts + agent_chip(snap, r) + pushed_chip(r) + auto_chip(snap, r)
 
 
@@ -2207,9 +2228,10 @@ def orphan_row(o):
             (f"{ago(o.started):>4} siden  ", "dim"), (short(o.cwd), "dim")]
 
 
-def lines(snap, everyone, open_=()):
+def lines(snap, everyone, open_=(), done=False):
     """[(parts, Work | Review | None)] — everything the list shows, in order. Maps in
-    open_ (ids) show their open tickets under them."""
+    open_ (ids) show their open tickets under them. done: the PRs I've reviewed (R) instead of those
+    left to review."""
     out = []
     multi = len({w.project for w in snap.items}) > 1
 
@@ -2242,17 +2264,20 @@ def lines(snap, everyone, open_=()):
         out.append(([(f"… {snap.old.title} (eldre enn {OLD} dager)", "dim"), ("  → åpne query", "dim")], snap.old))
     out.append(([], None))
     who = "alle andres" if everyone else "der jeg er reviewer"
-    out.append((section("review", "PRer uten min godkjenning", len(snap.prs), who), None))
-    wrepo = max([len(rname(r.repo)) for r in snap.prs] + [4])
+    prs = [r for r in snap.prs if reviewed(r) == done]
+    other = len(snap.prs) - len(prs)
+    out.append((section("review", "PRer jeg har reviewa" if done else "PRer å reviewe", len(prs),
+                        f"{who} · ↵/R {'å reviewe' if done else 'reviewa'} ({other})"), REVIEW_HEADER))
+    wrepo = max([len(rname(r.repo)) for r in prs] + [4])
     shown = set()
-    for r in snap.prs:
+    for r in prs:
         if not r.group:
             out.append((pr_row(snap, r, wrepo), r))
-        elif r.group.key not in shown:  # the group's header where its first PR would be, its PRs under it
+        elif r.group.key not in shown:  # the group's header where its first PR would be, its PRs (this side) under it
             shown.add(r.group.key)
             out.append((group_row(snap, r.group), r.group))
-            out += [(pr_row(snap, m, wrepo, "  "), m) for m in r.group.prs]
-    if not snap.prs:
+            out += [(pr_row(snap, m, wrepo, "  "), m) for m in r.group.prs if reviewed(m) == done]
+    if not prs:
         out.append(([("  ingen", "dim")], None))
     if snap.mine:
         out.append(([], None))
@@ -2351,7 +2376,7 @@ def work_json(snap, w):
     return out
 
 
-def write_state(snap, everyone, open_=(), cur=None, msg=""):
+def write_state(snap, everyone, open_=(), cur=None, msg="", done=False):
     """screen.txt: the list as text. state.json: the same, structured (maps with all their
     open tickets, folded or not), plus how to act."""
     os.makedirs(OUT, exist_ok=True)
@@ -2360,7 +2385,7 @@ def write_state(snap, everyone, open_=(), cur=None, msg=""):
               if snap.at else f"fleet · {now} · henter …"]
     if snap.error:
         screen.append(f"FEIL: {snap.error}")
-    for parts, x in lines(snap, everyone, open_):
+    for parts, x in lines(snap, everyone, open_, done):
         screen.append(("> " if x is not None and x is cur else "  ") + plain(parts))
     if msg:
         screen += ["", msg]
@@ -2368,7 +2393,7 @@ def write_state(snap, everyone, open_=(), cur=None, msg=""):
                " · `fleet wi <wi> state <S>|sprint` · `fleet fix <pr>` · `fleet prune` · `claude agents --json --all`"]
     state = {
         "updated": now, "dataAt": snap.at, "error": snap.error or None, "message": msg or None,
-        "allPrs": everyone, "selected": cur.key if cur else None, "unfoldedMaps": sorted(i for i in open_ if isinstance(i, int)),
+        "allPrs": everyone, "reviewedView": done, "selected": cur.key if cur else None, "unfoldedMaps": sorted(i for i in open_ if isinstance(i, int)),
         "unfoldedIterations": sorted(i[5:] for i in open_ if isinstance(i, str)),
         "workItems": [work_json(snap, w) for w in snap.items if w.current]
         + [dict(work_json(snap, w), iterationLabel=label, iterationDates=dates or None)
@@ -2376,7 +2401,7 @@ def write_state(snap, everyone, open_=(), cur=None, msg=""):
         "oldWorkItems": {"count": snap.old.n, "query": snap.old.url} if snap.old else None,
         "pullRequests": [{"id": r.id, "title": r.title, "project": r.project, "repo": r.repo,
                           "author": r.who, "source": r.source, "target": r.target, "url": r.url,
-                          "imReviewer": r.asked, "myVote": r.vote, "agent": agent_name(r),
+                          "imReviewer": r.asked, "myVote": r.vote, "reviewed": reviewed(r), "agent": agent_name(r),
                           "agents": dict(owned(snap.agents, r)), "start": f"fleet review {r.id}"}
                          for r in snap.prs],
         "myPullRequests": [{"id": m.id, "title": m.title, "project": m.project, "repo": m.repo,
@@ -2591,15 +2616,16 @@ def tui(scr, a):
             if s.cleaned or s.news:
                 msg = " · ".join(s.news + s.cleaned)
             seen = s.agents
-        ls = lines(s, a.all, open_)
+        ls = lines(s, a.all, open_, a.reviewed)
         rows = [x for _, x in ls if x is not None]
         keys_ = [x.key for x in rows]
         sel = keys_.index(key) if key in keys_ else max(0, min(sel, len(rows) - 1))
         cur = rows[sel] if rows else None
         key = cur.key if cur else None
-        if time.time() - written >= WRITE or (s.at, key, msg, a.all, tuple(sorted(open_, key=str))) != shown:
-            write_state(s, a.all, open_, cur, msg)
-            written, shown = time.time(), (s.at, key, msg, a.all, tuple(sorted(open_, key=str)))
+        view = (s.at, key, msg, a.all, a.reviewed, tuple(sorted(open_, key=str)))
+        if time.time() - written >= WRITE or view != shown:
+            write_state(s, a.all, open_, cur, msg, a.reviewed)
+            written, shown = time.time(), view
 
         h, w = scr.getmaxyx()
         scr.erase()
@@ -2646,7 +2672,7 @@ def tui(scr, a):
                 put(by + n, bx, line_, w - 1 - bx, pal["cyan"] if n in (0, len(opts) + 1) else 0)
             for n, (k_, _, _, _) in enumerate(opts, 1):  # the top one is also enter: shown as ↵
                 put(by + n, bx + 3, "↵" if n == 1 else k_, 1, pal["yellow"] | curses.A_BOLD)
-        keys = f"↑↓ flytt · m valg · enter start agent · →/← fold ut/inn kart/spec/iterasjon · o åpne · a {'mine' if a.all else 'alle'} PRer · A autopilot · J jobber · ? hjelp · r oppdater · q avslutt" \
+        keys = f"↑↓ flytt · m valg · enter start agent · →/← fold ut/inn kart/spec/iterasjon · o åpne · a {'mine' if a.all else 'alle'} PRer · R {'å reviewe' if a.reviewed else 'reviewa'} · A autopilot · J jobber · ? hjelp · r oppdater · q avslutt" \
                f"  ·  {short(OUT)}/screen.txt"
         if edit:
             put(h - 1, 0, f"{edit[0]}: {edit[1]}"[-(w - 2):] + "█", w - 1, pal["cyan"] | curses.A_BOLD)
@@ -2736,6 +2762,8 @@ def tui(scr, a):
         elif k == ord("a"):
             a.all = not a.all
             wake.set()
+        elif k == ord("R"):  # same snapshot, the other side of the PR list
+            a.reviewed = not a.reviewed
         elif k == ord("r"):
             wake.set()
         elif k == ord("J"):
@@ -2757,6 +2785,9 @@ def tui(scr, a):
                 msg, err = str(e), True
         elif not cur:
             continue
+        elif isinstance(cur, ReviewHeader):
+            if k in (10, 13, curses.KEY_ENTER, ord(" ")):
+                a.reviewed = not a.reviewed
         elif k in (curses.KEY_RIGHT, ord("l"), ord(" ")) and (isinstance(cur, Iteration)
                                                                or isinstance(cur, Work) and cur.folds):
             open_ ^= {cur.id} if k == ord(" ") else {cur.id} - open_
@@ -2811,12 +2842,12 @@ def cmd_live(a):
 
 def cmd_ls(a):
     s = snapshot(a.all)
-    write_state(s, a.all)
+    write_state(s, a.all, done=a.reviewed)
     if s.error:
         die(s.error)
     open_ = {w.id for w in s.items} | {Iteration(l, d, ws).id for l, d, ws in by_iteration(
         [w for w in s.items if not w.current])} if a.unfold else ()
-    for parts, _ in lines(s, a.all, open_):
+    for parts, _ in lines(s, a.all, open_, a.reviewed):
         print(paint(parts, min(shutil.get_terminal_size((100, 20)).columns, 140)))
 
 
@@ -3004,7 +3035,11 @@ GUIDE = """\
                Andre iterasjoner nederst, over de gamle: én grå rad per iterasjon i datorekkefølge, «ingen sprint»
                sist. Foldet inn ved start (→/← eller enter); innfoldet viser den ● Doing, ▶ agenter som kjører og
                ⏸ som venter. Itemene er grå, unntatt PR-, agent- og autopilot-merker. m → i flytter sprint.
-  PRer         aktive, ikke draft, ikke mine, uten min godkjenning (stemme < 5).
+  PRer         aktive, ikke draft, ikke mine. To sider, R / -R bytter:
+                 å reviewe  ikke reviewa ennå, eller forfatteren har pushet siden (🔁) — også etter
+                            «godkjent m/forslag»; autopilot tar re-review på dem
+                 reviewa    postet/stemt og ingenting nytt, og alt jeg har godkjent (✓ godkjent står her
+                            selv etter push; 🔁 + r for re-review manuelt)
                Default bare der jeg er reviewer; `a` / -a viser alle andres.
   Mine PRer    aktive PRer jeg har laget, draft også. Viser det som blokkerer:
                  konflikt · @navn ✗/⏸ (avvist / venter på endringer) · 💬 n aktive tråder
@@ -3027,7 +3062,7 @@ GUIDE = """\
                             autopilot på, se AUTOPILOT (--no-autopilot: av denne økta)
                             i Ghostty: `claude agents` i en pane til venstre, bare økter under {home} (ikke om den fortsatt er der)
                             macen går ikke i dvale mens den kjører (skjerm/skjermsparer går fortsatt)
-  fleet ls [-a] [-u]        lista, skrevet ut én gang (-u: kart/spec foldet ut)
+  fleet ls [-a] [-R] [-u]   lista, skrevet ut én gang (-R: PRer jeg har reviewa; -u: kart/spec foldet ut)
   fleet go <id> [-n]        bakgrunnsagent på et work item (-n: vis kommandoen)
   fleet review <id> [-n]    bakgrunnsagent som reviewer en PR
   fleet fix <id> [-n]       bakgrunnsagent som fikser min PR: konflikter, bygg, review-kommentarer
@@ -3044,7 +3079,7 @@ GUIDE = """\
   fleet help                denne teksten
 
 {b}TASTER{r}
-  ↑↓ / j k  flytt · enter start agent · o åpne i nettleser · a mine/alle PRer · r oppdater · q avslutt
+  ↑↓ / j k  flytt · enter start agent · o åpne i nettleser · a mine/alle PRer · R (el. enter på PR-headeren) PRer å reviewe/reviewa · r oppdater · q avslutt
   ?         denne teksten (q tilbake)
   A         autopilot: a slå av/på · u tillat utenfor arbeidstid (begge gjelder denne økta)
   J         launchd-jobbene (`chores status`): sist og neste kjøring, ⚠ forfalt / trenger deg, ✗ feilet;
@@ -3181,10 +3216,12 @@ def main():
     s.add_argument("-q", "--quiet", action="store_true", help="no notification when an agent needs me")
     s.add_argument("--no-clean", action="store_true", help="don't remove finished worktrees and orphan agents")
     s.add_argument("--no-autopilot", action="store_true", help="start no agents by itself this session")
+    s.add_argument("-R", "--reviewed", action="store_true", help="start on the PRs I've reviewed (R toggles)")
     s.set_defaults(fn=cmd_live)
 
     s = sub.add_parser("ls", help="print the list once (and write the state files)")
     s.add_argument("-a", "--all", action="store_true")
+    s.add_argument("-R", "--reviewed", action="store_true", help="the PRs I've reviewed, not those left to review")
     s.add_argument("-u", "--unfold", action="store_true", help="show maps' and specs' open tickets, and other iterations' items")
     s.set_defaults(fn=cmd_ls)
 
