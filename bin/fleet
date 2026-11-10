@@ -1308,17 +1308,18 @@ def triage_here(w):
 class Pilot:
     """Autopilot for one TUI. What must survive a restart — muted rows, what it started (one
     fingerprint per review, per PR commit for fixes), when it first saw an event, why a start
-    failed — is in autopilot.json and forgotten when the row leaves the list. On/off and
-    «also outside working hours» last for the session."""
+    failed — is in autopilot.json and forgotten when the row leaves the list. On/off lasts for
+    the session, «also outside working hours» for an hour (AFTER)."""
     PATH = os.path.join(OUT, "autopilot.json")
     LISTS = ("muted", "gaveup")
     MAPS = ("started", "seen", "failed", "requeued")  # requeued: key → when autopilot last re-ran its expired build
+    AFTER = 3600  # how long «also outside working hours» (A → u) lasts
 
     def __init__(self, on=True):
         self.cfg, self.error = config()
         self.c = self.cfg["autopilot"]
         self.on = on and self.c["enabled"]
-        self.after = False  # also outside working hours, this session
+        self.until = 0  # also outside working hours until this time.time()
         self.queue = []  # keys waiting for a slot or working hours, in start order
         self.pending = {}  # agent name: when launched, until `claude agents` lists it
         self.procs = {}  # key: (Popen, Work) of a `wi triage --save` running in the background
@@ -1345,6 +1346,11 @@ class Pilot:
         with open(tmp, "w") as f:
             json.dump(st, f, indent=2)
         os.replace(tmp, self.PATH)
+
+    @property
+    def after(self):
+        """Allowed outside working hours right now (A → u, for an hour)."""
+        return time.time() < self.until
 
     def open_(self, now=None):
         """Inside working hours, or allowed outside them."""
@@ -1568,15 +1574,19 @@ class Pilot:
             return f"🤖 autopilot pause til {self.opens()}{q}"
         n = self.busy(s)  # on is the default: no «autopilot på», only what's going on
         return " · ".join(filter(None, [f"🤖 {n}/{self.c['max_parallel']} kjører" if n else "", q.lstrip(" ·"),
-                                         "også utenfor arbeidstid" if self.after else ""]))
+                                         f"også utenfor arbeidstid til {self.until_():%H:%M}" if self.after else ""]))
 
     def toggle(self):
         self.on = not self.on
         return f"🤖 autopilot {'på' if self.on else 'av'} (denne økta)"
 
+    def until_(self):
+        return datetime.datetime.fromtimestamp(self.until)
+
     def allow(self):
-        self.after = not self.after
-        return f"🤖 {'kjører også' if self.after else 'kjører ikke'} utenfor arbeidstid (denne økta)"
+        self.until = 0 if self.after else time.time() + self.AFTER
+        return f"🤖 kjører også utenfor arbeidstid til {self.until_():%H:%M}" if self.after \
+            else "🤖 kjører ikke utenfor arbeidstid"
 
     def mute(self, x):
         st = self.load()
@@ -1614,8 +1624,8 @@ def pilot_menu(p):
         raise RuntimeError("autopilot kjører i en annen fleet")
     return (p.header(Snapshot()), [
         ("a", "slå av (denne økta)" if p.on else "slå på", p.toggle, False),
-        ("u", "ikke utenfor arbeidstid" if p.after else "tillat utenfor arbeidstid (denne økta)", p.allow,
-         False if p.after else "autopilot også utenfor arbeidstid denne økta?")])
+        ("u", f"ikke utenfor arbeidstid (tillatt til {p.until_():%H:%M})" if p.after else "tillat utenfor arbeidstid i 1 t",
+         p.allow, False if p.after else "autopilot også utenfor arbeidstid den neste timen?")])
 
 
 def pilot_options(p, x):
@@ -3081,7 +3091,7 @@ GUIDE = """\
 {b}TASTER{r}
   ↑↓ / j k  flytt · enter start agent · o åpne i nettleser · a mine/alle PRer · R (el. enter på PR-headeren) PRer å reviewe/reviewa · r oppdater · q avslutt
   ?         denne teksten (q tilbake)
-  A         autopilot: a slå av/på · u tillat utenfor arbeidstid (begge gjelder denne økta)
+  A         autopilot: a slå av/på · u tillat utenfor arbeidstid i 1 t (a gjelder økta)
   J         launchd-jobbene (`chores status`): sist og neste kjøring, ⚠ forfalt / trenger deg, ✗ feilet;
             jobbens tast → i hva den gjør, hva som feilet og hva du kan gjøre · k kjør nå · l loggen
   → / l     fold ut kart/spec (åpne tickets: ledig / tatt / blokkert) · ← / h fold inn · space veksle
@@ -3159,7 +3169,7 @@ GUIDE = """\
                     over {stuck} min: den henger. Linja viser hvor lenge: «⏸ fix blocked 5d».
   Linja: ⏳ i kø / venter til 07:00 · 🤖 feilet: … · ⛔ ga opp · 🔕 auto av · 💤 for gammel (m → n).
   Mine PRer: mens en agent jobber (eller står i kø) blir konflikt/bygg/💬 én «🤖 3» (hvor mange).
-  Demping (m → z) huskes til raden er borte fra lista; av/på og utenfor arbeidstid (A) gjelder økta.
+  Demping (m → z) huskes til raden er borte fra lista; av/på (A) gjelder økta, utenfor arbeidstid (A → u) 1 t.
   Konfig: {config}   tilstand: {state}
 
 {b}OPPRYDDING{r}  {d}(automatisk i lista; --no-clean slår av){r}
