@@ -49,6 +49,9 @@ mkdir -p "$dir"
 find "$dir" -name 'plan-*.md' -mtime +7 -delete
 
 die() { echo "workday: $*" >&2; exit 1; }
+# Claude runs from ~/visense, so its sessions are the work's and fleet (claude agents --cwd
+# ~/visense) sees them, wherever workday is started from (Raycast's cwd is /).
+ai() { (cd "$root" && claude "$@"); }
 
 # The newest end note, today's included.
 last() { ls "$dir"/????-??-??.md 2>/dev/null | tail -1; }
@@ -368,7 +371,7 @@ oppsummering på norsk i Markdown som lar meg fortsette der jeg slapp: 1) hva je
 2) hva som er halvferdig og hvor (repo, branch, worktree, agent som er blocked/running, \
 uncommitted/upushet). Det jeg skrev selv veier tyngst; uncommitted filer alene på main/master \
 er som regel støy. Bare fakta, ingen innledning, ingen overskrift på toppnivå, maks ~20 linjer."
-  summary=$(claude -p --model sonnet "$prompt" <<<"${mine:+# Det jeg skrev
+  summary=$(ai -p --model sonnet "$prompt" <<<"${mine:+# Det jeg skrev
 $mine}# Rådata
 $data" 2>/dev/null) || summary=$data
 
@@ -396,7 +399,7 @@ cmd_jobs() {
 kort på norsk hvordan launchd-jobbene mine har gått siden forrige arbeidsdag: hva som kjørte, hva som \
 feilet, er forfalt eller trenger meg, og for hver av dem hva jeg bør gjøre (konkret kommando). \
 Ikke kjør jobbene og ikke endre noe. Alt ✓: én linje."
-  (cd "$HOME/.dotfiles" && claude --dangerously-skip-permissions --bg --model haiku -n "$name" "$prompt" >/dev/null 2>&1 &)
+  (ai --dangerously-skip-permissions --bg --model haiku -n "$name" "$prompt" >/dev/null 2>&1 &)
 }
 
 cmd_plan() {
@@ -430,7 +433,7 @@ Ingen innledning, ingen overskrift på toppnivå, maks ~25 linjer."
     echo
     echo "# Standup"
     cat "$tmp/standup"
-  } | claude -p --model sonnet "$prompt" 2>/dev/null | put "$out"
+  } | ai -p --model sonnet "$prompt" 2>/dev/null | put "$out"
   rm -rf "$tmp"
   [[ -s $out ]] || { rm -f "$out"; die "claude skrev ingen plan"; }
   cat "$out"
