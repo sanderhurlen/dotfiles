@@ -1,6 +1,6 @@
-// What Start and End Workday share: `workday` (bin/workday) writes its notes whole to
-// iCloud's Documents/visense/workday, so the views run it detached and wait for the file to change.
-// Closing Raycast while Claude writes loses nothing; the command shows the file next time.
+// What Start and End Workday share: `workday` (bin/workday) writes its note whole to
+// iCloud's Documents/visense/workday, so End Workday runs it detached and waits for the file to change.
+// Closing Raycast while it prunes loses nothing; the note is in the file.
 // Tidskonto and Fri read and write the time account through `workday saldo|logg|fri`.
 
 import { readdirSync, readFileSync, statSync } from "node:fs";

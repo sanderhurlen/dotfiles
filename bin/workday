@@ -1,21 +1,14 @@
 #!/bin/bash
 #
-# workday — the day's end and start, as notes Claude writes from what happened.
+# workday — the day's start and end, and the time account. No Claude: fleet is the plan,
+# git and fleet already know what happened; the note is my own line on where I stopped.
 #
-#   workday end [-t HH:MM] [-f <fokus>] [-n <neste>]
-#                                           stop fleet and tower, prune finished agents and
-#                                           worktrees, then write today's note: my own lines
-#                                           (what I focused on, where I stopped) and a summary
-#                                           of today's commits, unfinished worktrees and agents
-#   workday plan [--fresh]                  how to attack today: the last note, fleet's list
-#                                           (fleet ls) and my teams' standup, through Claude;
-#                                           written once a day, --fresh writes it again
+#   workday end [-t HH:MM] [-n <neste>]     log the end, now or at HH:MM, stop fleet and tower,
+#                                           prune finished agents and worktrees, then write
+#                                           today's note: hours, saldo and where I stopped
 #   workday last                            the last note
-#   workday start [HH:MM]                   log that the day starts, now or at HH:MM (end logs
-#                                           its own end, -t the same way), and start a
-#                                           background agent (workday-jobber-<date>, once a
-#                                           day) that sums up how my launchd jobs went
-#   workday times                           start, end and hours per day
+#   workday start [HH:MM]                   log that the day starts, now or at HH:MM
+#   workday times                          start, end and hours per day
 #   workday logg <dato> <HH:MM> [<HH:MM>]   log start (and end) of another day, to fill in or
 #                                           correct one
 #   workday fri <dato>[..<dato>] [type]     a day off: ferie (default), syk, avspasering, or
@@ -27,8 +20,8 @@
 #                                           against the norm, the next holiday, days off
 #
 # Notes live in iCloud, Documents/visense/workday: <date>.md (end, kept for good: the log of my
-# work) and plan-<date>.md (plan, kept 7 days). Each is written whole at the end, so a reader can wait for the file to change. The Raycast
-# extension (raycast/visense) runs end and plan detached and shows the files. times.tsv (time,
+# work), written whole, so a reader can wait for the file to change. The Raycast extension
+# (raycast/visense) runs end detached and shows the note. times.tsv (time,
 # start|end, or a day off at 00:00) is kept for good; the end note shows the day's hours and the
 # saldo from it. A day's last start, end and day off count, so logging again corrects it.
 #
@@ -38,20 +31,14 @@
 # flagged, not counted. Ferie: ferie days a year, of the weekdays that aren't holidays;
 # ferie_brukt_for adds the ones taken before they were logged here.
 
-# Raycast runs with a bare PATH; claude lives in ~/.local/bin, az/uv in Homebrew.
+# Raycast runs with a bare PATH; fleet's az/uv live in Homebrew.
 export PATH="$HOME/.local/bin:$HOME/.dotfiles/bin:/opt/homebrew/bin:$PATH"
 
 dir="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Documents/visense/workday"
-root="$HOME/visense"
 day=$(date +%F)
 mkdir -p "$dir"
-# A plan is for its day; a week of them is enough.
-find "$dir" -name 'plan-*.md' -mtime +7 -delete
 
 die() { echo "workday: $*" >&2; exit 1; }
-# Claude runs from ~/visense, so its sessions are the work's and fleet (claude agents --cwd
-# ~/visense) sees them, wherever workday is started from (Raycast's cwd is /).
-ai() { (cd "$root" && claude "$@"); }
 
 # The newest end note, today's included.
 last() { ls "$dir"/????-??-??.md 2>/dev/null | tail -1; }
@@ -316,40 +303,13 @@ cmd_times() {
 # Writes stdin to $1 in one go.
 put() { cat >"$1.tmp" && mv "$1.tmp" "$1"; }
 
-facts() {
-  local midnight_ms=$(($(date -j -f '%F %T' "$day 00:00:00" +%s) * 1000))
-  echo "## Commits i dag, per repo/worktree (alle brancher)"
-  for git in "$root"/*/.git; do
-    # A .git file is a worktree of another repo, which lists it already.
-    [[ -d $git ]] || continue
-    repo=$(dirname "$git")
-    git -C "$repo" worktree list --porcelain | sed -n 's/^worktree //p' | while read -r wt; do
-      branch=$(git -C "$wt" branch --show-current)
-      dirty=$(git -C "$wt" status --porcelain | wc -l | tr -d ' ')
-      track=
-      [[ -n $branch ]] && track=$(git -C "$wt" for-each-ref --format='%(upstream:track)' "refs/heads/$branch")
-      log=$(git -C "$wt" log --since=midnight --author="$(git -C "$wt" config user.email)" --format='  - %s' HEAD)
-      # Only today's work, uncommitted files or unpushed commits; behind or [gone] alone is not left over.
-      [[ -z $log && $dirty == 0 && $track != *ahead* ]] && continue
-      echo "### ${wt#"$root"/} ($branch) · ${dirty} uncommitted filer ${track:+· $track}"
-      echo "$log"
-    done
-  done
-  echo
-  echo "## Claude-agenter: startet i dag, eller blocked/running"
-  claude agents --json --all 2>/dev/null |
-    jq -r --argjson t "$midnight_ms" \
-      '.[] | select(.startedAt >= $t or .state == "blocked" or .state == "running") | "- \(.name) · \(.state) · \(.cwd)"'
-}
-
 cmd_end() {
-  local fokus= neste= tid=
-  while getopts t:f:n: o; do
+  local neste= tid=
+  while getopts t:n: o; do
     case $o in
       t) tid=$OPTARG ;;
-      f) fokus=$OPTARG ;;
       n) neste=$OPTARG ;;
-      *) die "bruk: workday end [-t HH:MM] [-f <fokus>] [-n <neste>]" ;;
+      *) die "bruk: workday end [-t HH:MM] [-n <neste>]" ;;
     esac
   done
   stamp end "$tid"
@@ -360,89 +320,23 @@ cmd_end() {
   fleet prune >/dev/null 2>&1
   fleet clean >/dev/null 2>&1
 
-  local mine=
-  [[ -n $fokus ]] && mine+="### Fokus i dag"$'\n'"$fokus"$'\n\n'
-  [[ -n $neste ]] && mine+="### Hvor jeg slapp / neste steg"$'\n'"$neste"$'\n\n'
-
-  local data summary prompt
-  data=$(facts)
-  prompt="Under er rådata fra arbeidsdagen min ($day), og det jeg selv skrev om dagen. Skriv en kort \
-oppsummering på norsk i Markdown som lar meg fortsette der jeg slapp: 1) hva jeg fikk gjort, \
-2) hva som er halvferdig og hvor (repo, branch, worktree, agent som er blocked/running, \
-uncommitted/upushet). Det jeg skrev selv veier tyngst; uncommitted filer alene på main/master \
-er som regel støy. Bare fakta, ingen innledning, ingen overskrift på toppnivå, maks ~20 linjer."
-  summary=$(ai -p --model sonnet "$prompt" <<<"${mine:+# Det jeg skrev
-$mine}# Rådata
-$data" 2>/dev/null) || summary=$data
-
+  # Ending again without a line (a later end time) keeps the one I wrote.
+  [[ -z $neste && -f $dir/$day.md ]] && neste=$(sed -n '/^## Hvor jeg slapp$/,$p' "$dir/$day.md" | sed '1,2d')
   {
     echo "# $day"
     echo
     cmd_times | awk -v d="$day" '$1 == d { sub(/^[^ ]+ +/, ""); print "Arbeidstid: " $0 }'
     konto saldo | head -1
-    echo
-    [[ -n $mine ]] && printf '## Mine notater\n\n%s' "$mine"
-    echo "## Oppsummering"
-    echo
-    echo "$summary"
+    if [[ -n $neste ]]; then
+      printf '\n## Hvor jeg slapp\n\n%s\n' "$neste"
+    fi
   } | put "$dir/$day.md"
   cat "$dir/$day.md"
 }
 
-# A background agent sums up my launchd jobs (chores status), on haiku since reading a status
-# needs no more; once a day, so a second start doesn't spawn another. Its output is closed, so
-# Raycast's execFileSync doesn't wait for it.
-cmd_jobs() {
-  local name="workday-jobber-$day"
-  claude agents --json --all 2>/dev/null | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null && return
-  local prompt="Kjør \`chores status\` (og \`chores status <jobb>\` for jobber som ikke er ✓) og oppsummer \
-kort på norsk hvordan launchd-jobbene mine har gått siden forrige arbeidsdag: hva som kjørte, hva som \
-feilet, er forfalt eller trenger meg, og for hver av dem hva jeg bør gjøre (konkret kommando). \
-Ikke kjør jobbene og ikke endre noe. Alt ✓: én linje."
-  (ai --dangerously-skip-permissions --bg --model haiku -n "$name" "$prompt" >/dev/null 2>&1 &)
-}
-
-cmd_plan() {
-  local out="$dir/plan-$day.md"
-  if [[ $1 != --fresh && -s $out ]]; then
-    cat "$out"
-    return
-  fi
-
-  local note tmp
-  note=$(last)
-  tmp=$(mktemp -d)
-  # fleet ls refreshes state.json too; when ADO is unreachable, its last list is better than none.
-  { fleet ls 2>/dev/null || cat "$HOME/.cache/fleet/screen.txt" 2>/dev/null; } >"$tmp/fleet" &
-  standup 2>/dev/null >"$tmp/standup" &
-  wait
-
-  local prompt="I dag er $(LC_TIME=nb_NO.UTF-8 date '+%A %F'). Under er notatet fra forrige arbeidsdag \
-(mine egne linjer og en oppsummering), fleet-lista mi (work items, PRer jeg skal reviewe, mine PRer, \
-agenter) og teamenes standup. Foreslå på norsk i Markdown hvordan jeg bør angripe dagen: \
-først det som blokkerer andre eller haster (agenter som venter på meg, mine PRer med konflikt/feil, \
-reviews som har ventet), så å fortsette der jeg slapp, så resten. 3–6 punkter i rekkefølge, \
-hvert med #id/!pr og ett kort hvorfor, og første konkrete handling (gjerne en fleet-kommando). \
-Ingen innledning, ingen overskrift på toppnivå, maks ~25 linjer."
-  {
-    echo "# Notat fra forrige arbeidsdag"
-    if [[ -n $note ]]; then cat "$note"; else echo "(ingen)"; fi
-    echo
-    echo "# fleet"
-    cat "$tmp/fleet"
-    echo
-    echo "# Standup"
-    cat "$tmp/standup"
-  } | ai -p --model sonnet "$prompt" 2>/dev/null | put "$out"
-  rm -rf "$tmp"
-  [[ -s $out ]] || { rm -f "$out"; die "claude skrev ingen plan"; }
-  cat "$out"
-}
-
 case $1 in
   end) shift; cmd_end "$@" ;;
-  plan) shift; cmd_plan "$@" ;;
-  start) stamp start "$2"; cmd_jobs ;;
+  start) stamp start "$2" ;;
   times) cmd_times ;;
   logg) shift; cmd_logg "$@" ;;
   fri) shift; cmd_fri "$@" ;;

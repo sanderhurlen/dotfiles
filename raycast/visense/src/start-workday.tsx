@@ -1,11 +1,10 @@
-// Start of the day: how to attack it (`workday plan`: yesterday's note, fleet's list and the
-// standup, through Claude; written once a day) above yesterday's note. ↵ asks for the start
-// time (today's logged start, else now) and starts the day:
-// Ghostty with fleet in tab 1 (splits `claude agents` to its left by itself) and tower in
-// tab 2, logging in only when the session no longer works, then Outlook and Teams. Whatever
-// already runs is left alone. `workday start` logs the time and starts a background agent
-// that sums up my launchd jobs; End Workday logs the end. The time account's balance shows on top,
-// with the days that miss a start or end (⌘T fills in the newest).
+// Start of the day, no Claude: fleet is the plan. Shows the time account's balance with the
+// days that miss a start or end (⌘T fills in the newest), my launchd jobs that aren't ✓
+// (`chores status`) and the last note, where I wrote where I stopped. ↵ starts the day now
+// (or keeps today's logged start): `workday start`, then Ghostty with fleet in tab 1 (splits
+// `claude agents` to its left by itself) and tower in tab 2, logging in only when the session
+// no longer works, then Outlook and Teams. Whatever already runs is left alone. ⌘S starts it
+// at another time.
 
 import { Action, ActionPanel, Detail, Form, Icon, Toast, closeMainWindow, open, showToast, useNavigation } from "@raycast/api";
 import { runAppleScript } from "@raycast/utils";
@@ -13,9 +12,9 @@ import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { useEffect, useState } from "react";
-import { detach } from "./state";
+import { run } from "./state";
 import { LoggForm } from "./tidskonto";
-import { DIR, HHMM, LOG, Saldo, lastNote, logged, now, read, saldo, today, useNote } from "./workday";
+import { HHMM, Saldo, lastNote, logged, now, read, saldo } from "./workday";
 
 const HOME = homedir();
 
@@ -51,9 +50,10 @@ on run argv
   end tell
 end run`;
 
-async function startDay(tid: string) {
+/** Logs the start at tid (none: keep today's, else now), then opens what the day runs on. */
+async function startDay(tid?: string) {
   await closeMainWindow();
-  execFileSync(join(HOME, ".dotfiles/bin/workday"), ["start", tid]);
+  if (tid || !logged("start")) execFileSync(join(HOME, ".dotfiles/bin/workday"), ["start", ...(tid ? [tid] : [])]);
   const cmds: string[] = [];
   if (!running("fleet")) cmds.push("az account get-access-token -o none 2>/dev/null || az login; fleet");
   if (!running("tower")) cmds.push("tower login --ved-behov && tower");
@@ -85,41 +85,48 @@ function StartTime() {
 
 export default function Command() {
   const { push, pop } = useNavigation();
-  const file = join(DIR, `plan-${today()}.md`);
-  // Written once a day; started here when missing, so it is under way while I read yesterday.
-  const [since, setSince] = useState(() => {
-    if (read(file) !== undefined) return undefined;
-    detach("workday", ["plan"], LOG);
-    return Date.now();
-  });
-  const { text, failed, loading } = useNote(file, since);
   const note = lastNote();
-
-  const plan =
-    text ??
-    (failed ? `**workday plan feilet**\n\n\`\`\`\n${read(LOG) ?? ""}\n\`\`\`` : "_Claude leser fleet, standup og gårsdagens notat …_");
   const [konto, setKonto] = useState<Saldo>();
+  const [jobs, setJobs] = useState<string[]>();
   const load = () =>
     saldo()
       .then(setKonto)
       .catch(() => undefined);
   useEffect(() => {
     load();
+    run("chores", ["status"])
+      .then((out) => setJobs(out.split("\n").filter((l) => l.trim() && !l.startsWith("✓"))))
+      .catch((e) => setJobs([`chores status feilet: ${e.message}`]));
   }, []);
+
   const missing = konto?.days.filter((d) => d.status === "mangler") ?? [];
   const what = (d: Saldo["days"][number]) => `${d.day} ${d.date} (${d.start ? "slutt" : "start og slutt"})`;
   const head = konto
     ? `_Tidskonto ${konto.text}_${missing.length ? ` · **⚠ mangler tider:** ${missing.map(what).join(", ")} — ⌘T` : ""}\n\n`
     : "";
-  const markdown = `# Forslag til i dag\n\n${head}${plan}\n\n---\n\n${note ? read(note) : "_Ingen notat fra forrige arbeidsdag._"}`;
+  const chores = jobs?.length
+    ? `**launchd-jobber som trenger noe** (\`chores status <jobb>\`)\n\n\`\`\`\n${jobs.join("\n")}\n\`\`\`\n\n`
+    : "";
+  const markdown = `# I dag\n\n${head}${chores}---\n\n${note ? read(note) : "_Ingen notat fra forrige arbeidsdag._"}`;
+  const started = logged("start");
 
   return (
     <Detail
-      isLoading={loading}
+      isLoading={!konto || !jobs}
       markdown={markdown}
       actions={
         <ActionPanel>
-          <Action title="Start dagen" icon={Icon.Play} onAction={() => push(<StartTime />)} />
+          <Action
+            title={started ? `Start dagen (startet ${started})` : "Start dagen nå"}
+            icon={Icon.Play}
+            onAction={() => startDay()}
+          />
+          <Action
+            title="Start dagen kl. …"
+            icon={Icon.Clock}
+            shortcut={{ modifiers: ["cmd"], key: "s" }}
+            onAction={() => push(<StartTime />)}
+          />
           {missing[0] && (
             <Action
               title={`Rett tider for ${missing[0].day} ${missing[0].date}`}
@@ -138,17 +145,7 @@ export default function Command() {
               }
             />
           )}
-          {text && <Action.CopyToClipboard title="Kopier forslaget" content={text} />}
-          <Action
-            title="Lag forslaget på nytt"
-            icon={Icon.ArrowClockwise}
-            shortcut={{ modifiers: ["cmd"], key: "r" }}
-            onAction={() => {
-              detach("workday", ["plan", "--fresh"], LOG);
-              setSince(Date.now());
-            }}
-          />
-          {note && <Action.Open title="Åpne gårsdagens notat" target={note} shortcut={{ modifiers: ["cmd"], key: "o" }} />}
+          {note && <Action.Open title="Åpne forrige notat" target={note} shortcut={{ modifiers: ["cmd"], key: "o" }} />}
         </ActionPanel>
       }
     />

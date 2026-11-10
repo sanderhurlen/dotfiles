@@ -24,13 +24,13 @@
     {
       "name": "start-workday",
       "title": "Start Workday",
-      "description": "Forslag til hvordan angripe dagen, gårsdagens notat, og fleet, tower, Outlook og Teams på ↵",
+      "description": "Tidskonto, launchd-jobber som trenger noe og forrige notat; ↵ starter fleet, tower, Outlook og Teams",
       "mode": "view"
     },
     {
       "name": "end-workday",
       "title": "End Workday",
-      "description": "Noen linjer om dagen, så stopper fleet og tower og Claude skriver notatet",
+      "description": "Hvor jeg slapp, så stopper fleet og tower og notatet skrives",
       "mode": "view"
     },
     {
