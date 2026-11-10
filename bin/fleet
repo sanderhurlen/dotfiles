@@ -639,10 +639,10 @@ def settled(r):
 
 
 def reviewed(r):
-    """A Review on the «reviewa» side of the list (R): I've approved it, or it's settled and the author
-    hasn't pushed since. Approved with suggestions (5) comes back to «å reviewe» on a push, like
-    waiting/rejected do; approved (10) stays put."""
-    return r.vote >= 10 or (settled(r) and not pushed_since(r))
+    """A Review on the «reviewa» side of the list (R): I've approved it (with suggestions or not), or it's
+    settled and the author hasn't pushed since. Approved stays put on a push; waiting/rejected come back
+    to «å reviewe»."""
+    return r.vote >= 5 or (settled(r) and not pushed_since(r))
 
 
 def settled_agents(raw, ids):
@@ -812,9 +812,9 @@ def pr_cleanups(ts_, raw, listed):
 
 
 def listed_prs(prs):
-    """Ids of the PRs the list shows, others' (all, but not those I've approved) and mine: a PR not among them is done with."""
+    """Ids of the PRs the list shows, others' (all, but not those I've approved, with suggestions or not) and mine: a PR not among them is done with."""
     my_id = me()[0]
-    return {r.id for r in reviews(prs, True) if r.vote < 10} | {p["pullRequestId"] for p in prs
+    return {r.id for r in reviews(prs, True) if r.vote < 5} | {p["pullRequestId"] for p in prs
                                                  if (p.get("createdBy") or {}).get("id") == my_id}
 
 
@@ -1367,14 +1367,14 @@ class Pilot:
         """(why, fingerprint, when it happened | None) when autopilot would start on x, else None."""
         trig = self.c["triggers"]
         if isinstance(x, Group):
-            pushed = [pushed_since(r)[1][:7] for r in x.prs if r.vote < 10 and pushed_since(r)]
+            pushed = [pushed_since(r)[1][:7] for r in x.prs if r.vote < 5 and pushed_since(r)]
             if "rereview" in trig and pushed:
                 return REREVIEW, f"{x.key}@re-{'-'.join(pushed)}", None
             if "review" not in trig or not any(r.asked and not r.vote for r in x.prs):
                 return None
             return "review", f"{x.key}@review-{'-'.join(str(r.id) for r in x.prs)}", None
         if isinstance(x, Review):
-            if "rereview" in trig and x.vote < 10 and pushed_since(x):
+            if "rereview" in trig and x.vote < 5 and pushed_since(x):
                 return REREVIEW, f"{x.key}@re-{pushed_since(x)[1][:10]}", None
             if "review" not in trig or not x.asked or x.vote:
                 return None
@@ -3036,10 +3036,10 @@ GUIDE = """\
                sist. Foldet inn ved start (→/← eller enter); innfoldet viser den ● Doing, ▶ agenter som kjører og
                ⏸ som venter. Itemene er grå, unntatt PR-, agent- og autopilot-merker. m → i flytter sprint.
   PRer         aktive, ikke draft, ikke mine. To sider, R / -R bytter:
-                 å reviewe  ikke reviewa ennå, eller forfatteren har pushet siden (🔁) — også etter
-                            «godkjent m/forslag»; autopilot tar re-review på dem
-                 reviewa    postet/stemt og ingenting nytt, og alt jeg har godkjent (✓ godkjent står her
-                            selv etter push; 🔁 + r for re-review manuelt)
+                 å reviewe  ikke reviewa ennå, eller forfatteren har pushet siden (🔁) etter ⏸/✗/bare
+                            kommentarer; autopilot tar re-review på dem
+                 reviewa    postet/stemt og ingenting nytt, og alt jeg har godkjent, m/forslag også (står
+                            her selv etter push; 🔁 + r for re-review manuelt)
                Default bare der jeg er reviewer; `a` / -a viser alle andres.
   Mine PRer    aktive PRer jeg har laget, draft også. Viser det som blokkerer:
                  konflikt · @navn ✗/⏸ (avvist / venter på endringer) · 💬 n aktive tråder
