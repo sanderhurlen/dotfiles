@@ -150,9 +150,13 @@ class Work:
 
     @property
     def next(self):
-        """A spec's next ready ticket (Work), like `wf next`: free, unblocked, ready-for-agent, first by id."""
-        return next((t for t in self.children if t.status == "ledig" and "ready-for-agent" in t.it.tags), None) \
-            if self.kind == "spec" else None
+        """The ticket (Work) a map's or spec's go starts, as that ticket's own agent (fleet-wi-<ticket>-go), so
+        two goes on a map don't share fleet-wi-<map>-go: a spec's next ready one, like `wf next` (free,
+        unblocked, ready-for-agent), a map's next free one; first by id."""
+        if self.kind not in ("map", "spec"):
+            return None
+        return next((t for t in self.children if t.status == "ledig"
+                     and (self.kind == "map" or "ready-for-agent" in t.it.tags)), None)
 
     @property
     def folds(self):
@@ -422,11 +426,22 @@ def agent_name(x, role=None):
     return f"{x.key}-{role}" if role else x.key
 
 
+def session_name(x, role=None):
+    """The name the session gets: agent_name, with the map/spec/Issue a ticket is under put in so
+    `claude agents` shows where it's from (fleet-wi-9761-9763-go). canon() takes it out again."""
+    name = agent_name(x, role)
+    p = getattr(x, "parent", None) if isinstance(x, Work) else None
+    return name.replace("fleet-wi-", f"fleet-wi-{p.id}-", 1) if p else name
+
+
 def canon(name):
     """A fleet session's name with its role: names from before roles get theirs
-    (fleet-fix-7012 → fleet-pr-7012-fix, fleet-pr-6966 → fleet-pr-6966-review, fleet-wi-9006 → …-go)."""
+    (fleet-fix-7012 → fleet-pr-7012-fix, fleet-pr-6966 → fleet-pr-6966-review, fleet-wi-9006 → …-go),
+    a ticket's loses the item it's under (fleet-wi-9761-9763-go → fleet-wi-9763-go)."""
     if m := re.fullmatch(r"fleet-fix-(\d+)", name):
         return f"fleet-pr-{m.group(1)}-fix"
+    if m := re.fullmatch(r"fleet-wi-\d+-(\d+-[a-z][a-z-]*)", name):
+        return f"fleet-wi-{m.group(1)}"
     m = NAME.fullmatch(name)
     return f"{name}-{LEGACY[m.group(1)]}" if m and not m.group(3) else name
 
@@ -984,7 +999,7 @@ def plan(x, prompt=None, role=None):
     else:
         cwd, wt = where_review(x)
         cwd = cwd or HOME
-    cmd = ["claude", SKIP, "--bg", "-n", agent_name(x, role)]
+    cmd = ["claude", SKIP, "--bg", "-n", session_name(x, role)]
     if wt:
         cmd += ["-w", wt]
     return cwd, cmd + [prompt]
@@ -999,7 +1014,7 @@ def launch(x, prompt=None, role=None):
         raise RuntimeError((r.stderr or r.stdout).strip().splitlines()[-1] if (r.stderr or r.stdout).strip()
                            else f"claude exited {r.returncode}")
     m = re.search(r"backgrounded · (\w+)", r.stdout)
-    return f"▶ {agent_name(x, role)} startet{f' ({m.group(1)})' if m else ''} i {short(cwd)}: {cmd[-1][:60]}" \
+    return f"▶ {session_name(x, role)} startet{f' ({m.group(1)})' if m else ''} i {short(cwd)}: {cmd[-1][:60]}" \
         + doing(x, role)
 
 
@@ -1050,7 +1065,7 @@ def starts(x):
                 ("test lokalt: bygg og kjør testene", x, "test",
                  f"Sjekk ut PR !{x.id} ({x.url}), kildebranch {x.source}, i et worktree. Bygg, kjør testene og "
                  f"det som berøres, og rapporter hva som feiler eller oppfører seg rart. Ikke post kommentarer.")]
-    own = x.next or x  # a spec's own start is its next ready ticket, run as that ticket's agent
+    own = x.next or x  # a map's/spec's own start is its next free ticket, run as that ticket's agent
     out = [(f"{own.prompt}  «{own.title[:40]}»" if own is not x
             else "oppsummer specen: gjort, kjører, blokkert" if x.skill == "status" else x.prompt, own, None, None)]
     out += [(f"fiks PR !{m.id}: {'; '.join(m.todo) or 'sjekk bygg og kommentarer'}", m, None, None) for m in x.prs]
@@ -1990,7 +2005,7 @@ def menu(x, pilot=None):
         *triage,
         ("s", f"endre status ({x.state})", lambda: status_menu(x), "sub"),
         ("i", "flytt sprint (nåværende / neste / forrige)", lambda: sprint_menu(x), "sub"),
-        ("g", f"start agent ({x.skill})", lambda: launch(x.next or x), False),
+        ("g", f"start agent ({(x.next or x).skill})", lambda: launch(x.next or x), False),
         *code_option(x),
         *pilot_options(pilot, x),
         ("o", "åpne i nettleser", lambda: subprocess.run(["open", x.url]) and "", False)])
@@ -3127,8 +3142,9 @@ GUIDE = """\
             Hvert valg er sin egen rolle (fleet-pr-<id>-explain, -test, -code-review, -desc, -ask; work
             item -summary, -tickets, -tdd, -diagnosing-bugs …), i radens mappe. Finnes den rollen, spør y/n først.
 
-{b}AGENTENE{r}  {d}navngitt fleet-<wi|pr>-<id>-<rolle>: alle agentene på en PR/et item vises på linja («▶ review  ⏸ fix 4d» — ikonet er tilstanden, ▶ spinner mens den jobber){r}
-  kart  → claude --bg -n fleet-wi-<id>-go "/wayfinder <id>"   i {home}; tomt kart (fra triage) → tegn kartet
+{b}AGENTENE{r}  {d}navngitt fleet-<wi|pr>-<id>-<rolle>, tickets med kartet/specen/issuet foran (fleet-wi-<kart>-<id>-go): alle agentene på en PR/et item vises på linja («▶ review  ⏸ fix 4d» — ikonet er tilstanden, ▶ spinner mens den jobber){r}
+  kart  → neste ledige ticket på ticketens egen agent (fleet-wi-<ticket>-go, prompt som kart-ticket under);
+          ingen ledige → claude --bg -n fleet-wi-<id>-go "/wayfinder <id>" i {home}; tomt kart (fra triage) → tegn kartet
   annet → claude --bg -n fleet-wi-<id>-go "/implement <id>"   i repoet commits/PRer på itemet
           (eller barna) peker til, i worktree fleet-<id> — ellers i {home}
   kart-ticket → "/wayfinder <kart> ticket <id>" i {home}; task-tickets → "/implement <id>"
