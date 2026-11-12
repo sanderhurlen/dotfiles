@@ -2043,7 +2043,7 @@ TONES = {"green": ((114, 2), None, ""), "red": ((203, 1), None, ""), "yellow": (
          **{f"H{i}": (c, None, "") for i, c in enumerate(_HUES)}}
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 ANIM, SEA_W, WAVES, GLINT = 3, 13, (24, 25, 31, 32, 38, 39, 45, 81), (231, 195, 159, 123, 117, 81)  # the title's sea and glint
-SECTION = {"work": "yellow", "review": "magenta", "mine": "green", "warn": "yellow", "orphan": "red", "clean": "dim"}
+SECTION = {"work": "yellow", "review": "magenta", "mine": "green", "warn": "yellow", "orphan": "red"}
 
 
 REPO_PREFIX = "visense-"  # every repo has it; the list shows the rest
@@ -2324,19 +2324,27 @@ def lines(snap, everyone, open_=(), done=False):
             out.append(([("⚠ ", "yellow"), (x.title[:70], None), (f"  {to}", "dim"),
                          ("  ", None), (f"{'portalen' if x.p['portal'] else ', '.join(x.repos)}",
                                         "cyan" if x.p["portal"] else hue(x.repos[0] if x.repos else ""))], x))
-    if snap.orphans:
+    def clean_row(c, lead=("🧹 ", None)):
+        where_ = f"{os.path.basename(c.tree.main)}/…/{os.path.basename(c.tree.path)}"
+        why = ", ".join(c.reasons) or "trygt å fjerne"
+        return [lead, (f"{'#' if c.items else '!'}{c.id:<5} ", "dim"), (c.title[:50], None),
+                (f"  ⎇ {where_}", "cyan"), (f"  — {why}", "yellow" if c.reasons else "dim")]
+
+    # one section: orphan agents with the worktree they work in right under them, then worktrees with no agent
+    paired = {o.sid: [c for c in snap.cleanup if o.cwd and inside(o.cwd, c.tree.path)] for o in snap.orphans}
+    taken = {id(c) for cs in paired.values() for c in cs}
+    rest = [c for c in snap.cleanup if id(c) not in taken]
+    if snap.orphans or rest:
         out.append(([], None))
-        out.append((section("orphan", "Foreldreløse agenter", len(snap.orphans), "elementet er borte fra lista"), None))
+        out.append((section("orphan", "Foreldreløst", len(snap.orphans) + len(rest),
+                            "agenter og worktrees der elementet er borte eller Done"), None))
         for o in snap.orphans:
             out.append((orphan_row(o), o))
-    if snap.cleanup:
-        out.append(([], None))
-        out.append((section("clean", "Opprydding", len(snap.cleanup), "worktrees for Done work items og borte PRer"), None))
-        for c in snap.cleanup:
-            where_ = f"{os.path.basename(c.tree.main)}/…/{os.path.basename(c.tree.path)}"
-            why = ", ".join(c.reasons) or "trygt å fjerne"
-            out.append(([("🧹 ", None), (f"{'#' if c.items else '!'}{c.id:<5} ", "dim"), (c.title[:50], None),
-                         (f"  ⎇ {where_}", "cyan"), (f"  — {why}", "yellow" if c.reasons else "dim")], c))
+            cs = paired[o.sid]
+            for n, c in enumerate(cs):
+                out.append((clean_row(c, ("  └ " if n == len(cs) - 1 else "  ├ ", "dim")), c))
+        for c in rest:
+            out.append((clean_row(c), c))
     return out
 
 
@@ -3077,7 +3085,8 @@ GUIDE = """\
   Foreldreløse fleet-agenter der work item/PR ikke lenger er i lista (Done, godkjent,
                completed, tatt bort). Ferdige agenter på en borte PR eller et Done work item
                fjernes av seg selv når transkriptet har stått urørt {grace} t (se OPPRYDDING);
-               resten manuelt: enter/m → x, eller `fleet prune`.
+               resten manuelt: enter/m → x, eller `fleet prune`. Står under «Foreldreløst»,
+               med worktreet agenten jobber i innrykket rett under.
 
 {b}KOMMANDOER{r}
 
@@ -3203,7 +3212,7 @@ GUIDE = """\
   står i veien; ellers blir de stående, uten å listes. Ny push → «ny runde» starter en fersk agent.
   Foreldreløse agenter som er ferdige (done/failed) fjernes også ({d}claude rm{r}) når PR-en er borte
   eller work itemet er Done, og transkriptet har stått urørt {grace} t. Kjørende og ⏸ røres ikke.
-  Det som står i veien listes under «Opprydding» med grunnen; enter/m → f rydd likevel.
+  Det som står i veien listes under «Foreldreløst» med grunnen; enter/m → f rydd likevel.
 
 {b}FOR CLAUDE{r}
   Lista skrives hvert {write}. sekund til
